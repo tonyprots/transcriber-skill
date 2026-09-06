@@ -1,0 +1,25 @@
+version: 1
+language: ru
+entries:
+  - canonical: Windows 11
+    aliases:
+      - виндовс одиннадцать
+      - виндоус одиннадцать
+    context: Название продукта; число в названии модели пишут словами
+    auto_apply: true
+    case_sensitive: false
+
+  - canonical: PostgreSQL
+    aliases:
+      - постгрес
+      - постгре сиквел
+    context: СУБД; «постгрес» бывает и разговорной формой, поэтому только на проверку
+    auto_apply: false
+    case_sensitive: false
+
+  - canonical: Ганс Циммер
+    aliases:
+      - ганс цимер
+    context: Имя композитора
+    auto_apply: false
+    case_sensitive: false

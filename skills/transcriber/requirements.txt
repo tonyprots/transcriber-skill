@@ -1,0 +1,3 @@
+onnx-asr[cpu,hub]>=0.12,<0.13
+faster-whisper>=1.2,<2
+PyYAML>=6,<7

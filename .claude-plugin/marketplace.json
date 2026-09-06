@@ -1,0 +1,20 @@
+{
+  "name": "tonyprots",
+  "owner": { "name": "Anton Protsenko", "url": "https://tonyprots.ru" },
+  "metadata": {
+    "description": "Скиллы Антона Проценко для Claude Code",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "transcriber",
+      "source": "./",
+      "description": "Локальная расшифровка аудио и видео с двумя независимыми ASR, диаризацией и словарём терминов (ru, en).",
+      "version": "0.6.0",
+      "author": { "name": "Anton Protsenko", "url": "https://tonyprots.ru" },
+      "license": "MIT",
+      "keywords": ["transcription", "asr", "whisper", "gigaam", "diarization", "russian"],
+      "category": "productivity"
+    }
+  ]
+}

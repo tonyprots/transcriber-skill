@@ -1,0 +1,11 @@
+{
+  "name": "transcriber",
+  "version": "0.6.0",
+  "description": "Локальная расшифровка аудио и видео: две независимые ASR (GigaAM v3 и Whisper Turbo), диаризация до 4 и от 5 голосов, словарь терминов и очередь спорных мест. Русский и английский, без внешних сервисов.",
+  "author": { "name": "Anton Protsenko", "url": "https://tonyprots.ru" },
+  "homepage": "https://github.com/tonyprots/transcriber-skill",
+  "repository": "https://github.com/tonyprots/transcriber-skill",
+  "license": "MIT",
+  "keywords": ["transcription", "asr", "whisper", "gigaam", "diarization", "russian", "local", "offline"],
+  "skills": "./skills"
+}

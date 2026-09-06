@@ -1,0 +1,28 @@
+# Окружение и кэши
+.venv/
+skills/*/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# Рабочие материалы воркспейса: не часть публикации
+drafts/
+.memory/
+experiments/*/runs/
+experiments/*/corpus/
+experiments/*/models/
+experiments/*/.venv/
+experiments/*/__pycache__/
+PROJECT.md
+
+# Мусор macOS и MLX
+.DS_Store
+transcript.txt
+:memory:.ses
+
+# Эксперименты с личными записями и локальными корпусами — не публикуются
+experiments/*
+!experiments/window-cost/
+!experiments/review-queue-eval/
+/scripts/
