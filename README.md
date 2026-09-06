@@ -43,51 +43,63 @@
 
 ## Установка
 
-Нужны Python 3.10+ и ffmpeg. Полный набор моделей работает на macOS Apple
-Silicon; на Linux и Intel Whisper идёт через faster-whisper на CPU, а
-диаризация недоступна.
+Нужны macOS или Linux, Python 3.10+ и ffmpeg. Полный набор моделей работает
+на macOS Apple Silicon; на Linux и Intel Whisper идёт через faster-whisper
+на CPU, а диаризация недоступна.
 
-Скилл работает только на той машине, где лежат модели. В облачных сессиях
-(Cowork, claude.ai) Hugging Face обычно закрыт сетевой политикой, и первый
-запуск падает с 403; агент из облака не может ни скачать модели, ни
-напечатать команду в ваш терминал. Установка — своими руками на своём
-компьютере, любым из способов ниже.
+**Одной командой** в терминале своего компьютера:
 
-**Claude Code, плагин из маркетплейса:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/tonyprots/transcriber-skill/main/install.sh | bash
+```
+
+Скрипт клонирует репозиторий в `~/.local/share/transcriber-skill`, подключает
+скилл симлинком в `~/.claude/skills` (и в `~/.codex/skills`, если есть
+Codex), на Mac с Homebrew сам ставит ffmpeg, создаёт `.venv` с пакетами
+(около 700 МБ) и скачивает модели русского маршрута (около 2,5 ГБ). Дальше в
+Claude Code или Codex достаточно попросить «расшифруй эту запись». Повторный
+запуск команды обновляет скилл. Переменные `TRANSCRIBER_MODELS=en|all|none`
+и `TRANSCRIBER_DIARIZE=1` меняют набор моделей, `TRANSCRIBER_HOME` — папку.
+
+Скрипт нужно запускать самому: агент из облачной сессии (Cowork, claude.ai)
+не может ни напечатать команду в ваш терминал, ни скачать модели, потому что
+Hugging Face там обычно закрыт сетевой политикой и первый запуск падает
+с 403. Скилл работает только на той машине, где лежат модели.
+
+**Другие способы** дают то же самое, но зависимости и модели ставятся
+отдельным шагом:
 
 ```text
 /plugin marketplace add tonyprots/transcriber-skill
 /plugin install transcriber@tonyprots
 ```
 
-**Любой агент через `npx skills`** (Claude Code, Codex, Cursor и другие):
-
 ```bash
 npx skills add tonyprots/transcriber-skill
 ```
-
-**Вручную**, копией или симлинком:
 
 ```bash
 git clone https://github.com/tonyprots/transcriber-skill
 ln -s "$PWD/transcriber-skill/skills/transcriber" ~/.claude/skills/transcriber
 ```
 
-Затем один раз поставить зависимости. Скрипт создаёт `.venv` рядом со
-скиллом, ставит пакеты (около 700 МБ) и заканчивается диагностикой:
+После любого из них агент при первой просьбе о расшифровке сам предложит
+поставить зависимости, а можно и вручную. `setup.sh` создаёт `.venv` рядом со
+скиллом и заканчивается диагностикой; флаг `--models` скачивает модели сразу,
+иначе они подтянутся при первом запуске:
 
 ```bash
-bash ~/.claude/skills/transcriber/scripts/setup.sh
+bash ~/.claude/skills/transcriber/scripts/setup.sh --models ru
 ```
 
-Модели загружаются с Hugging Face при первом запуске: для русского
-это GigaAM v3 (0,9 ГБ) и Whisper Turbo (1,5 ГБ). Скилл берёт свои
-варианты, `istupakov/gigaam-v3-onnx` и
-`mlx-community/whisper-large-v3-turbo-asr-fp16`, поэтому кэш mlx-whisper
-или PyTorch-версии GigaAM не переиспользуется. Другую MLX-модель Whisper
-можно подставить флагом `--whisper-model`. Для встреч с
+Модели живут в `~/.cache/huggingface`: для русского это GigaAM v3 (0,9 ГБ)
+и Whisper Turbo (1,5 ГБ), для английского ещё GigaAM Multilingual (0,2 ГБ),
+для диаризации Sortformer (0,2 ГБ). Скилл берёт свои варианты,
+`istupakov/gigaam-v3-onnx` и `mlx-community/whisper-large-v3-turbo-asr-fp16`,
+поэтому кэш mlx-whisper или PyTorch-версии GigaAM не переиспользуется. Другую
+MLX-модель Whisper можно подставить флагом `--whisper-model`. Для встреч с
 пятью и более участниками отдельно скачиваются CoreML-модели FluidAudio
-(34 МБ): `scripts/setup_fluidaudio_models.py`. Если что-то не работает,
+(34 МБ): `scripts/setup_fluidaudio_models.py`. Если что-то не работает,
 `scripts/doctor.py` показывает, чего не хватает.
 
 ## Использование

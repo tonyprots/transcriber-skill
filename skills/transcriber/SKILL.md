@@ -37,11 +37,13 @@ for candidate in "$SKILL_DIR/.venv" "$SKILL_DIR/../../.venv"; do
 done
 ```
 
-Если `ASR_PYTHON` не нашёлся, окружения ещё нет. Скажи пользователю, что установка займёт пару минут и около 1 ГБ (пакеты), и после его согласия выполни:
+Если `ASR_PYTHON` не нашёлся, окружения ещё нет. Скажи пользователю, что установка займёт несколько минут, около 1 ГБ на пакеты и 2,5 ГБ на модели, и после его согласия выполни:
 
 ```bash
-bash "$SKILL_DIR/scripts/setup.sh"      # создаёт $SKILL_DIR/.venv и ставит зависимости
+bash "$SKILL_DIR/scripts/setup.sh" --models ru   # .venv, зависимости и модели русского маршрута
 ```
+
+`--models en` или `--models all` берут модели для английского, `--diarize` добавляет Sortformer. Без `--models` модели подтянутся при первом запуске `transcribe.py`; скачать их отдельно можно через `"$ASR_PYTHON" "$SKILL_DIR/scripts/prefetch_models.py" ru`.
 
 Скрипт заканчивается проверкой `scripts/doctor.py`: Python, ffmpeg, пакеты, какие модели уже в кэше. Его же запускай, когда что-то не работает: `"$ASR_PYTHON" "$SKILL_DIR/scripts/doctor.py"`.
 
