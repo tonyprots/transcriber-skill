@@ -43,10 +43,12 @@ link() {
 link "$HOME/.claude/skills"
 if [ -d "$HOME/.codex" ]; then link "$HOME/.codex/skills"; fi
 
-SETUP_ARGS=()
-if [ "$MODELS" != "none" ]; then SETUP_ARGS+=(--models "$MODELS"); fi
-if [ -n "$DIARIZE" ]; then SETUP_ARGS+=(--diarize); fi
-bash "$SKILL/scripts/setup.sh" "${SETUP_ARGS[@]}"
+# macOS ships bash 3.2, where an empty array under set -u is an error: собираем строку.
+SETUP_ARGS=""
+if [ "$MODELS" != "none" ]; then SETUP_ARGS="--models $MODELS"; fi
+if [ -n "$DIARIZE" ]; then SETUP_ARGS="$SETUP_ARGS --diarize"; fi
+# shellcheck disable=SC2086
+bash "$SKILL/scripts/setup.sh" $SETUP_ARGS
 
 echo
 echo "Готово. В Claude Code или Codex достаточно попросить: «расшифруй эту запись»."
