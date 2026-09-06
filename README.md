@@ -47,7 +47,11 @@
 Silicon; на Linux и Intel Whisper идёт через faster-whisper на CPU, а
 диаризация недоступна.
 
-Подключить скилл можно любым из способов ниже.
+Скилл работает только на той машине, где лежат модели. В облачных сессиях
+(Cowork, claude.ai) Hugging Face обычно закрыт сетевой политикой, и первый
+запуск падает с 403; агент из облака не может ни скачать модели, ни
+напечатать команду в ваш терминал. Установка — своими руками на своём
+компьютере, любым из способов ниже.
 
 **Claude Code, плагин из маркетплейса:**
 
@@ -77,7 +81,11 @@ bash ~/.claude/skills/transcriber/scripts/setup.sh
 ```
 
 Модели загружаются с Hugging Face при первом запуске: для русского
-это GigaAM v3 (0,9 ГБ) и Whisper Turbo (1,5 ГБ). Для встреч с
+это GigaAM v3 (0,9 ГБ) и Whisper Turbo (1,5 ГБ). Скилл берёт свои
+варианты, `istupakov/gigaam-v3-onnx` и
+`mlx-community/whisper-large-v3-turbo-asr-fp16`, поэтому кэш mlx-whisper
+или PyTorch-версии GigaAM не переиспользуется. Другую MLX-модель Whisper
+можно подставить флагом `--whisper-model`. Для встреч с
 пятью и более участниками отдельно скачиваются CoreML-модели FluidAudio
 (34 МБ): `scripts/setup_fluidaudio_models.py`. Если что-то не работает,
 `scripts/doctor.py` показывает, чего не хватает.
