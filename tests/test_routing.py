@@ -20,6 +20,30 @@ def test_english_route_uses_independent_fast_verifier() -> None:
     assert route.verifier.quantization == "int8"
 
 
+def test_fast_mode_verifies_russian_with_the_light_model() -> None:
+    route = language_route("ru")
+    assert route.verifier_for("max") is route.verifier
+    light = route.verifier_for("fast")
+    assert light is not None
+    assert light.model == "alphacep/vosk-model-ru"
+    # Лёгкая проверяющая обязана быть другого семейства: две родственные
+    # модели независимой проверкой не являются.
+    assert light.family != route.primary.family
+
+
+def test_fast_mode_leaves_unmeasured_routes_without_verification() -> None:
+    # Лёгкую проверяющую ставим только там, где её измерили; молча подставлять
+    # русскую модель другому языку нельзя.
+    assert language_route("en").verifier_for("fast") is None
+    assert language_route("kk").verifier_for("fast") is None
+
+
+def test_route_reports_both_verifiers() -> None:
+    route = language_route("ru").to_dict()
+    assert route["verifier"]["model"].startswith("mlx-community/")
+    assert route["light_verifier"]["model"] == "alphacep/vosk-model-ru"
+
+
 def test_uncalibrated_language_is_whisper_only_with_warning() -> None:
     route = language_route("kk")
     assert route.primary.family == "whisper"

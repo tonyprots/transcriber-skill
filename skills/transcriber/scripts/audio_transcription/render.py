@@ -172,6 +172,7 @@ def write_bundle(
     timings: dict[str, float] | None = None,
     generator: str | None = None,
     fillers_removed: int = 0,
+    model_revisions: dict[str, str | None] | None = None,
 ) -> Path:
     output_dir = ensure_output_available(output_dir, overwrite=overwrite)
     staging = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}-", dir=output_dir.parent))
@@ -202,13 +203,18 @@ def write_bundle(
         if diarization is not None:
             files.append("speakers.json")
         manifest = {
-            "schema_version": 5,
+            "schema_version": 6,
             "generator": generator,
             "created_at": datetime.now().astimezone().isoformat(),
             "mode": mode,
             "offline": offline,
             "source": media.to_dict(),
             "models": [hypothesis.model for hypothesis in hypotheses],
+            # Имя модели не определяет веса: репозиторий на хабе могут
+            # перезалить, и тот же прогон даст другой текст. Ревизия из
+            # локального кэша — единственное, по чему потом видно, на чём
+            # именно получен этот результат.
+            "model_revisions": model_revisions or {},
             "language_route": route,
             "review_count": len(review_items),
             "automatic_correction_count": len(corrections),

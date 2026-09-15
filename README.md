@@ -14,7 +14,7 @@
 распознавания, а сам текст вдвое точнее, чем у Whisper в одиночку
 (см. [цифры](#зачем-это-нужно-в-цифрах)).
 
-Версия 0.6.0. Автор — [Антон Проценко](https://tonyprots.ru).
+Версия 0.8.1. Автор — [Антон Проценко](https://tonyprots.ru).
 
 ## Что внутри
 
@@ -22,7 +22,8 @@
 |---|---|---|
 | Сегментация | Silero VAD, окна до 20 с | то же |
 | Основная модель | GigaAM v3 E2E RNNT (onnx-asr) | Whisper large-v3-turbo (MLX) |
-| Независимая проверка | Whisper large-v3-turbo (MLX) | GigaAM Multilingual CTC int8 |
+| Независимая проверка (`max`) | Whisper large-v3-turbo (MLX) | GigaAM Multilingual CTC int8 |
+| Лёгкая проверка (`fast`) | Vosk ru (alphacep) | нет |
 | Диаризация, 1–4 голоса | MLX Sortformer | то же |
 | Диаризация, 5+ голосов | FluidAudio Offline Community-1 | то же |
 
@@ -30,7 +31,9 @@
 нет локальной калибровки.
 
 Режимы: `max` (по умолчанию: обе модели на каждом окне) и `fast` (одна
-модель, без очереди проверки). Все тяжёлые модели работают
+основная модель; на русском к ней добавлена лёгкая Vosk, которая собирает ту
+же очередь за 2 % длительности, на остальных языках очереди нет). Все
+тяжёлые модели работают
 в отдельных процессах под watchdog, гипотезы кэшируются по хешу исходника,
 пустые окна делятся пополам и распознаются заново, свободное место
 проверяется до начала работы.
@@ -56,7 +59,7 @@ curl -fsSL https://raw.githubusercontent.com/tonyprots/transcriber-skill/main/in
 Скрипт клонирует репозиторий в `~/.local/share/transcriber-skill`, подключает
 скилл симлинком в `~/.claude/skills` (и в `~/.codex/skills`, если есть
 Codex), на Mac с Homebrew сам ставит ffmpeg, создаёт `.venv` с пакетами
-(около 700 МБ) и скачивает модели русского маршрута (около 2,5 ГБ). Дальше в
+(около 1 ГБ) и скачивает модели русского маршрута (2,7 ГБ). Дальше в
 Claude Code или Codex достаточно попросить «расшифруй эту запись». Повторный
 запуск команды обновляет скилл. Переменные `TRANSCRIBER_MODELS=en|all|none`
 и `TRANSCRIBER_DIARIZE=1` меняют набор моделей, `TRANSCRIBER_HOME` — папку.
@@ -92,15 +95,18 @@ ln -s "$PWD/transcriber-skill/skills/transcriber" ~/.claude/skills/transcriber
 bash ~/.claude/skills/transcriber/scripts/setup.sh --models ru
 ```
 
-Модели живут в `~/.cache/huggingface`: для русского это GigaAM v3 (0,9 ГБ)
-и Whisper Turbo (1,5 ГБ), для английского ещё GigaAM Multilingual (0,2 ГБ),
-для диаризации Sortformer (0,2 ГБ). Скилл берёт свои варианты,
+Модели живут в `~/.cache/huggingface`: для русского это GigaAM v3 (0,9 ГБ),
+Whisper Turbo (1,5 ГБ) и Vosk ru (0,25 ГБ) для проверки в режиме `fast`, для
+английского ещё GigaAM Multilingual (0,2 ГБ), для диаризации Sortformer
+(0,2 ГБ). Размер маршрута считает
+`scripts/prefetch_models.py ru --print-size`. Скилл берёт свои варианты,
 `istupakov/gigaam-v3-onnx` и `mlx-community/whisper-large-v3-turbo-asr-fp16`,
 поэтому кэш mlx-whisper или PyTorch-версии GigaAM не переиспользуется. Другую
 MLX-модель Whisper можно подставить флагом `--whisper-model`. Для встреч с
 пятью и более участниками отдельно скачиваются CoreML-модели FluidAudio
-(34 МБ): `scripts/setup_fluidaudio_models.py`. Если что-то не работает,
-`scripts/doctor.py` показывает, чего не хватает.
+(35 МБ): `scripts/setup_fluidaudio_models.py`. Если что-то не работает,
+`scripts/doctor.py` показывает, чего не хватает: пакеты, модели, ревизии их
+весов и дату последнего замера качества.
 
 ## Использование
 
@@ -127,7 +133,7 @@ stderr, в stdout только JSON с путём результата.
 
 ## Замеры
 
-Apple M1, 16 ГБ, macOS 26.3, версия 0.6.0, 2026-09-06. Время — по
+Apple M1, 16 ГБ, macOS 26.3, замеры сделаны на версии 0.6.0, 2026-09-06. Время — по
 секундомеру, пока не появится готовый каталог; модели уже в кэше, кэш
 гипотез выключен.
 

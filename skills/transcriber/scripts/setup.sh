@@ -65,7 +65,10 @@ fi
 echo
 "$VENV/bin/python" "$SKILL_DIR/scripts/doctor.py"
 if [ -z "$MODELS" ]; then
+  # Размер спрашиваем у каталога моделей: вписанное руками число разъезжается
+  # с ним при первой же замене модели.
+  SIZE="$("$VENV/bin/python" "$SKILL_DIR/scripts/prefetch_models.py" ru --print-size 2>/dev/null || echo "около 3 ГБ")"
   echo
-  echo "Модели загрузятся при первом запуске transcribe.py (русский маршрут — около 2,5 ГБ)."
+  echo "Модели загрузятся при первом запуске transcribe.py (русский маршрут — $SIZE)."
   echo "Чтобы скачать заранее: bash scripts/setup.sh --models ru"
 fi

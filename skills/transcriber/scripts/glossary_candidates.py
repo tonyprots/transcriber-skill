@@ -5,14 +5,19 @@
         [--glossary СЛОВАРЬ.yaml] [--min-count N] [--output КАНДИДАТЫ.yaml]
 
 Берёт `segments.json` каждого каталога результата и смотрит на расхождения
-моделей. Кандидат — пара «услышала основная / услышала проверяющая», где
-проверяющая написала латиницей, а основная — кириллицей (так обычно
-выглядят названия продуктов и англицизмы), либо одно и то же кириллическое
-расхождение повторилось в нескольких окнах (по умолчанию от трёх). Уже известные записи словаря пропускаются.
+моделей. Кандидат — пара «услышала основная / услышала проверяющая», где одна
+сторона написала латиницей, а другая кириллицей (так обычно выглядят названия
+продуктов и англицизмы), либо одно и то же кириллическое расхождение
+повторилось в нескольких окнах (по умолчанию от трёх). Уже известные записи
+словаря пропускаются.
 
-Печатает YAML в формате словаря. Все записи выходят с `auto_apply: false`:
-включать замену можно только после прослушивания окна или подтверждения
-пользователя.
+Печатает YAML в формате словаря двумя частями. В `entries` — готовые записи:
+каноническое написание нашлось у той стороны, что написала латиницей. Ниже
+закомментированными строками — места, где термин виден, но правильного
+написания нет ни у одной модели; их называет пользователь.
+
+Все записи выходят с `auto_apply: false`: включать замену можно только после
+прослушивания окна или подтверждения пользователя.
 """
 from __future__ import annotations
 
@@ -41,6 +46,32 @@ def _original_case(normalized: str, text: str) -> str:
     return match.group(0) if match else normalized
 
 
+def _aligned_words(heard: str, verifier: str) -> list[tuple[str, str]]:
+    """Пары «слово против слова» из одного расхождения.
+
+    Расхождение приходит целым куском: «трец когда / threads» — два слова
+    против одного. Выравнивания в таком куске нет, и если взять его как есть,
+    алиасом станет «трец когда», то есть замена сработает только рядом с этим
+    соседом. Поэтому берём только куски одинаковой длины и режем их пословно.
+    """
+    left, right = heard.split(), verifier.split()
+    return list(zip(left, right)) if len(left) == len(right) else []
+
+
+def _term_shaped(heard: str, verifier: str) -> bool:
+    """Похоже ли расхождение на термин, а не на обычную ослышку.
+
+    Признак — латиница с одной стороны и кириллица с другой, причём в любом
+    порядке. Только у проверяющей латиницу искать мало: «Treds / трэдс» —
+    такой же термин, просто перевирают обе модели, каждая по-своему.
+    """
+    heard_latin = bool(_LATIN.search(heard)) and not _CYRILLIC.search(heard)
+    verifier_latin = bool(_LATIN.search(verifier)) and not _CYRILLIC.search(verifier)
+    return (verifier_latin and bool(_CYRILLIC.search(heard))) or (
+        heard_latin and bool(_CYRILLIC.search(verifier))
+    )
+
+
 def collect_candidates(
     segments_payloads: list[dict], known: set[str], min_count: int = 3
 ) -> list[dict]:
@@ -50,29 +81,42 @@ def collect_candidates(
             for pair in item.get("differing_tokens", []):
                 if " / " not in pair:
                     continue
-                heard, verifier = (part.strip() for part in pair.split(" / ", 1))
-                if not heard or not verifier:
+                left, right = (part.strip() for part in pair.split(" / ", 1))
+                if not left or not right:
                     continue
-                if heard in known or verifier in known:
-                    continue
-                if not (_LETTER.search(heard) and _LETTER.search(verifier)):
-                    continue
-                if re.sub(r"[\s-]", "", heard) == re.sub(r"[\s-]", "", verifier):
-                    continue
-                latin_side = bool(_LATIN.search(verifier)) and not _CYRILLIC.search(verifier)
-                key = (heard, verifier)
-                entry = seen.setdefault(
-                    key,
-                    {
-                        "heard": heard,
-                        "verifier": verifier,
-                        "canonical": _original_case(verifier, item.get("comparison_text", "")),
-                        "latin": latin_side and bool(_CYRILLIC.search(heard)),
-                        "count": 0,
-                        "first_at": float(item.get("start", 0.0)),
-                    },
-                )
-                entry["count"] += 1
+                for heard, verifier in _aligned_words(left, right):
+                    if heard in known or verifier in known:
+                        continue
+                    if not (_LETTER.search(heard) and _LETTER.search(verifier)):
+                        continue
+                    if re.sub(r"[\s-]", "", heard) == re.sub(r"[\s-]", "", verifier):
+                        continue
+                    term = _term_shaped(heard, verifier)
+                    verifier_latin = bool(_LATIN.search(verifier)) and not _CYRILLIC.search(
+                        verifier
+                    )
+                    key = (heard, verifier)
+                    entry = seen.setdefault(
+                        key,
+                        {
+                            "heard": heard,
+                            "verifier": verifier,
+                            # Каноническое написание берём у той стороны, что
+                            # написала латиницей. Если латиницу написала сама
+                            # основная модель, правильного написания нет ни у
+                            # кого — тогда это не готовая запись, а место,
+                            # которое должен назвать пользователь.
+                            "canonical": (
+                                _original_case(verifier, item.get("comparison_text", ""))
+                                if verifier_latin
+                                else ""
+                            ),
+                            "latin": term,
+                            "count": 0,
+                            "first_at": float(item.get("start", 0.0)),
+                        },
+                    )
+                    entry["count"] += 1
     result = []
     for entry in seen.values():
         if entry["latin"] or entry["count"] >= min_count:
@@ -82,16 +126,28 @@ def collect_candidates(
 
 
 def render_yaml(candidates: list[dict]) -> str:
+    # Готовая запись получается, только когда каноническое написание кто-то
+    # действительно произнёс правильно. Если обе модели перевирают термин,
+    # запись собрать не из чего — такие места идут отдельным списком, и их
+    # называет пользователь. Класть их в entries нельзя: пустой canonical
+    # роняет load_glossary.
+    ready = [entry for entry in candidates if entry["canonical"]]
+    unnamed = [entry for entry in candidates if not entry["canonical"]]
+
     lines = [
         "# Кандидаты из очереди проверки. Проверь каждый по аудио, лишнее удали,",
         "# у подтверждённых поставь auto_apply: true и перенеси в рабочий словарь.",
         "version: 1",
         "entries:",
     ]
-    if not candidates:
+    if not ready:
         lines.append("  []")
-    for entry in candidates:
-        why = "латиница у проверяющей модели" if entry["latin"] else f"повторилось в {entry['count']} окнах"
+    for entry in ready:
+        why = (
+            "латиница у проверяющей модели"
+            if entry["latin"]
+            else f"повторилось в {entry['count']} окнах"
+        )
         lines.extend(
             [
                 f"  - canonical: {json.dumps(entry['canonical'], ensure_ascii=False)}",
@@ -100,6 +156,23 @@ def render_yaml(candidates: list[dict]) -> str:
                 "    auto_apply: false",
             ]
         )
+
+    if unnamed:
+        lines += [
+            "",
+            "# Похоже на термины, но правильного написания нет ни у одной модели.",
+            "# Послушай окно, впиши каноническое написание и перенеси в entries:",
+        ]
+        for entry in unnamed:
+            lines.append(
+                f"#   - canonical: \"?\"   # основная: {entry['heard']}, "
+                f"проверяющая: {entry['verifier']}, окно {entry['first_at']:.1f} с"
+            )
+            lines.append(
+                f"#     aliases: [{json.dumps(entry['heard'], ensure_ascii=False)}, "
+                f"{json.dumps(entry['verifier'], ensure_ascii=False)}]"
+            )
+
     return "\n".join(lines) + "\n"
 
 
@@ -125,7 +198,14 @@ def main(argv: list[str] | None = None) -> int:
     text = render_yaml(collect_candidates(payloads, known, args.min_count))
     if args.output:
         args.output.write_text(text, encoding="utf-8")
-        print(f"Кандидатов записано: {text.count('- canonical:')} → {args.output}", file=sys.stderr)
+        # Закомментированные места тоже содержат «- canonical:», но записями
+        # ещё не являются — считаем их отдельно.
+        ready = sum(1 for line in text.splitlines() if line.startswith("  - canonical:"))
+        unnamed = sum(1 for line in text.splitlines() if line.startswith("#   - canonical:"))
+        print(
+            f"Готовых записей: {ready}; мест, которые надо назвать: {unnamed} → {args.output}",
+            file=sys.stderr,
+        )
     else:
         sys.stdout.write(text)
     return 0

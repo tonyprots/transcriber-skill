@@ -3,7 +3,8 @@
 #   curl -fsSL https://raw.githubusercontent.com/tonyprots/transcriber-skill/main/install.sh | bash
 # Что делает: клонирует или обновляет репозиторий в ~/.local/share/transcriber-skill,
 # подключает скилл симлинком в ~/.claude/skills и, если есть Codex, в ~/.codex/skills,
-# создаёт окружение (около 700 МБ) и скачивает модели русского маршрута (около 2,5 ГБ).
+# создаёт окружение (около 1 ГБ) и скачивает модели русского маршрута (2,7 ГБ).
+# Точный размер маршрута печатает scripts/prefetch_models.py --print-size.
 # Переменные: TRANSCRIBER_HOME — куда клонировать; TRANSCRIBER_MODELS=ru|en|all|none —
 # какие модели скачать сразу (по умолчанию ru); TRANSCRIBER_DIARIZE=1 — плюс Sortformer.
 set -euo pipefail

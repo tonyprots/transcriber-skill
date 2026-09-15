@@ -2,19 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .catalog import BackendSpec
+from .catalog import GIGAAM_MULTILINGUAL_FAST as _GIGAAM_MULTILINGUAL_FAST
+from .catalog import GIGAAM_RUSSIAN as _GIGAAM_RUSSIAN
+from .catalog import VOSK_RUSSIAN as _VOSK_RUSSIAN
+from .catalog import WHISPER_TURBO as _WHISPER_TURBO
 
-@dataclass(frozen=True)
-class BackendSpec:
-    family: str
-    model: str
-    quantization: str | None = None
-
-    def to_dict(self) -> dict[str, str | None]:
-        return {
-            "family": self.family,
-            "model": self.model,
-            "quantization": self.quantization,
-        }
+__all__ = [
+    "BackendSpec",
+    "LanguageRoute",
+    "diarization_backend",
+    "language_route",
+]
 
 
 @dataclass(frozen=True)
@@ -25,6 +24,13 @@ class LanguageRoute:
     verifier: BackendSpec | None
     locally_calibrated: bool
     warning: str | None = None
+    # Проверяющая для режима `fast`: дешёвая модель, которой хватает, чтобы
+    # собрать очередь, но не хватает, чтобы править текст. Есть не у всех
+    # маршрутов — только там, где её измерили.
+    light_verifier: BackendSpec | None = None
+
+    def verifier_for(self, mode: str) -> BackendSpec | None:
+        return self.verifier if mode == "max" else self.light_verifier
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -32,21 +38,18 @@ class LanguageRoute:
             "language": self.language,
             "primary": self.primary.to_dict(),
             "verifier": self.verifier.to_dict() if self.verifier else None,
+            "light_verifier": self.light_verifier.to_dict() if self.light_verifier else None,
             "locally_calibrated": self.locally_calibrated,
             "warning": self.warning,
         }
 
 
-WHISPER_TURBO = BackendSpec(
-    "whisper",
-    "mlx-community/whisper-large-v3-turbo-asr-fp16",
-)
-GIGAAM_RUSSIAN = BackendSpec("gigaam", "gigaam-v3-e2e-rnnt")
-GIGAAM_MULTILINGUAL_FAST = BackendSpec(
-    "gigaam",
-    "gigaam-multilingual-ctc",
-    "int8",
-)
+# Идентификаторы моделей живут в catalog.py вместе с датой калибровки —
+# здесь только сборка маршрутов из них.
+WHISPER_TURBO = _WHISPER_TURBO.spec
+GIGAAM_RUSSIAN = _GIGAAM_RUSSIAN.spec
+GIGAAM_MULTILINGUAL_FAST = _GIGAAM_MULTILINGUAL_FAST.spec
+VOSK_RUSSIAN = _VOSK_RUSSIAN.spec
 
 
 def normalize_language(language: str) -> str:
@@ -65,6 +68,7 @@ def language_route(language: str) -> LanguageRoute:
             GIGAAM_RUSSIAN,
             WHISPER_TURBO,
             True,
+            light_verifier=VOSK_RUSSIAN,
         )
     if normalized == "en":
         return LanguageRoute(

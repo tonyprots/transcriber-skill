@@ -3,11 +3,15 @@
 
 Запуск: <python из .venv> scripts/prefetch_models.py [ru|en|all] [--diarize]
 
-ru  — Silero VAD, GigaAM v3 E2E, Whisper Turbo (около 2,5 ГБ);
-en  — Silero VAD, Whisper Turbo, GigaAM Multilingual CTC int8 (около 1,8 ГБ);
-all — всё вместе. --diarize добавляет Sortformer (0,2 ГБ, только Apple Silicon).
+ru  — Silero VAD, GigaAM v3 E2E, Vosk ru, Whisper Turbo;
+en  — Silero VAD, Whisper Turbo, GigaAM Multilingual CTC int8;
+all — всё вместе. --diarize добавляет Sortformer (только Apple Silicon).
 На Linux и Intel вместо Whisper MLX скачивается faster-whisper medium.
 Повторный запуск ничего не качает: всё уже в ~/.cache/huggingface.
+
+Сколько это весит, печатает `--print-size ru|en|all`: размеры считаются по
+scripts/audio_transcription/catalog.py, чтобы число в подсказках установщика
+не разъезжалось с каталогом. Там же — какие именно это модели.
 """
 from __future__ import annotations
 
@@ -15,13 +19,31 @@ import argparse
 import platform
 import sys
 import time
+from pathlib import Path
 
-WHISPER_MLX = "mlx-community/whisper-large-v3-turbo-asr-fp16"
-SORTFORMER = "mlx-community/diar_sortformer_4spk-v1-fp16"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from audio_transcription.catalog import (  # noqa: E402
+    FASTER_WHISPER_FALLBACK,
+    GIGAAM_MULTILINGUAL_FAST,
+    GIGAAM_RUSSIAN,
+    SILERO_VAD,
+    SORTFORMER,
+    VOSK_RUSSIAN,
+    WHISPER_TURBO,
+    format_gb,
+    route_download_gb,
+)
 
 
 def _apple() -> bool:
     return platform.system() == "Darwin" and platform.machine() == "arm64"
+
+
+def _label(entry) -> str:
+    if entry.download_gb < 0.05:
+        return entry.label
+    return f"{entry.label} ({entry.download_gb:.1f} ГБ)".replace(".", ",")
 
 
 def _step(label: str, action) -> bool:
@@ -40,39 +62,48 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("route", nargs="?", choices=("ru", "en", "all"), default="ru")
     parser.add_argument("--diarize", action="store_true", help="добавить модель диаризации Sortformer")
+    parser.add_argument(
+        "--print-size",
+        action="store_true",
+        help="напечатать размер загрузки маршрута и выйти, ничего не качая",
+    )
     args = parser.parse_args(argv)
+
+    if args.print_size:
+        print(format_gb(route_download_gb(args.route, apple=_apple(), diarize=args.diarize)))
+        return 0
 
     import onnx_asr
 
+    def load_onnx(entry):
+        kwargs = {"providers": ["CPUExecutionProvider"]}
+        if entry.quantization:
+            kwargs["quantization"] = entry.quantization
+        return lambda: onnx_asr.load_model(entry.model, **kwargs)
+
     steps: list[tuple[str, object]] = [
-        ("Silero VAD", lambda: onnx_asr.load_vad("silero", providers=["CPUExecutionProvider"]))
+        (SILERO_VAD.label, lambda: onnx_asr.load_vad(SILERO_VAD.model, providers=["CPUExecutionProvider"]))
     ]
     if args.route in ("ru", "all"):
-        steps.append(
-            ("GigaAM v3 E2E (0,9 ГБ)", lambda: onnx_asr.load_model("gigaam-v3-e2e-rnnt", providers=["CPUExecutionProvider"]))
-        )
+        steps.append((_label(GIGAAM_RUSSIAN), load_onnx(GIGAAM_RUSSIAN)))
+        # Проверяющая для режима fast. Без неё fast работает, но молча:
+        # очередь проверки просто не соберётся.
+        steps.append((_label(VOSK_RUSSIAN), load_onnx(VOSK_RUSSIAN)))
     if _apple():
         from huggingface_hub import snapshot_download
 
-        steps.append(("Whisper Turbo MLX (1,5 ГБ)", lambda: snapshot_download(WHISPER_MLX)))
+        steps.append((_label(WHISPER_TURBO), lambda: snapshot_download(WHISPER_TURBO.repo)))
     else:
         from faster_whisper import download_model
 
-        steps.append(("faster-whisper medium (1,5 ГБ, CPU)", lambda: download_model("medium")))
+        steps.append((_label(FASTER_WHISPER_FALLBACK), lambda: download_model(FASTER_WHISPER_FALLBACK.model)))
     if args.route in ("en", "all"):
-        steps.append(
-            (
-                "GigaAM Multilingual CTC int8 (0,2 ГБ)",
-                lambda: onnx_asr.load_model(
-                    "gigaam-multilingual-ctc", quantization="int8", providers=["CPUExecutionProvider"]
-                ),
-            )
-        )
+        steps.append((_label(GIGAAM_MULTILINGUAL_FAST), load_onnx(GIGAAM_MULTILINGUAL_FAST)))
     if args.diarize:
         if _apple():
             from huggingface_hub import snapshot_download
 
-            steps.append(("Sortformer (0,2 ГБ)", lambda: snapshot_download(SORTFORMER)))
+            steps.append((_label(SORTFORMER), lambda: snapshot_download(SORTFORMER.repo)))
         else:
             print("Диаризация доступна только на macOS Apple Silicon: Sortformer пропущен", file=sys.stderr)
 

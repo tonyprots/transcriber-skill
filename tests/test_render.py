@@ -39,8 +39,34 @@ def test_write_bundle_creates_contract(tmp_path: Path) -> None:
         "review-needed.md",
     }
     assert {path.name for path in output.iterdir()} == expected
-    assert json.loads((output / "manifest.json").read_text())["schema_version"] == 5
+    manifest = json.loads((output / "manifest.json").read_text())
+    assert manifest["schema_version"] == 6
+    assert manifest["model_revisions"] == {}
     assert "Привет, мир!" in (output / "readable.md").read_text()
+
+
+def test_manifest_keeps_model_revisions(tmp_path: Path) -> None:
+    """Ревизия весов — часть аудит-следа: без неё «тот же прогон» непроверяем."""
+    source = tmp_path / "source.wav"
+    source.write_bytes(b"fixture")
+    media = MediaInfo(source, 1.0, "pcm_s16le", 16000, 1)
+    segments = [Segment(0, 1, "Текст")]
+    output = write_bundle(
+        tmp_path / "result",
+        media=media,
+        hypotheses=[Hypothesis("gigaam-v3-e2e-rnnt", "ru", 0.1, segments)],
+        lexical_segments=segments,
+        readable_segments=segments,
+        review_items=[],
+        corrections=[],
+        suggestions=[],
+        mode="max",
+        offline=True,
+        model_revisions={"gigaam-v3-e2e-rnnt": "322c3b294926", "silero": None},
+    )
+    manifest = json.loads((output / "manifest.json").read_text())
+    assert manifest["model_revisions"]["gigaam-v3-e2e-rnnt"] == "322c3b294926"
+    assert manifest["model_revisions"]["silero"] is None
 
 
 def test_write_bundle_accepts_precreated_empty_output(tmp_path: Path) -> None:

@@ -14,6 +14,13 @@ import yaml
 from . import __version__
 from .audio import MediaToolError, prepare_audio, split_speech_windows
 from .backends import BackendMissing, BackendUnavailable
+from .catalog import (
+    FASTER_WHISPER_FALLBACK,
+    SILERO_VAD,
+    SORTFORMER,
+    revisions_for_models,
+    staleness_warnings,
+)
 from .cache import (
     cache_key,
     load_diarization,
@@ -22,7 +29,12 @@ from .cache import (
     save_hypothesis,
 )
 from .diarization import split_chunks_by_diarization
-from .glossary import apply_glossary, load_glossary, suggest_glossary_matches
+from .glossary import (
+    GlossaryEntry,
+    apply_glossary,
+    load_glossary,
+    suggest_glossary_matches,
+)
 from .fillers import strip_filler_segments
 from .models import AudioChunk, Diarization, Hypothesis, ReviewItem
 from .packing import PackedWindow, build_packed_windows, unpack_hypothesis
@@ -37,11 +49,29 @@ def build_parser() -> argparse.ArgumentParser:
         prog="transcriber",
         description="Локальная расшифровка аудио с независимой сверкой гипотез.",
     )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"transcriber {__version__}",
+        help="Версия скилла — та же, что уходит в manifest.json",
+    )
     parser.add_argument("input", type=Path, help="Аудио- или видеофайл")
-    parser.add_argument("--mode", choices=("fast", "max"), default="max")
+    parser.add_argument(
+        "--mode",
+        choices=("fast", "max"),
+        default="max",
+        help=(
+            "max (по умолчанию) — обе модели маршрута на каждом окне; "
+            "fast — одна основная, на русском с лёгкой проверяющей"
+        ),
+    )
     parser.add_argument("--language", default="ru", help="Код языка, по умолчанию ru")
     parser.add_argument("--glossary", type=Path, help="YAML-словарь терминов")
-    parser.add_argument("--output", type=Path, help="Каталог результата")
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="Каталог результата; создаётся скриптом, непустой требует --overwrite",
+    )
     parser.add_argument(
         "--verifier-window-seconds",
         type=float,
@@ -58,17 +88,41 @@ def build_parser() -> argparse.ArgumentParser:
         help="auto выбирает MLX на Apple Silicon и CPU-fallback иначе",
     )
     parser.add_argument("--whisper-model", help="Переопределить модель Whisper")
-    parser.add_argument("--review-threshold", type=float, default=0.82)
-    parser.add_argument("--offline", action="store_true")
-    parser.add_argument("--overwrite", action="store_true")
-    parser.add_argument("--keep-wav", action="store_true")
+    parser.add_argument(
+        "--review-threshold",
+        type=float,
+        default=0.82,
+        help=(
+            "Сходство гипотез, ниже которого окно уходит в очередь проверки "
+            "(по умолчанию 0.82). Числа, имена и термины попадают туда в любом случае"
+        ),
+    )
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="Не ходить на Hugging Face: работать только на том, что уже в кэше",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Разрешить непустой каталог результата; прежний уезжает в архивный рядом",
+    )
+    parser.add_argument(
+        "--keep-wav",
+        action="store_true",
+        help="Оставить подготовленный prepared.wav в каталоге результата (плюс размер записи)",
+    )
     parser.add_argument(
         "--cache-dir",
         type=Path,
         default=Path.home() / ".cache" / "transcriber",
         help="Каталог кэша гипотез",
     )
-    parser.add_argument("--no-cache", action="store_true")
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Считать заново, не читая и не записывая кэш гипотез: для контрольного прогона",
+    )
     parser.add_argument(
         "--diarize",
         action="store_true",
@@ -76,7 +130,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--diarization-model",
-        default="mlx-community/diar_sortformer_4spk-v1-fp16",
+        default=SORTFORMER.model,
+        help="Модель диаризации Sortformer; FluidAudio выбирается отдельным флагом",
     )
     parser.add_argument(
         "--diarization-backend",
@@ -99,7 +154,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         help="Порог backend: по умолчанию 0.4 для Sortformer и 0.8 для FluidAudio",
     )
-    parser.add_argument("--diarization-chunk-seconds", type=float, default=30.0)
+    parser.add_argument(
+        "--diarization-chunk-seconds",
+        type=float,
+        default=30.0,
+        help="Длина куска, которым запись подаётся в диаризацию (по умолчанию 30)",
+    )
     parser.add_argument(
         "--quiet",
         action="store_true",
@@ -194,7 +254,8 @@ def run_whisper(
                 raise
             report.stage("Whisper Turbo MLX недоступен, переход на faster-whisper medium (CPU, медленнее)")
     # Переопределение модели относится к MLX-репозиторию; CTranslate2-модель у fallback своя.
-    faster_model = "medium" if args.whisper_backend == "auto" else (args.whisper_model or "medium")
+    fallback = FASTER_WHISPER_FALLBACK.model
+    faster_model = fallback if args.whisper_backend == "auto" else (args.whisper_model or fallback)
     return run_isolated_backend(
         "faster-whisper",
         chunks,
@@ -231,7 +292,10 @@ def run_route_backend(
             language,
             report,
         )
-    elif spec.family == "gigaam":
+    elif spec.family in {"gigaam", "onnx"}:
+        # Один и тот же воркер: GigaAM и Vosk обе поднимаются через onnx-asr,
+        # различает их только имя модели. Семейства разведены, чтобы в отчёте
+        # и в каталоге не называть Vosk гигаамом.
         hypothesis = run_isolated_backend(
             "gigaam",
             chunks,
@@ -243,12 +307,33 @@ def run_route_backend(
                 "offline": args.offline,
             },
             stall_timeout_seconds=args.backend_stall_timeout,
-            on_progress=report.windows(f"GigaAM {spec.model}"),
+            on_progress=report.windows(
+                f"GigaAM {spec.model}" if spec.family == "gigaam" else spec.model
+            ),
         )
     else:
         raise ValueError(f"Неизвестное семейство ASR: {spec.family}")
     hypothesis.metadata["role"] = role
     return hypothesis
+
+
+def canonicalized(hypothesis: Hypothesis, glossary: list[GlossaryEntry]) -> Hypothesis:
+    """Копия гипотезы с применёнными автозаменами — только для сверки.
+
+    В выдачу и в аудит-след идёт исходный текст модели: `hypotheses` остаётся
+    тем, что она сказала на самом деле. Здесь нужно другое — чтобы термин,
+    который словарь и так исправляет автоматически, не выглядел расхождением
+    моделей. На eval40 состав очереди от этого не меняется (замер 2026-09-12),
+    зато вторая версия перестаёт показывать заведомо чужое написание.
+    """
+    segments, _ = apply_glossary(hypothesis.segments, glossary)
+    return Hypothesis(
+        model=hypothesis.model,
+        language=hypothesis.language,
+        elapsed_seconds=hypothesis.elapsed_seconds,
+        segments=segments,
+        metadata=hypothesis.metadata,
+    )
 
 
 def verifier_failure_items(
@@ -360,6 +445,15 @@ def run(args: argparse.Namespace) -> Path:
         mark = timed("vad", mark)
         report.stage(f"Речевых окон: {len(base_chunks)}")
         warnings: list[str] = [route.warning] if route.warning else []
+        # Устаревание моделей проверяется на каждом прогоне: doctor.py после
+        # установки никто не запускает, и сигнал бы туда не дошёл.
+        verifier_spec = route.verifier_for(args.mode)
+        used_models = [route.primary.model] + ([verifier_spec.model] if verifier_spec else [])
+        if args.diarize:
+            used_models.append(args.diarization_model)
+        for text in staleness_warnings(used_models):
+            report.stage(f"Внимание: {text}")
+            warnings.append(text)
         if not base_chunks:
             warnings.append("Silero VAD не нашёл речи: результат пустой")
         diarization: Diarization | None = None
@@ -482,18 +576,26 @@ def run(args: argparse.Namespace) -> Path:
         hypotheses = [readable]
         review_items: list[ReviewItem] = primary_retry_items(readable)
 
-        if args.mode == "max" and route.verifier is not None:
+        # `fast` раньше шёл вообще без проверки, и пользователь не получал ни
+        # одного указания, где текст мог поехать. Русскому маршруту добавлена
+        # лёгкая проверяющая: Vosk даёт ту же очередь за 11 с против 234 с у
+        # Whisper (замер 2026-09-12, experiments/verifier-bakeoff/). Текст она
+        # не правит и не должна: подстановка её варианта на расхождении подняла
+        # WER с 5,9% до 10,7%.
+        if verifier_spec is not None:
             # Проверяются все окна: отбор «рискованных» убран 2026-09-06 —
             # он накрывал 78–90 % ошибок вместо 98–100 % и почти не экономил
             # время, потому что Whisper платит за упакованный пакет, а полный
             # набор окон пакуется плотнее выборки.
             verifier_chunks = chunks
             if verifier_chunks:
-                # Склейка окупается только у Whisper (платит за вызов) и требует
-                # пословных таймкодов, которых у GigaAM нет: её текст нечем
-                # разложить обратно по окнам.
+                # Склейка окупается только у Whisper: он доводит любой вход до
+                # 30 секунд и потому платит за вызов, а не за длину. GigaAM
+                # считает пропорционально длине, склеивать ей нечего.
+                # Таймкоды у GigaAM при этом есть (`with_timestamps()` отдаёт
+                # по-токенные, шаг 0,08 с) — просто здесь они не нужны.
                 pack_windows = (
-                    args.verifier_window_seconds > 0 and route.verifier.family == "whisper"
+                    args.verifier_window_seconds > 0 and verifier_spec.family == "whisper"
                 )
                 packed_windows = (
                     build_packed_windows(
@@ -521,10 +623,14 @@ def run(args: argparse.Namespace) -> Path:
                             "source_sha256": media.sha256,
                             "language": route.language,
                             "route": route.identifier,
-                            "spec": route.verifier.to_dict(),
+                            "spec": verifier_spec.to_dict(),
                             "whisper_backend": args.whisper_backend,
                             "whisper_model_override": args.whisper_model,
-                            "hotwords": hotwords,
+                            # Словаря в ключе нет намеренно: проверяющая его не
+                            # получает, поэтому пополнение словаря больше не
+                            # обесценивает кэш. Раньше один новый термин
+                            # пересчитывал всю проверку — на часовой встрече
+                            # тринадцать минут за каждую итерацию цикла.
                             "packing": [
                                 "packed-hypothesis",
                                 args.verifier_window_seconds if pack_windows else 0,
@@ -547,7 +653,7 @@ def run(args: argparse.Namespace) -> Path:
                     )
                     if packed_hypothesis is None:
                         report.stage(
-                            f"Независимая проверка: {route.verifier.model}, "
+                            f"Независимая проверка: {verifier_spec.model}, "
                             f"окон {len(verifier_chunks)}"
                             + (
                                 f"; упакованы в {len(packed_chunks)}"
@@ -557,9 +663,14 @@ def run(args: argparse.Namespace) -> Path:
                         )
                         packed_hypothesis = run_route_backend(
                             args,
-                            route.verifier,
+                            verifier_spec,
                             packed_chunks,
-                            hotwords,
+                            # Проверяющая идёт без словаря. `hotwords` — это
+                            # канонические формы уже известных словарю
+                            # терминов, поэтому незнакомому термину они не
+                            # помогают, а знакомый и так канонизируется
+                            # словарём при сверке, без пересчёта модели.
+                            [],
                             work_dir,
                             role="independent_verifier",
                             language=route.language,
@@ -576,8 +687,8 @@ def run(args: argparse.Namespace) -> Path:
                     hypotheses.append(verifier)
                     review_items.extend(
                         find_review_items(
-                            selected_primary,
-                            verifier,
+                            canonicalized(selected_primary, glossary),
+                            canonicalized(verifier, glossary),
                             threshold=args.review_threshold,
                             comparison_label=f"Независимый {verifier.model}",
                         )
@@ -604,7 +715,11 @@ def run(args: argparse.Namespace) -> Path:
             suggestions=suggestions,
             mode=args.mode,
             offline=args.offline,
-            route=route.to_dict(),
+            # Маршрут знает обе проверяющие, но запускалась одна. Без явного
+            # `verifier_used` манифест в режиме fast называл бы Whisper,
+            # который не работал.
+            route=route.to_dict()
+            | {"verifier_used": verifier_spec.to_dict() if verifier_spec else None},
             diarization=diarization,
             warnings=warnings,
             overwrite=args.overwrite,
@@ -612,6 +727,7 @@ def run(args: argparse.Namespace) -> Path:
             timings=timings,
             generator=f"transcriber {__version__}",
             fillers_removed=fillers_removed,
+            model_revisions=revisions_for_models([SILERO_VAD.model, *used_models]),
         )
         # Результат уже на диске. Уборка временных WAV идёт отдельной стадией,
         # потому что антивирус, проверяющий каждую файловую операцию,

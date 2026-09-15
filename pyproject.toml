@@ -4,7 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "transcriber"
-version = "0.6.0"
+# Одна точка правды — audio_transcription.__version__; сверяет
+# tests/test_docs_consistency.py.
+version = "0.8.1"
 description = "Локальная расшифровка аудио с независимой сверкой двух ASR и диаризацией"
 requires-python = ">=3.10"
 dynamic = ["dependencies", "optional-dependencies"]
@@ -16,7 +18,12 @@ optional-dependencies.dev = { file = ["requirements-dev.txt"] }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+# Сквозной прогон на живых моделях идёт минутами и требует скачанных весов,
+# поэтому по умолчанию он выключен: `pytest -m slow` запускает его отдельно.
+addopts = "-q -m 'not slow'"
+markers = [
+  "slow: сквозной прогон на настоящих моделях (нужны веса в кэше и Apple Silicon)",
+]
 
 [tool.setuptools]
 packages = []

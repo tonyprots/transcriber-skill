@@ -1,25 +1,136 @@
+# Пример словаря терминов. Скопируйте к себе и оставьте то, что встречается
+# в ваших записях: пустой словарь работает, выдуманные записи — нет.
+#
+# Все алиасы ниже — реальные ошибки распознавания из рабочих встреч и
+# голосовых, а не придуманные варианты написания. Свои собирайте так же:
+# после прогона запустите scripts/glossary_candidates.py, он достанет
+# кандидатов из расхождений двух моделей.
+#
+# auto_apply: true  — точная замена по границам слова, попадает в
+#                     glossary-audit.json.
+# auto_apply: false — замены не будет; запись фиксирует каноническое написание
+#                     и ловит близкие промахи в review-needed.md.
+#
+# case_sensitive: true нужен там, где важен регистр латиницы.
+#
+# Формы склонения заводятся отдельными записями: замена литеральная, и
+# «SMM-щика» из «SMM» само не получится.
+
 version: 1
 language: ru
 entries:
-  - canonical: Windows 11
-    aliases:
-      - виндовс одиннадцать
-      - виндоус одиннадцать
-    context: Название продукта; число в названии модели пишут словами
+
+  # --- Аббревиатуры: ASR слышит их по-русски ---------------------------------
+  - canonical: CFO
+    aliases: [сейфор, сифо]
+    context: Финансовый директор
     auto_apply: true
     case_sensitive: false
 
+  - canonical: M&A
+    aliases: [MNA, эмэнэй, эм энд эй]
+    context: Слияния и поглощения
+    auto_apply: true
+    case_sensitive: false
+
+  - canonical: SMM
+    aliases: [эсэмэм, СММ]
+    context: Social media marketing
+    auto_apply: true
+    case_sensitive: true
+
+  - canonical: SMM-щика
+    aliases: [эсэмэмщика, СММщика]
+    context: Специалист по SMM, родительный и винительный падежи
+    auto_apply: true
+    case_sensitive: false
+
+  - canonical: CRM-ка
+    aliases: [серемка, сиэремка]
+    context: Разговорное название CRM
+    auto_apply: true
+    case_sensitive: false
+
+  # --- Термины, которые ASR превращает в русские слова ------------------------
+  - canonical: due diligence
+    aliases: [дюдил, дьюдил, дью дилидженс]
+    context: Проверка перед сделкой
+    auto_apply: true
+    case_sensitive: false
+
+  - canonical: Enterprise
+    aliases: [Interprice, Interprise, Enterprice]
+    context: Сегмент продаж и часть названий продуктов
+    auto_apply: true
+    case_sensitive: false
+
+  - canonical: стратсессия
+    aliases: [страцессия, процессия, экстрасессия, эстросессия]
+    context: Стратегическая сессия; в рабочей встрече других кандидатов нет
+    auto_apply: true
+    case_sensitive: false
+
+  - canonical: стратсессии
+    aliases: [страцессии, страссии, процессии, просессии]
+    context: То же слово, косвенные падежи
+    auto_apply: true
+    case_sensitive: false
+
+  - canonical: финпланирование
+    aliases: [фимпланирование, финанпланирование, фин планирование]
+    context: Финансовое планирование
+    auto_apply: true
+    case_sensitive: false
+
+  - canonical: AI-шка
+    aliases: [яишка, яйшка]
+    context: Разговорное «ИИ-инструмент», именительный падеж
+    auto_apply: true
+    case_sensitive: false
+
+  - canonical: AI-шку
+    aliases: [яишку, яйшку]
+    context: То же слово, винительный падеж
+    auto_apply: true
+    case_sensitive: false
+
+  # --- Названия сервисов ------------------------------------------------------
+  - canonical: Claude Code
+    aliases: [клоуд-кода, клод-кода, клауд-кода]
+    context: Инструмент разработки
+    auto_apply: true
+    case_sensitive: false
+
+  - canonical: Claude
+    aliases: [Claud, Cloude]
+    context: Латинское написание модели, без хвоста «Code»
+    auto_apply: true
+    case_sensitive: true
+
+  # ВАЖНО: алиасом нельзя делать слово, у которого в этих же записях есть своё
+  # значение. Если в разговоре термин и обычное слово противопоставляются,
+  # автозамена уничтожит смысл фразы. Такие варианты оставляйте с
+  # auto_apply: false — они попадут в очередь проверки, не трогая текст.
+
+  # --- Записи без автозамены: канон зафиксирован, текст не меняется -----------
   - canonical: PostgreSQL
-    aliases:
-      - постгрес
-      - постгре сиквел
+    aliases: [постгрес, постгре сиквел]
     context: СУБД; «постгрес» бывает и разговорной формой, поэтому только на проверку
     auto_apply: false
     case_sensitive: false
 
-  - canonical: Ганс Циммер
-    aliases:
-      - ганс цимер
-    context: Имя композитора
+  - canonical: CIO
+    aliases: [СИО, сиайо]
+    context: >-
+      В одной и той же встрече «новый СИО» и «новый CFO» могут означать одного
+      человека. Пока не подтверждено — только сигнал в очередь.
+    auto_apply: false
+    case_sensitive: false
+
+  - canonical: Премиум
+    aliases: [прем, премы, према]
+    context: >-
+      Название тарифа. Автозамена сломает падежи, поэтому нужен подтверждённый
+      канон для каждой формы.
     auto_apply: false
     case_sensitive: false

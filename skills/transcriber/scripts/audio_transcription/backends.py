@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
+from .catalog import FASTER_WHISPER_FALLBACK, WHISPER_TURBO
 from .models import AudioChunk, Hypothesis, Segment
 from .retry import recognize_with_retry
 
@@ -190,7 +191,7 @@ class WhisperBackend:
 
     def __init__(
         self,
-        model_name: str = "medium",
+        model_name: str = FASTER_WHISPER_FALLBACK.model,
         *,
         offline: bool = False,
         beam_size: int = 5,
@@ -334,7 +335,7 @@ class MLXWhisperBackend:
 
     def __init__(
         self,
-        model_name: str = "mlx-community/whisper-large-v3-turbo-asr-fp16",
+        model_name: str = WHISPER_TURBO.model,
         *,
         offline: bool = False,
     ) -> None:

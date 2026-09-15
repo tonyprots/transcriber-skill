@@ -35,6 +35,29 @@ def test_repeated_cyrillic_disagreement_needs_two_windows_and_known_terms_are_sk
     assert [(c["heard"], c["count"]) for c in candidates] == [("ретро", 2)]
 
 
+def test_uneven_spans_do_not_widen_the_alias() -> None:
+    # «трец когда / threads» — два слова против одного: выравнивания нет.
+    # Раньше алиасом становилось «трец когда», и замена работала только
+    # рядом с этим соседом.
+    payload = {"review_items": [_item("трец когда", "threads")]}
+    assert collect_candidates([payload], known=set()) == []
+
+
+def test_latin_on_the_primary_side_is_a_place_to_name() -> None:
+    # Основная написала латиницей, проверяющая кириллицей: термин виден, но
+    # правильного написания нет ни у одной — готовой записи не собрать.
+    payload = {"review_items": [_item("treds", "трэдс")]}
+    candidates = collect_candidates([payload], known=set())
+    assert [c["heard"] for c in candidates] == ["treds"]
+    assert candidates[0]["canonical"] == ""
+    rendered = render_yaml(candidates)
+    assert "entries:\n  []" in rendered
+    assert "правильного написания нет ни у одной модели" in rendered
+    # Незаполненная запись не должна попадать в entries: пустой canonical
+    # роняет load_glossary.
+    assert yaml.safe_load(rendered)["entries"] == []
+
+
 def test_cli_writes_valid_glossary_yaml(tmp_path: Path) -> None:
     out_dir = tmp_path / "run"
     out_dir.mkdir()
