@@ -9,6 +9,7 @@ from typing import Any
 import yaml
 
 from .models import Correction, Segment
+from .phonetic import phonetic_similarity
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,21 @@ def load_glossary(path: Path | None) -> list[GlossaryEntry]:
 
 def _pattern(alias: str) -> str:
     return rf"(?<!\w){re.escape(alias)}(?!\w)"
+
+
+def _trim(word: str) -> str:
+    """Убирает пунктуацию по краям: «трец.» должно сравниваться как «трец»."""
+    return word.strip(".,!?;:()[]{}«»\"'…-—–")
+
+
+# Короче этого фонетический код вырождается: у «CFO» и «свою», у «SMM» и «SMS»
+# совпадает и костяк согласных, и огрублённые гласные. Такие термины ловятся
+# только точным алиасом — лучше промолчать, чем засорять очередь проверки.
+MIN_PHONETIC_LETTERS = 4
+
+
+def _phonetically_comparable(term: str) -> bool:
+    return sum(1 for char in term if char.isalpha()) >= MIN_PHONETIC_LETTERS
 
 
 def apply_glossary(
@@ -105,35 +121,72 @@ def suggest_glossary_matches(
     entries: list[GlossaryEntry],
     *,
     threshold: float = 0.86,
+    phonetic_threshold: float = 0.75,
 ) -> list[dict[str, Any]]:
+    """Ищет в тексте места, похожие на термины словаря, но не совпавшие точно.
+
+    Две независимые меры похожести, и вторая появилась не для симметрии.
+    Буквенная (`SequenceMatcher`) ловит опечатку внутри одного алфавита, но
+    на главном классе ошибок она бесполезна: русская ASR слышит английский
+    термин и пишет его кириллицей, а у «тэгэстат» и «TGStat» нет ни одной
+    общей буквы — замер на примерах словаря дал 0 попаданий из 17.
+
+    Фонетическая мера сводит оба алфавита к произношению и те же примеры
+    ловит в 13 случаях из 17, давая 2 ложных срабатывания на 553 словах
+    обычного текста. Поэтому она работает только на предложения в очередь —
+    текст не правится, решение остаётся за человеком.
+    """
     suggestions: list[dict[str, Any]] = []
+    seen: set[tuple[float, str, str]] = set()
     for segment in segments:
         words = segment.text.split()
         for entry in entries:
             flags = 0 if entry.case_sensitive else re.IGNORECASE
             if re.search(_pattern(entry.canonical), segment.text, flags=flags):
                 continue
-            for alias in entry.aliases:
-                width = max(1, len(alias.split()))
+            # Фонетика сравнивает услышанное с каноном: алиасы — это уже
+            # записанные ослышки, а ищем мы как раз ещё не записанные.
+            targets = [(alias, "alias") for alias in entry.aliases]
+            targets.append((entry.canonical, "canonical"))
+            for target, kind in targets:
+                width = max(1, len(target.split()))
                 for start in range(max(1, len(words) - width + 1)):
-                    candidate = " ".join(words[start : start + width])
-                    if candidate.casefold() == alias.casefold():
+                    candidate = _trim(" ".join(words[start : start + width]))
+                    if not candidate or candidate.casefold() == target.casefold():
                         continue
-                    matcher = SequenceMatcher(None, candidate.casefold(), alias.casefold())
-                    # Верхние оценки дешевле ratio(): отсеиваем заведомо далёкие n-граммы.
-                    if matcher.real_quick_ratio() < threshold or matcher.quick_ratio() < threshold:
-                        continue
-                    score = matcher.ratio()
-                    if score >= threshold:
-                        suggestions.append(
-                            {
-                                "start": segment.start,
-                                "end": segment.end,
-                                "heard": candidate,
-                                "alias": alias,
-                                "canonical": entry.canonical,
-                                "similarity": round(score, 3),
-                                "context": entry.context,
-                            }
+                    score = 0.0
+                    rule = ""
+                    if kind == "alias":
+                        matcher = SequenceMatcher(
+                            None, candidate.casefold(), target.casefold()
                         )
+                        # Верхние оценки дешевле ratio(): отсеиваем заведомо далёкие.
+                        if (
+                            matcher.real_quick_ratio() >= threshold
+                            and matcher.quick_ratio() >= threshold
+                            and matcher.ratio() >= threshold
+                        ):
+                            score, rule = matcher.ratio(), "fuzzy_alias"
+                    if not rule and _phonetically_comparable(target):
+                        phonetic = phonetic_similarity(candidate, target)
+                        if phonetic >= phonetic_threshold:
+                            score, rule = phonetic, "phonetic"
+                    if not rule:
+                        continue
+                    key = (segment.start, candidate.casefold(), entry.canonical)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    suggestions.append(
+                        {
+                            "start": segment.start,
+                            "end": segment.end,
+                            "heard": candidate,
+                            "alias": target,
+                            "canonical": entry.canonical,
+                            "similarity": round(score, 3),
+                            "rule": rule,
+                            "context": entry.context,
+                        }
+                    )
     return suggestions

@@ -31,6 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from audio_transcription.glossary import load_glossary  # noqa: E402
+from audio_transcription.phonetic import phonetic_similarity  # noqa: E402
 from audio_transcription.reconcile import normalize_text  # noqa: E402
 
 _LATIN = re.compile(r"[A-Za-z]")
@@ -122,7 +123,78 @@ def collect_candidates(
         if entry["latin"] or entry["count"] >= min_count:
             result.append(entry)
     result.sort(key=lambda e: (not e["latin"], -e["count"], e["first_at"]))
-    return result
+    return merge_by_sound(result)
+
+
+# Строже порога подсказок в очереди: там ошибка стоит одной лишней строки, а
+# здесь склейка двух разных терминов испортит готовую запись словаря.
+MERGE_THRESHOLD = 0.8
+
+
+def merge_by_sound(candidates: list[dict]) -> list[dict]:
+    """Собирает варианты одного термина в одну запись.
+
+    Одно и то же слово приходит несколькими расхождениями: «трэц / Threads»,
+    «treds / трэдс», «treds / трэдсе». Без склейки пользователь получает три
+    записи на один термин и должен сам догадаться, что это одно слово —
+    причём догадаться по написаниям, у которых нет общих букв.
+
+    Якорями становятся записи с уже известным каноническим написанием: к ним
+    притягиваются безымянные варианты, звучащие так же. Безымянные остатки
+    группируются между собой, но канон для них по-прежнему называет человек.
+    """
+    anchors = [entry for entry in candidates if entry["canonical"]]
+    rest = [entry for entry in candidates if not entry["canonical"]]
+    for entry in anchors:
+        entry.setdefault("aliases", [entry["heard"]])
+
+    leftovers: list[dict] = []
+    for entry in rest:
+        variants = [entry["heard"], entry["verifier"]]
+        anchor = next(
+            (
+                candidate
+                for candidate in anchors
+                if any(
+                    phonetic_similarity(variant, candidate["canonical"]) >= MERGE_THRESHOLD
+                    for variant in variants
+                )
+            ),
+            None,
+        )
+        if anchor is None:
+            leftovers.append(entry)
+            continue
+        for variant in variants:
+            if variant.casefold() != anchor["canonical"].casefold():
+                anchor.setdefault("aliases", []).append(variant)
+        anchor["count"] += entry["count"]
+
+    merged_rest: list[dict] = []
+    for entry in leftovers:
+        group = next(
+            (
+                candidate
+                for candidate in merged_rest
+                if phonetic_similarity(entry["heard"], candidate["heard"]) >= MERGE_THRESHOLD
+            ),
+            None,
+        )
+        if group is None:
+            entry.setdefault("aliases", [entry["heard"], entry["verifier"]])
+            merged_rest.append(entry)
+            continue
+        for variant in (entry["heard"], entry["verifier"]):
+            if variant not in group["aliases"]:
+                group["aliases"].append(variant)
+        group["count"] += entry["count"]
+
+    for entry in anchors + merged_rest:
+        seen_alias: dict[str, str] = {}
+        for alias in entry.get("aliases", []):
+            seen_alias.setdefault(alias.casefold(), alias)
+        entry["aliases"] = list(seen_alias.values())
+    return anchors + merged_rest
 
 
 def render_yaml(candidates: list[dict]) -> str:
@@ -148,10 +220,12 @@ def render_yaml(candidates: list[dict]) -> str:
             if entry["latin"]
             else f"повторилось в {entry['count']} окнах"
         )
+        aliases = entry.get("aliases") or [entry["heard"]]
+        rendered = ", ".join(json.dumps(alias, ensure_ascii=False) for alias in aliases)
         lines.extend(
             [
                 f"  - canonical: {json.dumps(entry['canonical'], ensure_ascii=False)}",
-                f"    aliases: [{json.dumps(entry['heard'], ensure_ascii=False)}]",
+                f"    aliases: [{rendered}]",
                 f"    context: {json.dumps(f'кандидат: {why}, первое окно {entry['first_at']:.1f} с', ensure_ascii=False)}",
                 "    auto_apply: false",
             ]
@@ -164,14 +238,13 @@ def render_yaml(candidates: list[dict]) -> str:
             "# Послушай окно, впиши каноническое написание и перенеси в entries:",
         ]
         for entry in unnamed:
+            aliases = entry.get("aliases") or [entry["heard"], entry["verifier"]]
+            rendered = ", ".join(json.dumps(alias, ensure_ascii=False) for alias in aliases)
             lines.append(
                 f"#   - canonical: \"?\"   # основная: {entry['heard']}, "
                 f"проверяющая: {entry['verifier']}, окно {entry['first_at']:.1f} с"
             )
-            lines.append(
-                f"#     aliases: [{json.dumps(entry['heard'], ensure_ascii=False)}, "
-                f"{json.dumps(entry['verifier'], ensure_ascii=False)}]"
-            )
+            lines.append(f"#     aliases: [{rendered}]")
 
     return "\n".join(lines) + "\n"
 

@@ -70,3 +70,44 @@ def test_cli_writes_valid_glossary_yaml(tmp_path: Path) -> None:
     assert entries[0]["canonical"] == "Figma"
     assert entries[0]["aliases"] == ["фигма"]
     assert entries[0]["auto_apply"] is False
+
+
+def test_variants_of_one_term_collapse_into_a_single_entry() -> None:
+    """«трэц», «treds», «трэдс» — одно слово, а не три кандидата.
+
+    Раньше пользователь получал запись «Threads» и рядом два безымянных
+    кандидата с «?» вместо канона — и должен был сам сообразить, что это тот
+    же термин, по написаниям без единой общей буквы.
+    """
+    payload = {
+        "review_items": [
+            _item("трэц", "Threads", 11.4),
+            _item("treds", "трэдс", 24.9),
+            _item("treds", "трэдсе", 41.6),
+        ]
+    }
+    candidates = collect_candidates([payload], known=set())
+    assert [c["canonical"] for c in candidates] == ["Threads"]
+    assert set(candidates[0]["aliases"]) == {"трэц", "treds", "трэдс", "трэдсе"}
+
+
+def test_different_terms_are_not_glued_together() -> None:
+    """Склейка идёт по звучанию, поэтому разные термины обязаны остаться врозь."""
+    payload = {
+        "review_items": [
+            _item("инстаграме", "instagram", 5.0),
+            _item("фейсбуке", "facebook", 6.0),
+        ]
+    }
+    candidates = collect_candidates([payload], known=set())
+    assert sorted(c["canonical"] for c in candidates) == ["facebook", "instagram"]
+
+
+def test_merged_aliases_reach_the_rendered_yaml() -> None:
+    payload = {
+        "review_items": [_item("трэц", "Threads", 11.4), _item("treds", "трэдс", 24.9)]
+    }
+    document = yaml.safe_load(render_yaml(collect_candidates([payload], known=set())))
+    (entry,) = document["entries"]
+    assert entry["canonical"] == "Threads"
+    assert "treds" in entry["aliases"] and "трэц" in entry["aliases"]

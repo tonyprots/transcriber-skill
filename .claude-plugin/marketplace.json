@@ -10,7 +10,7 @@
       "name": "transcriber",
       "source": "./",
       "description": "Локальная расшифровка аудио и видео с двумя независимыми ASR, диаризацией и словарём терминов (ru, en).",
-      "version": "0.8.1",
+      "version": "0.9.0",
       "author": { "name": "Anton Protsenko", "url": "https://tonyprots.ru" },
       "license": "MIT",
       "keywords": ["transcription", "asr", "whisper", "gigaam", "diarization", "russian"],
