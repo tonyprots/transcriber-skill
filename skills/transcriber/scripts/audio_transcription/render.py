@@ -75,10 +75,32 @@ def _vtt(segments: list[Segment]) -> str:
 
 
 def _review_markdown(
-    items: list[ReviewItem], suggestions: list[dict[str, Any]]
+    items: list[ReviewItem],
+    suggestions: list[dict[str, Any]],
+    learned: dict[str, Any] | None = None,
 ) -> str:
     lines = ["# Требует проверки", ""]
+    # Включившаяся замена — первое, что человек должен увидеть: дальше она
+    # будет молча применяться к каждой расшифровке, и «молча» здесь опаснее
+    # любого расхождения в очереди.
+    promoted = list((learned or {}).get("promoted", []))
+    if promoted:
+        lines.extend(
+            [
+                "## Скилл начал заменять",
+                "",
+                "Термины повторились в нескольких записях, и с этого прогона "
+                "скилл правит их сам. Если написание неверно — поправьте запись "
+                f"в {(learned or {}).get('path') or 'словаре скилла'}, ручная "
+                "правка сильнее автоматики.",
+                "",
+            ]
+        )
+        lines.extend(f"- {term}" for term in promoted)
+        lines.append("")
     if not items and not suggestions:
+        if promoted:
+            return "\n".join(lines).rstrip() + "\n"
         return "# Требует проверки\n\nРасхождений выше заданного порога не найдено.\n"
     for item in items:
         lines.extend(
@@ -100,6 +122,20 @@ def _review_markdown(
                 f"«{suggestion['heard']}» → «{suggestion['canonical']}» "
                 f"(сходство {float(suggestion['similarity']):.1%})"
             )
+    waiting = list((learned or {}).get("pending", []))
+    if waiting:
+        lines.extend(
+            [
+                "",
+                "## Правильное написание знает только человек",
+                "",
+                "Термин слышно, но правильно его не написала ни одна модель. "
+                "Скилл запомнил варианты и ждёт: назовите написание — и он "
+                "начнёт его держать.",
+                "",
+            ]
+        )
+        lines.extend(f"- {term}" for term in waiting)
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -162,6 +198,7 @@ def write_bundle(
     review_items: list[ReviewItem],
     corrections: list[Correction],
     suggestions: list[dict[str, Any]],
+    learned: dict[str, Any] | None = None,
     mode: str,
     offline: bool,
     route: dict[str, Any] | None = None,
@@ -248,12 +285,16 @@ def write_bundle(
             {
                 "corrections": [correction.to_dict() for correction in corrections],
                 "suggestions": suggestions,
+                # Что скилл дописал в свой словарь на этой записи: без этого
+                # блока автозамена, включившаяся сама, выглядела бы в отчёте
+                # правкой без причины.
+                "learned": learned,
             },
         )
         if diarization is not None:
             _write_json(staging / "speakers.json", diarization.to_dict())
         (staging / "review-needed.md").write_text(
-            _review_markdown(review_items, suggestions), encoding="utf-8"
+            _review_markdown(review_items, suggestions, learned), encoding="utf-8"
         )
         if prepared_audio is not None:
             shutil.copy2(prepared_audio, staging / "prepared.wav")

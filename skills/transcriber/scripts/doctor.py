@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from audio_transcription.catalog import (  # noqa: E402
     CALIBRATION_SHELF_LIFE_DAYS,
     CATALOG,
+    fluidaudio_binary_path,
     format_gb,
     hf_cache_dir,
     known_asr_names,
@@ -182,6 +183,8 @@ def collect(check_updates: bool = False) -> dict:
     apple = platform.system() == "Darwin" and platform.machine() == "arm64"
     skill_dir = Path(__file__).resolve().parents[1]
     models = check_catalog()
+    # Путь строкой, как ffmpeg/ffprobe рядом: отчёт уезжает в JSON, Path туда не сериализуется.
+    fluid_binary = fluidaudio_binary_path(skill_dir=skill_dir)
     report = {
         "python": sys.version.split()[0],
         "python_ok": sys.version_info >= (3, 10),
@@ -195,7 +198,7 @@ def collect(check_updates: bool = False) -> dict:
         "models_cached": {row["label"]: row["cached"] for row in models},
         "library_catalog": check_library_catalog(),
         "updates": check_hub_updates() if check_updates else {"checked": False, "findings": []},
-        "fluidaudio_binary": (skill_dir / "bin" / "macos-arm64" / "fluidaudiocli").is_file(),
+        "fluidaudio_binary": str(fluid_binary) if fluid_binary else None,
         "fluidaudio_models": (_fluid_models_dir() / "plda-parameters.json").is_file(),
         "free_gb": round(shutil.disk_usage(Path.home()).free / 1024**3, 1),
     }

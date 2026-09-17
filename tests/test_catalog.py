@@ -178,3 +178,52 @@ def test_every_entry_documents_its_origin() -> None:
         assert entry.upstream, entry.key
         assert entry.role, entry.key
         assert entry.calibrated or entry.calibration_note, entry.key
+
+
+def test_fluidaudio_binary_found_outside_skill_folder(tmp_path, monkeypatch) -> None:
+    """Бинарник ищется в env и PATH, а не только в папке скилла.
+
+    Раньше поиск был написан дважды, и doctor смотрел лишь в папку скилла:
+    у собравшего бинарник самостоятельно он печатал «✗» там, где диаризация
+    работала.
+    """
+    skill_dir = tmp_path / "skill"           # «скилл» без bin/
+    skill_dir.mkdir()
+    monkeypatch.delenv("TRANSCRIBER_FLUIDAUDIO_BIN", raising=False)
+    monkeypatch.setenv("PATH", "")
+    assert catalog.fluidaudio_binary_path(skill_dir=skill_dir) is None
+
+    elsewhere = tmp_path / "bin"
+    elsewhere.mkdir()
+    binary = elsewhere / "fluidaudiocli"
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    binary.chmod(0o755)
+
+    monkeypatch.setenv("PATH", str(elsewhere))
+    assert catalog.fluidaudio_binary_path(skill_dir=skill_dir) == binary.resolve()
+
+
+def test_fluidaudio_binary_priority(tmp_path, monkeypatch) -> None:
+    """Явный путь бьёт переменную, переменная — PATH, PATH — папку скилла."""
+    def executable(name: str) -> Path:
+        path = tmp_path / name
+        path.write_text("#!/bin/sh\n", encoding="utf-8")
+        path.chmod(0o755)
+        return path.resolve()
+
+    explicit, from_env = executable("explicit"), executable("from-env")
+    monkeypatch.setenv("TRANSCRIBER_FLUIDAUDIO_BIN", str(from_env))
+    monkeypatch.setenv("PATH", "")
+
+    assert catalog.fluidaudio_binary_path(explicit) == explicit
+    assert catalog.fluidaudio_binary_path() == from_env
+
+
+def test_fluidaudio_binary_ignores_non_executable(tmp_path, monkeypatch) -> None:
+    """Файл без флага исполнения — не бинарник: молча запускать его нельзя."""
+    monkeypatch.setenv("PATH", "")
+    plain = tmp_path / "fluidaudiocli"
+    plain.write_text("текст, а не программа", encoding="utf-8")
+    plain.chmod(0o644)
+    monkeypatch.setenv("TRANSCRIBER_FLUIDAUDIO_BIN", str(plain))
+    assert catalog.fluidaudio_binary_path(skill_dir=tmp_path / "skill") is None

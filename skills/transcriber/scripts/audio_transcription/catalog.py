@@ -12,7 +12,9 @@
 """
 from __future__ import annotations
 
+import os
 import re
+import shutil
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
@@ -294,6 +296,34 @@ def hf_cache_dir() -> Path:
         return Path(HF_HUB_CACHE)
     except Exception:  # noqa: BLE001 — huggingface_hub может быть не установлен
         return Path.home() / ".cache" / "huggingface" / "hub"
+
+
+def fluidaudio_binary_path(
+    explicit: str | Path | None = None,
+    skill_dir: Path | None = None,
+) -> Path | None:
+    """Где лежит fluidaudiocli, или None. Единственный порядок поиска на скилл.
+
+    Порядок: явный путь (`--fluidaudio-bin`) → `TRANSCRIBER_FLUIDAUDIO_BIN` →
+    `PATH` → папка внутри скилла. Раньше поиск был написан дважды — в
+    `diarization_worker` и в `doctor`, — и реализации разошлись: доктор смотрел
+    только в папку скилла и печатал «✗» там, где диаризация работала.
+    """
+    if skill_dir is None:
+        skill_dir = Path(__file__).resolve().parents[2]
+    candidates = [
+        explicit,
+        os.environ.get("TRANSCRIBER_FLUIDAUDIO_BIN"),
+        shutil.which("fluidaudiocli"),
+        skill_dir / "bin" / "macos-arm64" / "fluidaudiocli",
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = Path(candidate).expanduser().resolve()
+        if path.is_file() and os.access(path, os.X_OK):
+            return path
+    return None
 
 
 def local_revision(entry: ModelEntry, cache: Path | None = None) -> str | None:

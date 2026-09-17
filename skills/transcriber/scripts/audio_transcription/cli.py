@@ -33,13 +33,16 @@ from .glossary import (
     GlossaryEntry,
     apply_glossary,
     load_glossary,
+    merge_glossaries,
     suggest_glossary_matches,
 )
+from .glossary_store import entries_of, load_document, store_path, update_from_run
 from .fillers import strip_filler_segments
+from .mining import undisputed_words
 from .models import AudioChunk, Diarization, Hypothesis, ReviewItem
 from .packing import PackedWindow, build_packed_windows, unpack_hypothesis
 from .isolated import run_isolated_backend, run_isolated_diarization
-from .reconcile import find_review_items, segments_for_windows
+from .reconcile import find_review_items, normalize_text, segments_for_windows
 from .render import ensure_disk_space, ensure_output_available, write_bundle
 from .routing import BackendSpec, diarization_backend, language_route
 
@@ -66,7 +69,30 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--language", default="ru", help="Код языка, по умолчанию ru")
-    parser.add_argument("--glossary", type=Path, help="YAML-словарь терминов")
+    parser.add_argument(
+        "--glossary",
+        type=Path,
+        help="Свой YAML-словарь терминов: читается дополнительно к тому, что скилл ведёт сам",
+    )
+    parser.add_argument(
+        "--glossary-store",
+        type=Path,
+        help=(
+            "Где лежит словарь, который скилл ведёт сам "
+            "(по умолчанию ~/.transcriber/glossary.yaml, можно задать "
+            "переменной TRANSCRIBER_GLOSSARY_STORE)"
+        ),
+    )
+    parser.add_argument(
+        "--no-learn",
+        action="store_true",
+        help="Не пополнять свой словарь по итогам прогона (читать — по-прежнему)",
+    )
+    parser.add_argument(
+        "--no-glossary",
+        action="store_true",
+        help="Прогон вообще без словарей: ни читать, ни пополнять",
+    )
     parser.add_argument(
         "--output",
         type=Path,
@@ -528,8 +554,17 @@ def run(args: argparse.Namespace) -> Path:
                 )
         else:
             chunks = base_chunks
-        glossary = load_glossary(args.glossary)
-        hotwords = [entry.canonical for entry in glossary]
+        curated = [] if args.no_glossary else load_glossary(args.glossary)
+        learned_path = None if args.no_glossary else store_path(args.glossary_store)
+        glossary = merge_glossaries(
+            curated, [] if learned_path is None else entries_of(load_document(learned_path))
+        )
+        # Подсказки модели берём только из выверенного словаря пользователя.
+        # Свой словарь скилл пополняет после каждого прогона, и если пускать
+        # его сюда, ключ кэша менялся бы вместе с ним: обещание «повторный
+        # прогон за секунды» перестало бы работать ровно тогда, когда словарь
+        # растёт быстрее всего.
+        hotwords = [entry.canonical for entry in curated]
         chunk_signature = [
             [
                 chunk.sequence,
@@ -702,6 +737,34 @@ def run(args: argparse.Namespace) -> Path:
         timings["total"] = round(time.monotonic() - started_at, 2)
         review_items.sort(key=lambda item: (item.start, item.end, item.reason))
         readable_input, fillers_removed = strip_filler_segments(readable.segments)
+        learned_report = None
+        if learned_path is not None and not args.no_learn:
+            try:
+                learned_entries, learned_report = update_from_run(
+                    learned_path,
+                    [item.to_dict() for item in review_items],
+                    blocked=undisputed_words(readable_input, review_items),
+                    curated={
+                        normalize_text(term)
+                        for entry in curated
+                        for term in (entry.canonical, *entry.aliases)
+                    },
+                    # Отпечаток записи, а не запуска: перепрогон того же файла
+                    # не должен считаться вторым доказательством.
+                    source=media.sha256[:12],
+                )
+                # Порядок важен: словарь пополняется до применения, поэтому
+                # термин, добравший порог на этой записи, правит уже её текст,
+                # а не только следующую.
+                glossary = merge_glossaries(curated, learned_entries)
+            except OSError as error:
+                # Недоступный словарь не повод терять расшифровку: она уже
+                # посчитана, и без пополнения останется только следующий раз.
+                warnings.append(f"Словарь не пополнен: {error}")
+            else:
+                summary = learned_report.summary()
+                if summary:
+                    report.stage(summary)
         readable_segments, corrections = apply_glossary(readable_input, glossary)
         suggestions = suggest_glossary_matches(readable_segments, glossary)
         result = write_bundle(
@@ -713,6 +776,7 @@ def run(args: argparse.Namespace) -> Path:
             review_items=review_items,
             corrections=corrections,
             suggestions=suggestions,
+            learned=learned_report.to_dict() if learned_report else None,
             mode=args.mode,
             offline=args.offline,
             # Маршрут знает обе проверяющие, но запускалась одна. Без явного

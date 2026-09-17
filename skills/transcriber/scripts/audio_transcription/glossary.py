@@ -25,6 +25,16 @@ def load_glossary(path: Path | None) -> list[GlossaryEntry]:
     if path is None:
         return []
     payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return parse_entries(payload)
+
+
+def parse_entries(payload: Any) -> list[GlossaryEntry]:
+    """Разбор записей словаря отдельно от чтения файла.
+
+    Тем же разбором пользуется `glossary_store`: словарь, который скилл ведёт
+    сам, держит записи в том же формате, но живёт в документе с лишними
+    ключами (`pending`, `learned`) и уже разобранным YAML.
+    """
     raw_entries = payload.get("entries", []) if isinstance(payload, dict) else payload
     if not isinstance(raw_entries, list):
         raise ValueError("В словаре ожидается список entries")
@@ -47,6 +57,38 @@ def load_glossary(path: Path | None) -> list[GlossaryEntry]:
             )
         )
     return entries
+
+
+def merge_glossaries(
+    curated: list[GlossaryEntry], learned: list[GlossaryEntry]
+) -> list[GlossaryEntry]:
+    """Словарь пользователя поверх того, что скилл выучил сам.
+
+    Выученное не должно спорить с выверенным: если алиас или канон уже заняты
+    записью пользователя, из автоматической записи они вычёркиваются, а
+    оставшаяся без вариантов запись не попадает в работу вовсе. Иначе один
+    и тот же кусок текста претендовали бы исправить две записи, и победила
+    бы та, что оказалась длиннее.
+    """
+    taken = {entry.canonical.casefold() for entry in curated}
+    taken.update(alias.casefold() for entry in curated for alias in entry.aliases)
+    result = list(curated)
+    for entry in learned:
+        if entry.canonical.casefold() in taken:
+            continue
+        aliases = tuple(alias for alias in entry.aliases if alias.casefold() not in taken)
+        if not aliases:
+            continue
+        result.append(
+            GlossaryEntry(
+                canonical=entry.canonical,
+                aliases=aliases,
+                auto_apply=entry.auto_apply,
+                case_sensitive=entry.case_sensitive,
+                context=entry.context,
+            )
+        )
+    return result
 
 
 def _pattern(alias: str) -> str:

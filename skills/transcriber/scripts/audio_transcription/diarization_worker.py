@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -12,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .backends import BackendMissing, load_with_hub_fallback
+from .catalog import fluidaudio_binary_path
 from .diarization import partition_turns
 from .models import Diarization, SpeakerTurn
 from .exiting import exit_after_flush
@@ -36,22 +36,13 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _fluid_binary(config: dict[str, Any]) -> Path:
-    candidates = [
-        config.get("binary"),
-        os.environ.get("TRANSCRIBER_FLUIDAUDIO_BIN"),
-        shutil.which("fluidaudiocli"),
-        Path(__file__).resolve().parents[2] / "bin" / "macos-arm64" / "fluidaudiocli",
-    ]
-    for candidate in candidates:
-        if not candidate:
-            continue
-        path = Path(candidate).expanduser().resolve()
-        if path.is_file() and os.access(path, os.X_OK):
-            return path
-    raise FileNotFoundError(
-        "Не найден fluidaudiocli. Укажите --fluidaudio-bin или установите "
-        "бинарник в bin/macos-arm64/fluidaudiocli внутри скилла"
-    )
+    path = fluidaudio_binary_path(config.get("binary"))
+    if path is None:
+        raise FileNotFoundError(
+            "Не найден fluidaudiocli. Укажите --fluidaudio-bin или установите "
+            "бинарник в bin/macos-arm64/fluidaudiocli внутри скилла"
+        )
+    return path
 
 
 def _run_sortformer(
