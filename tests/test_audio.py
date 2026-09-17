@@ -57,3 +57,29 @@ def test_split_audio_chunk_preserves_absolute_timeline(tmp_path: Path) -> None:
     assert (right.start, right.end) == (14.0, 16.0)
     with wave.open(str(left.path), "rb") as part:
         assert part.getnframes() == 32_000
+
+
+def test_vad_load_respects_offline(monkeypatch, tmp_path: Path) -> None:
+    """VAD — первый поход в сеть за прогон, и он обязан слушаться `--offline`."""
+    import sys
+    from types import SimpleNamespace
+
+    seen: dict[str, str | None] = {}
+
+    def load_vad(name: str, **kwargs):
+        seen["offline"] = audio.os.environ.get("HF_HUB_OFFLINE")
+        raise RuntimeError("дальше загрузки тест не идёт")
+
+    monkeypatch.setitem(sys.modules, "onnx_asr", SimpleNamespace(load_vad=load_vad))
+    monkeypatch.setitem(
+        sys.modules,
+        "onnx_asr.utils",
+        SimpleNamespace(read_wav_files=lambda *a, **k: ([[0.0]], [1], audio.SAMPLE_RATE)),
+    )
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+
+    import pytest
+
+    with pytest.raises(Exception):
+        audio.split_speech_windows(tmp_path / "prepared.wav", tmp_path, offline=True)
+    assert seen["offline"] == "1"

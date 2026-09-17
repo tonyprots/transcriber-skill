@@ -88,3 +88,30 @@ def test_quiet_reporter_stays_silent() -> None:
     reporter.stage("Подготовка аудио")
     assert reporter.windows("GigaAM") is None
     assert stream.getvalue() == ""
+
+
+def test_waiting_reports_life_on_a_silent_stage() -> None:
+    """Долгий этап без прогресса обязан сам говорить, что он жив."""
+    import io
+    import time as _time
+
+    from audio_transcription.cli import ProgressReporter
+
+    stream = io.StringIO()
+    reporter = ProgressReporter(stream=stream)
+    with reporter.waiting("Нарезка окон", every_seconds=0.05):
+        _time.sleep(0.2)
+    lines = [line for line in stream.getvalue().splitlines() if "Нарезка окон" in line]
+    assert lines, "этап промолчал целиком"
+    assert "идёт" in lines[0]
+
+
+def test_waiting_stays_quiet_when_stage_is_quick() -> None:
+    import io
+
+    from audio_transcription.cli import ProgressReporter
+
+    stream = io.StringIO()
+    with ProgressReporter(stream=stream).waiting("Silero VAD", every_seconds=5.0):
+        pass
+    assert stream.getvalue() == ""

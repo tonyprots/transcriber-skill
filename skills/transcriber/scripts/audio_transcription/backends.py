@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 from importlib import import_module
 from collections.abc import Callable, Iterable
@@ -28,43 +29,93 @@ class BackendMissing(BackendUnavailable):
     """
 
 
-def force_hub_offline() -> None:
-    """Переводит huggingface_hub в офлайн для текущего процесса.
+def _set_hub_offline(offline: bool) -> None:
+    """Переключает huggingface_hub между офлайном и сетью в текущем процессе.
 
     Переменной окружения мало: константу huggingface_hub читает при импорте,
     а библиотеки моделей импортируют его раньше нас. Поэтому правим и её.
     """
-    os.environ["HF_HUB_OFFLINE"] = "1"
-    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    value = "1" if offline else "0"
+    os.environ["HF_HUB_OFFLINE"] = value
+    os.environ["TRANSFORMERS_OFFLINE"] = value
     try:
         constants = import_module("huggingface_hub.constants")
-        constants.HF_HUB_OFFLINE = True
+        constants.HF_HUB_OFFLINE = offline
     except ImportError:
         pass
 
 
-def load_with_hub_fallback(load: Callable[[], Any], *, offline: bool, label: str) -> Any:
+def force_hub_offline() -> None:
+    """Переводит huggingface_hub в офлайн для текущего процесса."""
+    _set_hub_offline(True)
+
+
+HUB_STALL_SECONDS = 45.0
+
+
+def load_with_hub_fallback(
+    load: Callable[[], Any],
+    *,
+    offline: bool,
+    label: str,
+    stall_seconds: float = HUB_STALL_SECONDS,
+) -> Any:
     """Грузит модель; если Hub не отвечает, а веса уже в кэше — повторяет офлайн.
 
     Бенчмарк 2026-09-06: Sortformer упал с «Server disconnected without
     sending a response» при полностью скачанной модели — библиотека сходила
     на Hub проверить обновления и не дождалась ответа. Без сети должна
     работать любая модель, которая уже была загружена.
+
+    Ошибки мало: 2026-09-17 прогон встал на загрузке VAD и простоял так,
+    пока его не убили руками. Молчащая сеть исключения не даёт, а таймаут
+    huggingface_hub (10 с) — на один запрос: с пятью ретраями и backoff на
+    каждый файл ожидание растягивается на минуты. Поэтому онлайн-попытке
+    даётся общий срок, и по нему мы уходим в кэш.
+
+    Срок — не ограничение сверху: если кэша нет (первая установка качает
+    гигабайты), офлайн-попытка провалится, и мы возвращаемся ждать онлайн
+    столько, сколько нужно. Срывать закачку модели из-за медленной сети
+    нельзя — иначе скилл не установится ни разу.
     """
     if offline:
         force_hub_offline()
         return load()
+
+    box: dict[str, Any] = {}
+
+    def attempt() -> None:
+        try:
+            box["value"] = load()
+        except Exception as error:  # ошибки сети у библиотек разные
+            box["error"] = error
+
+    worker = threading.Thread(target=attempt, name=f"hub-load:{label}", daemon=True)
+    worker.start()
+    worker.join(stall_seconds)
+    if "value" in box:
+        return box["value"]
+
+    online_error: Exception | None = box.get("error")
+    if online_error is None and worker.is_alive():
+        online_error = TimeoutError(f"Hub не ответил за {stall_seconds:.0f} с")
+    force_hub_offline()
     try:
         return load()
-    except Exception as online_error:  # ошибки сети у библиотек разные
-        force_hub_offline()
-        try:
-            return load()
-        except Exception as offline_error:
-            raise BackendUnavailable(
-                f"{label}: не удалось загрузить модель ни с Hub, ни из локального кэша. "
-                f"Hub: {online_error}. Кэш: {offline_error}"
-            ) from offline_error
+    except Exception as offline_error:
+        if worker.is_alive():
+            # Кэша нет: срок истёк на настоящей закачке, а не на зависании.
+            # Возвращаем онлайн — иначе поток упадёт на следующем файле —
+            # и дожидаемся его.
+            _set_hub_offline(False)
+            worker.join()
+            if "value" in box:
+                return box["value"]
+            online_error = box.get("error", online_error)
+        raise BackendUnavailable(
+            f"{label}: не удалось загрузить модель ни с Hub, ни из локального кэша. "
+            f"Hub: {online_error}. Кэш: {offline_error}"
+        ) from offline_error
 
 
 def _value(item: Any, name: str, default: Any = None) -> Any:

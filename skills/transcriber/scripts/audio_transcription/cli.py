@@ -5,7 +5,10 @@ import json
 import platform
 import sys
 import tempfile
+import threading
 import time
+from contextlib import contextmanager
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Callable
 
@@ -224,6 +227,33 @@ class ProgressReporter:
 
     def stage(self, text: str) -> None:
         self._emit(text)
+
+    @contextmanager
+    def waiting(self, label: str, *, every_seconds: float = 60.0) -> Iterator[None]:
+        """Признак жизни на этапе, у которого нет прогресса по окнам.
+
+        Загрузка модели и нарезка окон по говорящим идут единым куском:
+        на 42-минутной встрече нарезка молчит 7–8 минут. Такая тишина
+        неотличима от зависания — 2026-09-17 её разбирали через `ps`, хотя
+        прогон был жив. Теперь этап сам говорит, сколько уже идёт.
+        """
+        if not self.enabled:
+            yield
+            return
+        done = threading.Event()
+        started = time.monotonic()
+
+        def tick() -> None:
+            while not done.wait(every_seconds):
+                self._emit(f"{label}: идёт {time.monotonic() - started:.0f} с")
+
+        watcher = threading.Thread(target=tick, name=f"waiting:{label}", daemon=True)
+        watcher.start()
+        try:
+            yield
+        finally:
+            done.set()
+            watcher.join(timeout=1.0)
 
     def windows(self, label: str) -> Callable[[dict[str, Any]], None] | None:
         """Колбэк прогресса по окнам: первое, последнее и не чаще интервала."""
@@ -467,7 +497,14 @@ def run(args: argparse.Namespace) -> Path:
         )
         ensure_disk_space(work_dir, media.duration_seconds)
         report.stage(f"Длительность {duration}, режим {args.mode}; ищу речевые окна")
-        base_chunks = split_speech_windows(prepared, work_dir, pack=not args.diarize)
+        # Загрузку модели называем отдельной строкой: без неё тишина в логе на
+        # неотвечающем Hub неотличима от долгой работы, и 2026-09-17 причину
+        # зависания пришлось искать через `ps`.
+        report.stage("Silero VAD: загрузка")
+        with report.waiting("Silero VAD"):
+            base_chunks = split_speech_windows(
+                prepared, work_dir, pack=not args.diarize, offline=args.offline
+            )
         mark = timed("vad", mark)
         report.stage(f"Речевых окон: {len(base_chunks)}")
         warnings: list[str] = [route.warning] if route.warning else []
@@ -529,12 +566,16 @@ def run(args: argparse.Namespace) -> Path:
                 )
                 if not args.no_cache:
                     save_diarization(args.cache_dir, diarization_key, diarization)
-            chunks = split_chunks_by_diarization(
-                prepared,
-                base_chunks,
-                diarization.turns,
-                work_dir,
-            )
+            # Нарезка режет каждое окно по границам реплик и пишет их на диск:
+            # на 42-минутной встрече это 7–8 минут без единой строки в логе.
+            report.stage(f"Нарезка окон по говорящим: {len(base_chunks)}")
+            with report.waiting("Нарезка окон"):
+                chunks = split_chunks_by_diarization(
+                    prepared,
+                    base_chunks,
+                    diarization.turns,
+                    work_dir,
+                )
             mark = timed("diarization", mark)
             if not diarization.speakers and base_chunks:
                 warnings.append(

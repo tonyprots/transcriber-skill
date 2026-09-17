@@ -60,3 +60,47 @@ def test_hub_fallback_reports_both_failures(monkeypatch) -> None:
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
     with pytest.raises(backends.BackendUnavailable, match="ни с Hub, ни из локального кэша"):
         backends.load_with_hub_fallback(load, offline=False, label="x")
+
+
+def test_hub_fallback_does_not_wait_for_silent_hub(monkeypatch) -> None:
+    """Молчащая сеть исключения не даёт: срок ожидания и уводит нас в кэш."""
+    import threading
+    import time
+
+    release = threading.Event()
+
+    def load():
+        if backends.os.environ.get("HF_HUB_OFFLINE") == "1":
+            return "model-from-cache"
+        release.wait(30)  # Hub не отвечает и не отказывает
+        return "model-from-hub"
+
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    started = time.monotonic()
+    result = backends.load_with_hub_fallback(
+        load, offline=False, label="x", stall_seconds=0.2
+    )
+    release.set()
+    assert result == "model-from-cache"
+    assert time.monotonic() - started < 5
+
+
+def test_hub_fallback_waits_out_a_real_download(monkeypatch) -> None:
+    """Первая установка качает гигабайты: срок не должен её срывать."""
+    import threading
+
+    downloaded = threading.Event()
+
+    def load():
+        if backends.os.environ.get("HF_HUB_OFFLINE") == "1":
+            raise FileNotFoundError("кэша ещё нет")
+        downloaded.wait(30)
+        return "model-from-hub"
+
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    threading.Timer(0.3, downloaded.set).start()
+    result = backends.load_with_hub_fallback(
+        load, offline=False, label="x", stall_seconds=0.1
+    )
+    assert result == "model-from-hub"
+    assert backends.os.environ.get("HF_HUB_OFFLINE") == "0"

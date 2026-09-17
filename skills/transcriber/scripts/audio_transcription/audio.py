@@ -186,8 +186,17 @@ def split_speech_windows(
     max_seconds: float = 20.0,
     pad_seconds: float = 0.2,
     pack: bool = True,
+    offline: bool = False,
 ) -> list[AudioChunk]:
-    """Один раз применяет Silero VAD и создаёт одинаковые окна для всех моделей."""
+    """Один раз применяет Silero VAD и создаёт одинаковые окна для всех моделей.
+
+    VAD — первый поход в сеть за весь прогон, и раньше единственный, который
+    шёл мимо `load_with_hub_fallback`: 2026-09-17 прогон встал здесь на
+    неотвечающем Hub при полном кэше, а `--offline` до этого места не доходил
+    вовсе. Теперь загрузка живёт по общим правилам.
+    """
+    from .backends import load_with_hub_fallback  # backends зависит от audio через retry
+
     try:
         import onnx_asr
         from onnx_asr.utils import read_wav_files
@@ -197,7 +206,11 @@ def split_speech_windows(
     waveforms, lengths, sample_rate = read_wav_files(str(prepared), SAMPLE_RATE, "mean")
     if sample_rate != SAMPLE_RATE:
         raise MediaToolError(f"Ожидалось {SAMPLE_RATE} Hz, получено {sample_rate} Hz")
-    vad = onnx_asr.load_vad("silero", providers=["CPUExecutionProvider"])
+    vad = load_with_hub_fallback(
+        lambda: onnx_asr.load_vad("silero", providers=["CPUExecutionProvider"]),
+        offline=offline,
+        label="Silero VAD",
+    )
     raw_spans = list(
         next(
             vad.segment_batch(
