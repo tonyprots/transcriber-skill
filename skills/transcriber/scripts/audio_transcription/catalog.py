@@ -151,15 +151,54 @@ GIGAAM_RUSSIAN = ModelEntry(
 GIGAAM_MULTILINGUAL_FAST = ModelEntry(
     key="gigaam-multilingual",
     label="GigaAM Multilingual CTC int8",
-    role="независимая проверка для английского",
+    role="в маршрутах не участвует с 2026-09-20",
     family="gigaam",
     model="gigaam-multilingual-ctc",
     quantization="int8",
     repo="istupakov/gigaam-multilingual-ctc-onnx",
     download_gb=0.2,
     upstream="GigaAM Multilingual — Сбер (SberDevices); ONNX-конвертация Ильи Ступакова",
-    calibrated=LAST_CALIBRATION,
-    calibration_note="WER 44,6% на 14 английских репликах MINDS-14, роль — быстрый второй сигнал",
+    calibrated=date(2026, 9, 20),
+    calibration_note=(
+        "WER 29,2% на английском bake-off против 18,5% у основной: проверка, "
+        "которая ошибается в полтора раза чаще проверяемого, отправляла в "
+        "очередь 98% окон — заменена на Canary"
+    ),
+)
+
+PARAKEET_ENGLISH = ModelEntry(
+    key="parakeet-en",
+    label="Parakeet TDT 0.6B v3",
+    role="независимая проверка для английского",
+    family="onnx",
+    model="nemo-parakeet-tdt-0.6b-v3",
+    repo="istupakov/parakeet-tdt-0.6b-v3-onnx",
+    download_gb=2.4,
+    upstream="Parakeet TDT 0.6B v3 — NVIDIA NeMo; ONNX-конвертация Ильи Ступакова (istupakov)",
+    calibrated=date(2026, 9, 20),
+    calibration_note=(
+        "WER 18,2% на английском bake-off против 18,5% у основной — вровень; "
+        "трансдьюсер против attention encoder-decoder у Whisper, поэтому "
+        "ошибки независимы"
+    ),
+)
+
+CANARY_ENGLISH = ModelEntry(
+    key="canary-en",
+    label="Canary 1B v2",
+    role="взвешен как проверяющая 2026-09-20, не выбран",
+    family="onnx",
+    model="nemo-canary-1b-v2",
+    repo="istupakov/canary-1b-v2-onnx",
+    download_gb=3.7,
+    upstream="Canary 1B v2 — NVIDIA NeMo; ONNX-конвертация Ильи Ступакова (istupakov)",
+    calibrated=date(2026, 9, 20),
+    calibration_note=(
+        "WER 20,5% на английском bake-off — хуже Parakeet на 29 ошибок, вчетверо "
+        "медленнее и той же архитектуры AED, что у Whisper: ошибки коррелируют "
+        "с проверяемым. Очередь на часовом интервью 197 окон из 272 при проверке "
+        "1597 с против 115 с у прежней"
+    ),
 )
 
 WHISPER_TURBO = ModelEntry(
@@ -172,7 +211,10 @@ WHISPER_TURBO = ModelEntry(
     download_gb=1.5,
     upstream="Whisper large-v3-turbo — OpenAI; сборка под MLX — mlx-community",
     calibrated=LAST_CALIBRATION,
-    calibration_note="WER 14,5% на русских голосовых, 28,3% на MINDS-14",
+    calibration_note=(
+        "WER 14,5% на русских голосовых; на английском 18,5% "
+        "(bake-off 2026-09-20), 28,3% на MINDS-14"
+    ),
     apple_only=True,
 )
 
@@ -239,6 +281,8 @@ CATALOG: tuple[ModelEntry, ...] = (
     GIGAAM_RUSSIAN,
     WHISPER_TURBO,
     GIGAAM_MULTILINGUAL_FAST,
+    PARAKEET_ENGLISH,
+    CANARY_ENGLISH,
     VOSK_RUSSIAN,
     FASTER_WHISPER_FALLBACK,
     SORTFORMER,
@@ -268,7 +312,7 @@ def route_entries(route: str, *, apple: bool = True, diarize: bool = False) -> t
         entries += [GIGAAM_RUSSIAN, VOSK_RUSSIAN]
     entries.append(WHISPER_TURBO if apple else FASTER_WHISPER_FALLBACK)
     if route in ("en", "all"):
-        entries.append(GIGAAM_MULTILINGUAL_FAST)
+        entries.append(PARAKEET_ENGLISH)
     if diarize and apple:
         entries.append(SORTFORMER)
     return tuple(entries)

@@ -12,12 +12,17 @@ def test_russian_route_preserves_existing_primary() -> None:
     assert route.locally_calibrated is True
 
 
-def test_english_route_uses_independent_fast_verifier() -> None:
+def test_english_route_verifies_with_a_model_of_its_own_weight() -> None:
+    """Проверяющая должна быть сопоставима с основной, а не слабее её.
+
+    GigaAM Multilingual int8 ошибался в полтора раза чаще Whisper и отправлял
+    в очередь 98% окон: расхождение означало не сомнение, а разницу в классе.
+    """
     route = language_route("en_US")
     assert route.primary.family == "whisper"
     assert route.verifier is not None
-    assert route.verifier.model == "gigaam-multilingual-ctc"
-    assert route.verifier.quantization == "int8"
+    assert route.verifier.model == "nemo-parakeet-tdt-0.6b-v3"
+    assert route.verifier.family != route.primary.family
 
 
 def test_fast_mode_verifies_russian_with_the_light_model() -> None:

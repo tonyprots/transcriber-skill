@@ -123,3 +123,15 @@ def test_phonetics_never_edits_the_text() -> None:
     corrected, corrections = apply_glossary(segments, [entry])
     assert corrected[0].text == "открыл Тэгэстат вчера"
     assert corrections == []
+
+
+def test_script_without_phonetic_codes_is_not_comparable() -> None:
+    """Деванагари не кодируется — это «не похоже», а не падение сборки.
+
+    2026-09-22 прогон на хинди падал с `max() iterable argument is empty`
+    уже после распознавания: словарь сверял с терминами каждое слово.
+    """
+    assert phonetic_similarity("क्लाइंट्स", "Salesforce") == 0.0
+    segments = [Segment(0.0, 2.0, "19 मिलियन क्लाइंट्स हैं")]
+    entry = GlossaryEntry(canonical="Salesforce", aliases=(), auto_apply=False)
+    assert suggest_glossary_matches(segments, [entry]) == []

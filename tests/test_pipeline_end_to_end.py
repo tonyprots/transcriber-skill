@@ -194,3 +194,137 @@ def test_pipeline_on_real_models(tmp_path: Path, spoken_audio: Path) -> None:
     assert manifest["model_revisions"][GIGAAM_RUSSIAN.model]
     text = (output / "verbatim.md").read_text(encoding="utf-8")
     assert "бюджет" in text.lower()
+
+
+@requires_speech
+def test_speech_window_flag_reaches_vad(tmp_path: Path, spoken_audio: Path, monkeypatch) -> None:
+    """Флаг длины окна должен доезжать до нарезки, а не жить в справке.
+
+    Замер 2026-09-20 отверг 28 секунд, но настройка осталась ради следующей
+    проверки — а настройка, которая никуда не приходит, хуже отсутствующей.
+    """
+    monkeypatch.setattr(cli, "run_isolated_backend", fake_backend)
+    original = cli.split_speech_windows
+    seen: dict[str, float] = {}
+
+    def recording(*args, **kwargs):
+        seen["max_seconds"] = kwargs["max_seconds"]
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "split_speech_windows", recording)
+    cli.run(
+        cli.build_parser().parse_args(
+            [
+                str(spoken_audio),
+                "--output",
+                str(tmp_path / "result"),
+                "--mode",
+                "fast",
+                "--language",
+                "ru",
+                "--speech-window-seconds",
+                "28",
+                "--no-cache",
+                "--no-glossary",
+                "--quiet",
+            ]
+        )
+    )
+    assert seen["max_seconds"] == 28.0
+
+
+@pytest.fixture
+def audio_after_pause(tmp_path: Path, spoken_audio: Path) -> Path:
+    """Шесть секунд тишины, потом речь: фрагмент с 5-й секунды ловит только её."""
+    target = tmp_path / "пауза-и-речь.wav"
+    subprocess.run(
+        [
+            "ffmpeg", "-nostdin", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-t", "6", "-i", "anullsrc=r=16000:cl=mono",
+            "-i", str(spoken_audio),
+            "-filter_complex", "[1:a]aresample=16000,aformat=channel_layouts=mono[s];[0:a][s]concat=n=2:v=0:a=1",
+            str(target),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return target
+
+
+@requires_speech
+def test_section_keeps_source_timecodes(tmp_path: Path, audio_after_pause: Path, monkeypatch) -> None:
+    """Фрагмент расшифрован отдельно, а время в нём — по исходнику.
+
+    Иначе цитату с 00:10:50 в субтитрах пришлось бы искать в расшифровке
+    на 00:00:00 и пересчитывать руками.
+    """
+    monkeypatch.setattr(cli, "run_isolated_backend", fake_backend)
+    output = tmp_path / "result"
+    cli.run(
+        cli.build_parser().parse_args(
+            [str(audio_after_pause), "--section", "0:05-1:00", "--output", str(output),
+             "--mode", "fast", "--no-cache", "--no-glossary", "--quiet"]
+        )
+    )
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    section = manifest["source"]["section"]
+    assert section["start"] == 5.0
+    # Конец за пределами записи обрезан по её длине, а не оставлен минутой.
+    assert section["end"] < 60
+    assert manifest["source"]["duration_seconds"] == pytest.approx(section["end"] - 5.0, abs=0.1)
+    segments = json.loads((output / "segments.json").read_text(encoding="utf-8"))
+    assert segments["readable"] and all(item["start"] >= 5.0 for item in segments["readable"])
+    readable = (output / "readable.md").read_text(encoding="utf-8")
+    assert "фрагмент 00:00:05–" in readable
+    assert "[00:00:0" in readable and "[00:00:00" not in readable
+
+
+@requires_speech
+def test_batch_downloads_once_and_writes_each_section(
+    tmp_path: Path, audio_after_pause: Path, monkeypatch, capsys
+) -> None:
+    """Пакет: два фрагмента одной записи — два каталога и один JSON с путями."""
+    monkeypatch.setattr(cli, "run_isolated_backend", fake_backend)
+    code = cli.main(
+        [str(audio_after_pause), str(tmp_path / "нет-такого.wav"),
+         "--section", "0-4", "--section", "5-60", "--output", str(tmp_path / "batch"),
+         "--mode", "fast", "--no-cache", "--no-glossary", "--quiet"]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    results = payload["results"]
+    assert code == 2  # одна запись не нашлась — пакет сообщает об этом кодом
+    done = [item for item in results if "error" not in item]
+    failed = [item for item in results if "error" in item]
+    assert len(done) == 2 and len(failed) == 2
+    assert {Path(item["output"]).name for item in done} == {
+        "пауза-и-речь-000000-000004",
+        "пауза-и-речь-000005-000100",
+    }
+    for item in done:
+        assert Path(item["readable"]).is_file()
+        assert item["review_count"] is not None
+
+
+@requires_speech
+def test_two_sections_of_one_file_do_not_share_cache(
+    tmp_path: Path, audio_after_pause: Path, monkeypatch
+) -> None:
+    """SHA-256 у кусков один — ключ кэша обязан различать границы."""
+    monkeypatch.setattr(cli, "run_isolated_backend", fake_backend)
+    keys: list[str] = []
+    original = cli.cache_key
+
+    def recording(kind, payload):
+        keys.append(payload["source_sha256"]) if kind == "primary" else None
+        return original(kind, payload)
+
+    monkeypatch.setattr(cli, "cache_key", recording)
+    for number, section in enumerate(("0-4", "5-60")):
+        cli.run(
+            cli.build_parser().parse_args(
+                [str(audio_after_pause), "--section", section,
+                 "--output", str(tmp_path / f"r{number}"), "--mode", "fast",
+                 "--cache-dir", str(tmp_path / "cache"), "--no-glossary", "--quiet"]
+            )
+        )
+    assert len(keys) == 2 and keys[0] != keys[1]

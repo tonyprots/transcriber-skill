@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .catalog import BackendSpec
-from .catalog import GIGAAM_MULTILINGUAL_FAST as _GIGAAM_MULTILINGUAL_FAST
+from .catalog import PARAKEET_ENGLISH as _PARAKEET_ENGLISH
 from .catalog import GIGAAM_RUSSIAN as _GIGAAM_RUSSIAN
 from .catalog import VOSK_RUSSIAN as _VOSK_RUSSIAN
 from .catalog import WHISPER_TURBO as _WHISPER_TURBO
@@ -48,7 +48,7 @@ class LanguageRoute:
 # здесь только сборка маршрутов из них.
 WHISPER_TURBO = _WHISPER_TURBO.spec
 GIGAAM_RUSSIAN = _GIGAAM_RUSSIAN.spec
-GIGAAM_MULTILINGUAL_FAST = _GIGAAM_MULTILINGUAL_FAST.spec
+PARAKEET_ENGLISH = _PARAKEET_ENGLISH.spec
 VOSK_RUSSIAN = _VOSK_RUSSIAN.spec
 
 
@@ -72,10 +72,10 @@ def language_route(language: str) -> LanguageRoute:
         )
     if normalized == "en":
         return LanguageRoute(
-            "en-whisper-turbo-gigaam-multilingual-fast",
+            "en-whisper-turbo-parakeet-tdt-v3",
             "en",
             WHISPER_TURBO,
-            GIGAAM_MULTILINGUAL_FAST,
+            PARAKEET_ENGLISH,
             True,
         )
     warning = (

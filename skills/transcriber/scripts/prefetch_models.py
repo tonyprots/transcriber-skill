@@ -4,7 +4,7 @@
 Запуск: <python из .venv> scripts/prefetch_models.py [ru|en|all] [--diarize]
 
 ru  — Silero VAD, GigaAM v3 E2E, Vosk ru, Whisper Turbo;
-en  — Silero VAD, Whisper Turbo, GigaAM Multilingual CTC int8;
+en  — Silero VAD, Whisper Turbo, Parakeet TDT 0.6B v3;
 all — всё вместе. --diarize добавляет Sortformer (только Apple Silicon).
 На Linux и Intel вместо Whisper MLX скачивается faster-whisper medium.
 Повторный запуск ничего не качает: всё уже в ~/.cache/huggingface.
@@ -25,8 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from audio_transcription.catalog import (  # noqa: E402
     FASTER_WHISPER_FALLBACK,
-    GIGAAM_MULTILINGUAL_FAST,
     GIGAAM_RUSSIAN,
+    PARAKEET_ENGLISH,
     SILERO_VAD,
     SORTFORMER,
     VOSK_RUSSIAN,
@@ -98,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
 
         steps.append((_label(FASTER_WHISPER_FALLBACK), lambda: download_model(FASTER_WHISPER_FALLBACK.model)))
     if args.route in ("en", "all"):
-        steps.append((_label(GIGAAM_MULTILINGUAL_FAST), load_onnx(GIGAAM_MULTILINGUAL_FAST)))
+        steps.append((_label(PARAKEET_ENGLISH), load_onnx(PARAKEET_ENGLISH)))
     if args.diarize:
         if _apple():
             from huggingface_hub import snapshot_download

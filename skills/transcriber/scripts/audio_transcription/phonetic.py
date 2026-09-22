@@ -176,9 +176,17 @@ def phonetic_similarity(heard: str, canonical: str) -> float:
 
     Между разными чтениями берётся лучшее: достаточно, чтобы услышанное
     совпало с одним правдоподобным произношением термина.
+
+    Чтений может не быть вовсе: кодируются только кириллица, латиница и цифры,
+    а деванагари или иероглифы дают пустой набор. Такое слово с термином не
+    сравнимо — это ноль, а не падение прогона после готового распознавания
+    (2026-09-22, хинди).
     """
     return max(
-        min(_ratio(_skeleton(left), _skeleton(right)), _ratio(left, right))
-        for left in phonetic_codes(heard)
-        for right in phonetic_codes(canonical)
+        (
+            min(_ratio(_skeleton(left), _skeleton(right)), _ratio(left, right))
+            for left in phonetic_codes(heard)
+            for right in phonetic_codes(canonical)
+        ),
+        default=0.0,
     )

@@ -6,9 +6,10 @@ import hashlib
 import shutil
 import subprocess
 import wave
+from dataclasses import replace
 from pathlib import Path
 
-from .models import AudioChunk, MediaInfo
+from .models import AudioChunk, MediaInfo, Section
 
 
 SAMPLE_RATE = 16_000
@@ -19,8 +20,8 @@ class MediaToolError(RuntimeError):
 
 
 def require_media_tools() -> tuple[str, str]:
-    ffmpeg = _find_command("ffmpeg")
-    ffprobe = _find_command("ffprobe")
+    ffmpeg = find_command("ffmpeg")
+    ffprobe = find_command("ffprobe")
     if not ffmpeg or not ffprobe:
         raise MediaToolError(
             "Нужны ffmpeg и ffprobe. Установите ffmpeg и повторите запуск."
@@ -28,7 +29,7 @@ def require_media_tools() -> tuple[str, str]:
     return ffmpeg, ffprobe
 
 
-def _find_command(name: str) -> str | None:
+def find_command(name: str) -> str | None:
     discovered = shutil.which(name)
     if discovered:
         return discovered
@@ -80,9 +81,29 @@ def probe_media(source: Path) -> MediaInfo:
     )
 
 
-def prepare_audio(source: Path, work_dir: Path) -> tuple[Path, MediaInfo]:
-    """Создаёт нормализованный WAV PCM16/16 kHz/mono, не меняя исходник."""
+def prepare_audio(
+    source: Path, work_dir: Path, section: Section | None = None
+) -> tuple[Path, MediaInfo]:
+    """Создаёт нормализованный WAV PCM16/16 kHz/mono, не меняя исходник.
+
+    С `section` в WAV попадает только кусок, а исходник по-прежнему
+    опознаётся по SHA-256 целиком. Резать здесь, а не при скачивании: один
+    файл обслуживает сколько угодно фрагментов, а `yt-dlp --download-sections`
+    качал бы каждый заново и 2026-09-22 падал на ffmpeg с кодом 8.
+    """
     info = probe_media(source)
+    trim: list[str] = []
+    if section is not None:
+        total = info.duration_seconds
+        if total is not None and section.start >= total:
+            raise ValueError(
+                f"Фрагмент {section.label} начинается после конца записи "
+                f"({total:.0f} с)"
+            )
+        if total is not None and section.end > total:
+            section = Section(section.start, total)
+        trim = ["-ss", f"{section.start:.3f}", "-to", f"{section.end:.3f}"]
+        info = replace(info, duration_seconds=section.end - section.start, section=section)
     work_dir.mkdir(parents=True, exist_ok=True)
     prepared = work_dir / "prepared.wav"
     ffmpeg, _ = require_media_tools()
@@ -93,6 +114,7 @@ def prepare_audio(source: Path, work_dir: Path) -> tuple[Path, MediaInfo]:
         "-loglevel",
         "error",
         "-y",
+        *trim,
         "-i",
         str(info.source),
         "-map",

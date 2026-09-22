@@ -1,20 +1,57 @@
-# transcriber — локальная расшифровка аудио для Claude Code и Codex
+# transcriber — расшифровка аудио и видео в текст для Claude Code и Codex
 
-Скилл для агентов, который расшифровывает аудио и видео целиком на вашем
-компьютере: русскую и английскую речь, голосовые сообщения, интервью,
-встречи, в том числе на шесть и больше участников. Ничего не уходит во
-внешние сервисы.
+Скилл, который превращает запись в текст прямо на вашем компьютере:
+голосовое, диктовку, интервью, созвон на шестерых, подкаст из Яндекс Музыки,
+видео с YouTube, ВК Видео или Рутуба. Скажите агенту «расшифруй» и
+приложите файл или ссылку. Вернутся дословный и читаемый текст, субтитры,
+разметка по спикерам и короткий список мест, которые стоит переслушать.
 
-Чем это отличается от «запустить Whisper»: две независимые модели слушают
-одни и те же окна Silero VAD, спорные места попадают в очередь вместо
-молчаливой уверенности, термины правит контролируемый словарь, все гипотезы
-остаются в аудит-следе, субтитры идут с таймкодами. Агент получает не один
-текст, а дословную и читаемую версии плюс список того, что стоит
-переслушать. На реальной речи в этот список попадает 98–100 % ошибок
-распознавания, а сам текст вдвое точнее, чем у Whisper в одиночку
-(см. [цифры](#зачем-это-нужно-в-цифрах)).
+Голосом человек даёт агенту в разы больше контекста, чем успевает набрать
+руками: правки по презентации, замечания к отчёту, мысль целиком, а не
+огрызок. Упирается это в расшифровку. Обычно её делает одна модель, и на
+рабочем сленге, названиях продуктов и аббревиатурах она спотыкается, а
+заметить подмену в чужом тексте труднее всего.
 
-Версия 0.10.1. Автор — [Антон Проценко](https://tonyprots.ru).
+## В чём фишка
+
+- **Две модели слушают одно и то же.** Вторая не правит первую, а отмечает,
+  где они разошлись. Такие места собираются в `review-needed.md` с
+  таймкодами, и на реальной речи туда попадает 98–100% ошибок: переслушать
+  нужно только их, а не всю запись.
+- **Модель под язык.** Для русского основная — GigaAM v3 от Сбера, она
+  ошибается вдвое реже Whisper, которого обычно ставят по умолчанию. Для
+  английского — Whisper Turbo с проверкой Parakeet.
+- **Словарь терминов учится сам.** Скилл снимает кандидатов из расхождений
+  моделей и начинает править термин, только когда тот повторился в трёх
+  разных записях. Названия продуктов перестают ломаться без ручной настройки.
+- **Всё считается локально.** Запись не уходит в облако, исходный файл не
+  меняется. Наружу скилл ходит только за самим видео, когда вы дали ссылку.
+
+## Что умеет
+
+- **Файлы:** m4a, mp3, wav, ogg из мессенджеров, видео любых форматов,
+  которые понимает ffmpeg.
+- **Ссылки:** YouTube и сотни других сайтов через `yt-dlp`, ВК Видео и
+  Рутуб, выпуски подкастов Яндекс Музыки. Звук качается лёгкой дорожкой
+  в восемь потоков: час с ВК Видео за 30 секунд.
+- **Готовые субтитры за секунды,** когда ролик надо понять и цитировать из
+  него не будут. Автоперевод YouTube и распознавание площадки помечаются,
+  чтобы их не выдали за авторский текст.
+- **Субтитры с копии на YouTube.** У ролика с Рутуба или ВК своих субтитров
+  нет? Скилл найдёт ту же запись на YouTube и возьмёт её субтитры, но только
+  после сверки по звуку в двух точках. Чужой выпуск той же серии не пройдёт.
+- **Цитата без расшифровки часа.** `--section 10:50-11:30` расшифровывает
+  только кусок, таймкоды остаются по исходнику. Нашли цифру в субтитрах —
+  проверили её по звуку за полминуты.
+- **Пачкой.** Десяток ссылок одним вызовом, каждая в свой каталог; отказ
+  одной не останавливает остальные. Прогоны встают в общую очередь на
+  машину и не отнимают друг у друга ядра.
+- **Спикеры:** `--diarize` делит разговор по голосам, справляется и со
+  встречей на шестерых.
+- **Языки:** русский и английский идут проверенными маршрутами с замерами,
+  остальные — одним Whisper с предупреждением.
+
+Версия 0.15.0. Автор — [Антон Проценко](https://tonyprots.ru).
 
 ## Что внутри
 
@@ -22,7 +59,7 @@
 |---|---|---|
 | Сегментация | Silero VAD, окна до 20 с | то же |
 | Основная модель | GigaAM v3 E2E RNNT (onnx-asr) | Whisper large-v3-turbo (MLX) |
-| Независимая проверка (`max`) | Whisper large-v3-turbo (MLX) | GigaAM Multilingual CTC int8 |
+| Независимая проверка (`max`) | Whisper large-v3-turbo (MLX) | Parakeet TDT 0.6B v3 (onnx-asr) |
 | Лёгкая проверка (`fast`) | Vosk ru (alphacep) | нет |
 | Диаризация, 1–4 голоса | MLX Sortformer | то же |
 | Диаризация, 5+ голосов | FluidAudio Offline Community-1 | то же |
@@ -97,8 +134,8 @@ bash ~/.claude/skills/transcriber/scripts/setup.sh --models ru
 
 Модели живут в `~/.cache/huggingface`: для русского это GigaAM v3 (0,9 ГБ),
 Whisper Turbo (1,5 ГБ) и Vosk ru (0,25 ГБ) для проверки в режиме `fast`, для
-английского ещё GigaAM Multilingual (0,2 ГБ), для диаризации Sortformer
-(0,2 ГБ). Размер маршрута считает
+английского ещё Parakeet TDT v3 (2,4 ГБ) для проверки в режиме `max`, для
+диаризации Sortformer (0,2 ГБ). Размер маршрута считает
 `scripts/prefetch_models.py ru --print-size`. Скилл берёт свои варианты,
 `istupakov/gigaam-v3-onnx` и `mlx-community/whisper-large-v3-turbo-asr-fp16`,
 поэтому кэш mlx-whisper или PyTorch-версии GigaAM не переиспользуется. Другую
@@ -118,6 +155,48 @@ MLX-модель Whisper можно подставить флагом `--whisper
 ```bash
 .venv/bin/python scripts/transcribe.py запись.m4a --language ru --output out/
 ```
+
+На входе принимается и ссылка на видео — YouTube и остальные сотни сайтов,
+которые знает `yt-dlp`. Тогда скилл скачает звук сам и запишет ссылку в
+`manifest.json` → `source.origin`:
+
+```bash
+.venv/bin/python scripts/transcribe.py "https://youtu.be/..." --language en --output out/
+```
+
+Когда точность не нужна, у видео можно забрать готовые субтитры — это секунды
+вместо минут, но чужая гипотеза без сверки и словаря:
+
+```bash
+.venv/bin/python scripts/fetch_media.py "https://youtu.be/..."                # что есть
+.venv/bin/python scripts/fetch_media.py "https://youtu.be/..." --subtitles    # забрать
+.venv/bin/python scripts/fetch_media.py "https://rutube.ru/video/..." --subtitles --mirror
+```
+
+`--mirror` нужен ролику без своих субтитров: скилл ищет копию на YouTube,
+расшифровывает две точки оригинала по 45 секунд и сверяет их с субтитрами
+копии. Копия проходит, если текст совпал в обеих точках и сдвиг времени
+одинаковый; таймкоды переводятся во время оригинала. На трёх митапах своя
+пара давала сходство 0,79–0,97, чужой выпуск той же серии — не выше 0,16.
+
+Автоперевод YouTube на другой язык помечается отдельно и в файле, и в выводе:
+дорожка `ru` у английского ролика — это перевод машинного распознавания, и
+цитировать из неё нельзя. Выпуски подкастов Яндекс Музыки скилл качает сам,
+без yt-dlp: его экстрактор для этого сервиса сломан. Подробности и разбор
+отказов — [references/remote-sources.md](skills/transcriber/references/remote-sources.md).
+
+Несколько записей — одним вызовом, каждая в свой каталог внутри `--output`.
+`--section 10:50-11:30` расшифровывает только кусок, флаг повторяется, а
+таймкоды остаются по исходнику: так сверяют цитату, найденную в субтитрах,
+не расшифровывая час записи.
+
+```bash
+.venv/bin/python scripts/transcribe.py URL1 URL2 --mode fast --output out/
+.venv/bin/python scripts/transcribe.py URL --section 10:50-11:30 --section 26:40-27:10 --output clips/
+```
+
+Прогоны встают в общую очередь на машину: второй ждёт первого, а не делит с
+ним ядра.
 
 Полезные флаги: `--diarize --expected-speakers N`, `--glossary словарь.yaml`
 (пример в [assets/glossary.example.yaml](skills/transcriber/assets/glossary.example.yaml)),
@@ -241,6 +320,11 @@ Apple M1, 16 ГБ, macOS 26.3, замеры сделаны на версии 0.
 - Linux и Windows: только Whisper на CPU, без диаризации. FluidAudio
   включён как бинарник macOS arm64, происхождение и контрольная сумма — в
   [third-party/fluidaudio/NOTICE.md](skills/transcriber/third-party/fluidaudio/NOTICE.md).
+- Ссылки требуют установленного `yt-dlp`; в зависимости скилла он не входит,
+  потому что нужен не всем. Площадки меняют защиту чаще, чем выходят релизы,
+  так что первое лекарство от отказа — обновить его. Видео за возрастным
+  ограничением или логином скилл сам не открывает: флаг с cookies из браузера
+  отдаёт доступ к живой сессии, и это решение пользователя, а не умолчание.
 
 ## Разработка
 
@@ -266,10 +350,16 @@ CC-BY-4.0), FluidAudio (Apache-2.0).
 `transcriber` is a Claude Code / Codex skill for fully local transcription
 of Russian and English audio and video. It splits speech with Silero VAD,
 runs a primary model and an independent verifier on the same windows
-(GigaAM v3 → Whisper Turbo for Russian, Whisper Turbo → GigaAM Multilingual
+(GigaAM v3 → Whisper Turbo for Russian, Whisper Turbo → Parakeet TDT v3
 for English), diarizes with MLX Sortformer (≤4 speakers) or FluidAudio
 (5+), and produces verbatim and readable transcripts, SRT/VTT subtitles, a
 review queue of disputed spans, a glossary audit and a full manifest.
+It takes files or links: YouTube and hundreds of sites via yt-dlp, VK Video,
+Rutube and Yandex Music podcast episodes. It can grab existing captions in
+seconds, borrow captions from a YouTube copy of a Rutube/VK video after
+verifying by audio that it is the same recording, transcribe only a
+`--section` of a long video for quote checking, and process batches with a
+machine-wide run queue.
 The default max mode runs at a quarter to a third of real time on an Apple M1. Install
 with `/plugin marketplace add tonyprots/transcriber-skill` or
 `npx skills add tonyprots/transcriber-skill`, then run

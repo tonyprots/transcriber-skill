@@ -137,7 +137,13 @@ def test_route_download_size_is_sum_of_catalog() -> None:
     assert route_download_gb("ru") == pytest.approx(
         sum(entry.download_gb for entry in route_entries("ru"))
     )
-    assert route_download_gb("all") > route_download_gb("ru") > route_download_gb("en")
+    assert route_download_gb("en") == pytest.approx(
+        sum(entry.download_gb for entry in route_entries("en"))
+    )
+    # Какой из маршрутов тяжелее — следствие выбора моделей, а не контракт:
+    # с приходом Canary английский обогнал русский. Держим только то, что
+    # обязано быть верным всегда.
+    assert route_download_gb("all") > max(route_download_gb("ru"), route_download_gb("en"))
 
 
 def test_unknown_route_is_an_error() -> None:

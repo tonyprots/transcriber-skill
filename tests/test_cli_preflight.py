@@ -115,3 +115,4 @@ def test_waiting_stays_quiet_when_stage_is_quick() -> None:
     with ProgressReporter(stream=stream).waiting("Silero VAD", every_seconds=5.0):
         pass
     assert stream.getvalue() == ""
+

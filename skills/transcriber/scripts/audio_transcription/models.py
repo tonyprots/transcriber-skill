@@ -85,6 +85,12 @@ class ReviewItem:
     similarity: float
     differing_tokens: tuple[str, ...]
     reason: str
+    # Сколько слов разошлось: по нему очередь ранжируется. Одно слово в
+    # двадцатисекундном окне и развалившаяся фраза — разная работа для человека.
+    weight: int = 1
+    # `substantive` — слушать, `spelling` — то же слово записано иначе
+    # (кандидат в словарь), `window` — отметка на всё окно без точного места.
+    kind: str = "substantive"
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
@@ -115,10 +121,19 @@ class MediaInfo:
     channels: int | None
     size_bytes: int | None = None
     sha256: str | None = None
+    # Ссылка, если файл скачан по ней: временный путь в манифесте ничего не
+    # говорит о происхождении записи, а воспроизводимость держится на нём.
+    origin: str | None = None
+    # Расшифрован только кусок записи. Длительность тогда — длина куска, а
+    # таймкоды результата сдвинуты к началу исходника, чтобы цитату можно
+    # было сверить с субтитрами и плеером без пересчёта.
+    section: Section | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "source": str(self.source),
+            "origin": self.origin,
+            "section": self.section.to_dict() if self.section else None,
             "duration_seconds": self.duration_seconds,
             "codec": self.codec,
             "sample_rate": self.sample_rate,
@@ -126,6 +141,58 @@ class MediaInfo:
             "size_bytes": self.size_bytes,
             "sha256": self.sha256,
         }
+
+
+@dataclass(frozen=True)
+class Section:
+    """Кусок записи по времени исходника: `--section 00:10:50-00:11:30`."""
+
+    start: float
+    end: float
+
+    def __post_init__(self) -> None:
+        if self.start < 0 or self.end <= self.start:
+            raise ValueError(
+                f"Фрагмент {self.start:g}–{self.end:g} с: конец должен быть позже начала"
+            )
+
+    @classmethod
+    def parse(cls, text: str) -> "Section":
+        """`1:02:03-1:04:00`, `10:50-11:30` или секунды `650-690`."""
+        parts = text.strip().split("-")
+        if len(parts) != 2:
+            raise ValueError(f"Фрагмент задаётся как НАЧАЛО-КОНЕЦ, получено: {text!r}")
+        return cls(_clock_seconds(parts[0]), _clock_seconds(parts[1]))
+
+    @property
+    def label(self) -> str:
+        return f"{_clock(self.start)}–{_clock(self.end)}"
+
+    @property
+    def slug(self) -> str:
+        return f"{_clock(self.start).replace(':', '')}-{_clock(self.end).replace(':', '')}"
+
+    def to_dict(self) -> dict[str, float]:
+        return {"start": self.start, "end": self.end}
+
+
+def _clock_seconds(text: str) -> float:
+    fields = text.strip().split(":")
+    if not 1 <= len(fields) <= 3 or not all(fields):
+        raise ValueError(f"Не время: {text!r}; ожидается ЧЧ:ММ:СС, ММ:СС или секунды")
+    try:
+        numbers = [float(field) for field in fields]
+    except ValueError as error:
+        raise ValueError(f"Не время: {text!r}") from error
+    seconds = 0.0
+    for number in numbers:
+        seconds = seconds * 60 + number
+    return seconds
+
+
+def _clock(seconds: float) -> str:
+    total = int(seconds)
+    return f"{total // 3600:02d}:{total % 3600 // 60:02d}:{total % 60:02d}"
 
 
 @dataclass(frozen=True)

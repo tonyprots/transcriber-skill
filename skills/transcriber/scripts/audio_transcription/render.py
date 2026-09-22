@@ -10,6 +10,7 @@ from typing import Any
 
 from .audio import SAMPLE_RATE, MediaToolError
 from .models import Correction, Diarization, Hypothesis, MediaInfo, ReviewItem, Segment
+from .reconcile import MINOR_KINDS
 
 
 def format_timestamp(seconds: float, *, srt: bool = False) -> str:
@@ -74,6 +75,63 @@ def _vtt(segments: list[Segment]) -> str:
     return "\n\n".join(blocks) + "\n"
 
 
+def _review_sections(items: list[ReviewItem]) -> list[str]:
+    """Очередь порядком важности, а не порядком записи.
+
+    Элемент очереди — разошедшееся место, а не окно: слушать нужно секунду, а
+    не двадцать. Сначала идёт то, где модели услышали разные слова, потом
+    разное написание одного слова, и одной строкой — мелочь вроде «uh».
+    """
+    minor = [item for item in items if item.kind in MINOR_KINDS]
+    spelling = [item for item in items if item.kind == "spelling"]
+    listen = [item for item in items if item.kind in {"substantive", "window"}]
+    listen.sort(key=lambda item: (-item.weight, item.start))
+    lines: list[str] = []
+    if listen:
+        lines.extend(
+            [
+                f"## Слушать — {len(listen)}",
+                "",
+                "Сверху те места, где расхождение длиннее: одно слово может "
+                "оказаться опечаткой, развалившаяся фраза — потерянной мыслью. "
+                "Метка времени внутри окна оценена по позиции слова.",
+                "",
+            ]
+        )
+        lines.extend(_review_line(item) for item in listen)
+        lines.append("")
+    if spelling:
+        lines.extend(
+            [
+                f"## То же слово записано иначе — {len(spelling)}",
+                "",
+                "Слушать нечего: модели согласны, что слово прозвучало, и "
+                "расходятся в написании. Отсюда берутся записи словаря.",
+                "",
+            ]
+        )
+        lines.extend(_review_line(item) for item in sorted(spelling, key=lambda i: i.start))
+        lines.append("")
+    if minor:
+        lines.extend(
+            [
+                f"## Мелкие расхождения — {len(minor)}",
+                "",
+                "Слова-паразиты и разная запись чисел («Q4» против «Q four»). "
+                "В отчёт не разворачиваются, но лежат целиком в `segments.json`.",
+                "",
+            ]
+        )
+    return lines
+
+
+def _review_line(item: ReviewItem) -> str:
+    difference = ", ".join(item.differing_tokens) or item.reason.split(": ", 1)[-1]
+    context = item.readable_text.strip()
+    line = f"- [{format_timestamp(item.start)}] {difference}"
+    return f"{line} — в контексте: {context}" if context else line
+
+
 def _review_markdown(
     items: list[ReviewItem],
     suggestions: list[dict[str, Any]],
@@ -102,18 +160,7 @@ def _review_markdown(
         if promoted:
             return "\n".join(lines).rstrip() + "\n"
         return "# Требует проверки\n\nРасхождений выше заданного порога не найдено.\n"
-    for item in items:
-        lines.extend(
-            [
-                f"## {format_timestamp(item.start)}–{format_timestamp(item.end)}",
-                "",
-                f"- Причина: {item.reason}; сходство {item.similarity:.1%}",
-                f"- Читаемая гипотеза: {item.readable_text or '—'}",
-                f"- Проверочная гипотеза: {item.comparison_text or '—'}",
-                f"- Различия: {', '.join(item.differing_tokens) or '—'}",
-                "",
-            ]
-        )
+    lines.extend(_review_sections(items))
     if suggestions:
         lines.extend(["## Возможные термины из словаря", ""])
         for suggestion in suggestions:
@@ -264,11 +311,14 @@ def write_bundle(
         }
         _write_json(staging / "manifest.json", manifest)
         _write_json(staging / "raw.json", raw)
+        # Про фрагмент говорит заголовок: без него таймкоды с 00:10:50
+        # выглядят как потерянное начало записи.
+        scope = f" (фрагмент {media.section.label})" if media.section else ""
         (staging / "verbatim.md").write_text(
-            _markdown(lexical_segments, "Дословная расшифровка"), encoding="utf-8"
+            _markdown(lexical_segments, f"Дословная расшифровка{scope}"), encoding="utf-8"
         )
         (staging / "readable.md").write_text(
-            _markdown(readable_segments, "Читаемая расшифровка"), encoding="utf-8"
+            _markdown(readable_segments, f"Читаемая расшифровка{scope}"), encoding="utf-8"
         )
         (staging / "subtitles.srt").write_text(_srt(readable_segments), encoding="utf-8")
         (staging / "subtitles.vtt").write_text(_vtt(readable_segments), encoding="utf-8")

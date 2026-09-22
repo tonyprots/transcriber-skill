@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 import json
 import platform
+import re
 import sys
 import tempfile
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -16,6 +18,8 @@ import yaml
 
 from . import __version__
 from .audio import MediaToolError, prepare_audio, split_speech_windows
+from .fetching import FetchError, RemoteMedia, fetch_audio, looks_like_url, probe_remote
+from .machine_lock import machine_slot
 from .backends import BackendMissing, BackendUnavailable
 from .catalog import (
     FASTER_WHISPER_FALLBACK,
@@ -42,7 +46,7 @@ from .glossary import (
 from .glossary_store import entries_of, load_document, store_path, update_from_run
 from .fillers import strip_filler_segments
 from .mining import undisputed_words
-from .models import AudioChunk, Diarization, Hypothesis, ReviewItem
+from .models import AudioChunk, Diarization, Hypothesis, ReviewItem, Section
 from .packing import PackedWindow, build_packed_windows, unpack_hypothesis
 from .isolated import run_isolated_backend, run_isolated_diarization
 from .reconcile import find_review_items, normalize_text, segments_for_windows
@@ -61,7 +65,26 @@ def build_parser() -> argparse.ArgumentParser:
         version=f"transcriber {__version__}",
         help="Версия скилла — та же, что уходит в manifest.json",
     )
-    parser.add_argument("input", type=Path, help="Аудио- или видеофайл")
+    parser.add_argument(
+        "input",
+        nargs="+",
+        help=(
+            "Аудио- или видеофайл либо ссылка (видео — через yt-dlp, выпуск "
+            "подкаста Яндекс Музыки — напрямую). Несколько — пакет: по очереди, "
+            "каждый в свой каталог внутри --output"
+        ),
+    )
+    parser.add_argument(
+        "--section",
+        action="append",
+        type=_section_argument,
+        metavar="НАЧАЛО-КОНЕЦ",
+        help=(
+            "Расшифровать только кусок: 00:10:50-00:11:30, 10:50-11:30 или "
+            "650-690. Можно повторить — запись скачается один раз. Таймкоды "
+            "результата — по исходнику"
+        ),
+    )
     parser.add_argument(
         "--mode",
         choices=("fast", "max"),
@@ -99,7 +122,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output",
         type=Path,
-        help="Каталог результата; создаётся скриптом, непустой требует --overwrite",
+        help=(
+            "Каталог результата; создаётся скриптом, непустой требует --overwrite. "
+            "В пакете — общий родитель, по умолчанию текущий каталог"
+        ),
+    )
+    parser.add_argument(
+        "--speech-window-seconds",
+        type=float,
+        default=20.0,
+        help=(
+            "Потолок общего речевого окна: по нему режут обе модели маршрута. "
+            "Длиннее — больше контекста у Whisper, но и больше цена ошибки в окне"
+        ),
     )
     parser.add_argument(
         "--verifier-window-seconds",
@@ -201,6 +236,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Остановить ASR, если он не завершил ни одного окна за это число секунд",
     )
     return parser
+
+
+def _section_argument(text: str) -> Section:
+    try:
+        return Section.parse(text)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+
+
+# Отказы, которые означают «эта запись не получилась», а не ошибку в коде.
+# В пакете они записываются в результат и не останавливают остальные записи.
+FAILURES = (
+    BackendUnavailable,
+    FetchError,
+    FileNotFoundError,
+    FileExistsError,
+    MediaToolError,
+    ValueError,
+    OSError,
+    yaml.YAMLError,
+)
 
 
 class ProgressReporter:
@@ -438,13 +494,19 @@ def primary_retry_items(primary: Hypothesis) -> list[ReviewItem]:
     return items
 
 
-def run(args: argparse.Namespace) -> Path:
-    source = args.input.expanduser().resolve()
-    output = (
-        args.output.expanduser().resolve()
-        if args.output
-        else source.with_name(f"{source.stem}.transcript")
-    )
+def _slug(title: str) -> str:
+    """Имя каталога из заголовка видео: только то, что безопасно в пути."""
+    cleaned = re.sub(r"[^\w\s-]", "", title, flags=re.UNICODE).strip().lower()
+    return re.sub(r"[\s_-]+", "-", cleaned)[:80] or "video"
+
+
+def _spoken_duration(remote: RemoteMedia) -> str:
+    if not remote.duration_seconds:
+        return "длительность неизвестна"
+    return f"{remote.duration_seconds / 60:.0f} мин"
+
+
+def _validate(args: argparse.Namespace) -> None:
     if not 0 <= args.review_threshold <= 1:
         raise ValueError("--review-threshold должен быть в диапазоне [0, 1]")
     if args.verifier_window_seconds < 0:
@@ -465,9 +527,174 @@ def run(args: argparse.Namespace) -> Path:
             "--diarize работает только на macOS Apple Silicon: Sortformer требует MLX, "
             "FluidAudio собран для macOS arm64. Запустите без --diarize."
         )
+
+
+def _sections(args: argparse.Namespace) -> list[Section | None]:
+    return list(args.section or []) or [None]
+
+
+def _resolve_input(raw: str) -> tuple[RemoteMedia | None, Path | None]:
+    """Ссылку опрашиваем до скачивания: занятый каталог результата или
+    неверный язык должны падать раньше, чем уедут мегабайты."""
+    raw = str(raw).strip()
+    if looks_like_url(raw):
+        return probe_remote(raw), None
+    return None, Path(raw).expanduser().resolve()
+
+
+def _output_stem(remote: RemoteMedia | None, source: Path | None, section: Section | None) -> str:
+    stem = _slug(remote.title) if remote else source.stem  # type: ignore[union-attr]
+    return f"{stem}-{section.slug}" if section else stem
+
+
+def _download(remote: RemoteMedia, dest: Path, report: "ProgressReporter") -> tuple[Path, float]:
+    report.stage(f"Скачиваю аудио: {remote.title} ({_spoken_duration(remote)})")
+    started = time.monotonic()
+    path = fetch_audio(remote.url, dest)
+    return path, round(time.monotonic() - started, 2)
+
+
+def run(args: argparse.Namespace) -> Path:
+    """Одна запись, один результат. Пакет — `run_batch`."""
+    sections = _sections(args)
+    if len(args.input) != 1 or len(sections) != 1:
+        raise ValueError("Несколько записей или фрагментов обрабатывает run_batch()")
+    _validate(args)
+    remote, source = _resolve_input(args.input[0])
+    section = sections[0]
+    if args.output:
+        output = args.output.expanduser().resolve()
+    elif remote:
+        output = Path(f"{_output_stem(remote, None, section)}.transcript").resolve()
+    else:
+        output = source.with_name(f"{_output_stem(None, source, section)}.transcript")  # type: ignore[union-attr]
     output = ensure_output_available(output, overwrite=args.overwrite)
     report = ProgressReporter(enabled=not args.quiet)
+    with tempfile.TemporaryDirectory(prefix="transcriber-download-") as downloads:
+        download_seconds = None
+        if remote is not None:
+            source, download_seconds = _download(remote, Path(downloads), report)
+        return _transcribe(
+            args,
+            source=source,  # type: ignore[arg-type]
+            remote=remote,
+            section=section,
+            output=output,
+            report=report,
+            download_seconds=download_seconds,
+        )
 
+
+def run_batch(args: argparse.Namespace) -> list[dict[str, Any]]:
+    """Несколько записей и/или фрагментов подряд, каждая в свой каталог.
+
+    2026-09-22 очередь из десятка роликов две сессии собирали вручную:
+    `nohup`, `run.sh`, файлы-флаги и `sleep` в цикле. Здесь то же самое без
+    обвязки: сначала опрашиваются все ссылки и проверяются все каталоги —
+    конфликт имён виден до первого скачанного байта, — затем каждая запись
+    скачивается один раз и расшифровывается по каждому фрагменту. Отказ одной
+    записи попадает в результат и не останавливает остальные.
+    """
+    _validate(args)
+    sections = _sections(args)
+    base = (args.output or Path.cwd()).expanduser().resolve()
+    report = ProgressReporter(enabled=not args.quiet)
+    results: list[dict[str, Any]] = []
+    plan: list[tuple[str, RemoteMedia | None, Path | None, list[tuple[Section | None, Path]]]] = []
+    taken: set[Path] = set()
+    for raw in args.input:
+        try:
+            remote, source = _resolve_input(raw)
+        except FAILURES as error:
+            report.stage(f"Пропускаю {raw}: {error}")
+            results.extend(_failure(raw, section, error) for section in sections)
+            continue
+        jobs = []
+        for section in sections:
+            name = _output_stem(remote, source, section)
+            candidate, attempt = base / name, 2
+            while candidate in taken:
+                candidate, attempt = base / f"{name}-{attempt}", attempt + 1
+            taken.add(candidate)
+            jobs.append((section, ensure_output_available(candidate, overwrite=args.overwrite)))
+        plan.append((raw, remote, source, jobs))
+    total = sum(len(jobs) for *_, jobs in plan)
+    done = 0
+    for raw, remote, source, jobs in plan:
+        with tempfile.TemporaryDirectory(prefix="transcriber-download-") as downloads:
+            download_seconds = None
+            if remote is not None:
+                try:
+                    source, download_seconds = _download(remote, Path(downloads), report)
+                except FAILURES as error:
+                    report.stage(f"Не скачалось {raw}: {error}")
+                    results.extend(_failure(raw, section, error) for section, _ in jobs)
+                    done += len(jobs)
+                    continue
+            for section, output in jobs:
+                done += 1
+                report.stage(f"Пакет {done}/{total}: {output.name}")
+                try:
+                    path = _transcribe(
+                        args,
+                        source=source,  # type: ignore[arg-type]
+                        remote=remote,
+                        section=section,
+                        output=output,
+                        report=report,
+                        # Скачивание одно на все фрагменты — числится за первым.
+                        download_seconds=download_seconds,
+                    )
+                except FAILURES as error:
+                    report.stage(f"Ошибка на {output.name}: {error}")
+                    results.append(_failure(raw, section, error))
+                else:
+                    results.append({"input": raw, **summarize(path)})
+                download_seconds = None
+    return results
+
+
+def _failure(raw: str, section: Section | None, error: BaseException) -> dict[str, Any]:
+    return {
+        "input": raw,
+        "section": section.to_dict() if section else None,
+        "error": str(error),
+    }
+
+
+def summarize(output: Path) -> dict[str, Any]:
+    """Что печатается в stdout: пути к файлам и главные счётчики.
+
+    Одного каталога мало: 2026-09-22 агент сам угадывал разметку
+    `readable.md`, резал её по разделителю, которого там нет, получал пустоту
+    и перезапускал расшифровку. Пути и счётчики снимают догадки.
+    """
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    source = manifest.get("source") or {}
+    return {
+        "output": str(output),
+        "readable": str(output / "readable.md"),
+        "verbatim": str(output / "verbatim.md"),
+        "review": str(output / "review-needed.md"),
+        "manifest": str(output / "manifest.json"),
+        "section": source.get("section"),
+        "duration_seconds": source.get("duration_seconds"),
+        "review_count": manifest.get("review_count"),
+        "speaker_count": manifest.get("speaker_count"),
+        "warnings": manifest.get("warnings") or [],
+    }
+
+
+def _transcribe(
+    args: argparse.Namespace,
+    *,
+    source: Path,
+    remote: RemoteMedia | None,
+    section: Section | None,
+    output: Path,
+    report: "ProgressReporter",
+    download_seconds: float | None,
+) -> Path:
     route = language_route(args.language)
     diarization_kind = (
         diarization_backend(args.diarization_backend, args.expected_speakers)
@@ -478,17 +705,32 @@ def run(args: argparse.Namespace) -> Path:
     if diarization_threshold is None:
         diarization_threshold = 0.8 if diarization_kind == "fluidaudio" else 0.4
 
+    # Скачивание в total не входит: это сеть, а не расшифровка, и по total
+    # сравнивают скорость прогонов между собой.
     timings: dict[str, float] = {}
+    if download_seconds is not None:
+        timings["download"] = download_seconds
     started_at = time.monotonic()
 
     def timed(stage: str, since: float) -> float:
         timings[stage] = round(time.monotonic() - since, 2)
         return time.monotonic()
 
-    with tempfile.TemporaryDirectory(prefix="transcriber-asr-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="transcriber-asr-") as temporary, ExitStack() as held:
         work_dir = Path(temporary)
-        report.stage(f"Подготовка аудио: {source.name}")
-        prepared, media = prepare_audio(source, work_dir)
+        scope = f", фрагмент {section.label}" if section else ""
+        report.stage(f"Подготовка аудио: {source.name}{scope}")
+        prepared, media = prepare_audio(source, work_dir, section)
+        if remote is not None:
+            media = replace(media, origin=remote.url)
+        # Кэш гипотез ключуется исходником. У фрагмента тот же SHA-256, что у
+        # всей записи, и без границ в ключе два куска одного ролика получили
+        # бы общий кэш.
+        source_identity = (
+            media.sha256
+            if media.section is None
+            else f"{media.sha256}@{media.section.start:.3f}-{media.section.end:.3f}"
+        )
         mark = timed("prepare_audio", started_at)
         duration = (
             f"{media.duration_seconds:.0f} с"
@@ -496,6 +738,21 @@ def run(args: argparse.Namespace) -> Path:
             else "неизвестна"
         )
         ensure_disk_space(work_dir, media.duration_seconds)
+        # Очередь занимаем после скачивания и ffmpeg — им делить машину
+        # незачем, — а отпускаем до уборки временных WAV: её растягивает
+        # антивирус, и следующий прогон ждать её не должен.
+        timings["queue"] = round(
+            held.enter_context(
+                machine_slot(
+                    output.name,
+                    on_wait=lambda holder, waited: report.stage(
+                        f"Жду очереди ({waited:.0f} с): машину занимает {holder}"
+                    ),
+                )
+            ),
+            2,
+        )
+        mark = time.monotonic()
         report.stage(f"Длительность {duration}, режим {args.mode}; ищу речевые окна")
         # Загрузку модели называем отдельной строкой: без неё тишина в логе на
         # неотвечающем Hub неотличима от долгой работы, и 2026-09-17 причину
@@ -503,7 +760,11 @@ def run(args: argparse.Namespace) -> Path:
         report.stage("Silero VAD: загрузка")
         with report.waiting("Silero VAD"):
             base_chunks = split_speech_windows(
-                prepared, work_dir, pack=not args.diarize, offline=args.offline
+                prepared,
+                work_dir,
+                max_seconds=args.speech_window_seconds,
+                pack=not args.diarize,
+                offline=args.offline,
             )
         mark = timed("vad", mark)
         report.stage(f"Речевых окон: {len(base_chunks)}")
@@ -531,7 +792,7 @@ def run(args: argparse.Namespace) -> Path:
                 "diarization",
                 {
                     "pipeline": "0.5",
-                    "source_sha256": media.sha256,
+                    "source_sha256": source_identity,
                     "backend": diarization_kind,
                     "model": diarization_model,
                     "threshold": diarization_threshold,
@@ -619,7 +880,7 @@ def run(args: argparse.Namespace) -> Path:
             "primary",
             {
                 "pipeline": "0.5",
-                "source_sha256": media.sha256,
+                "source_sha256": source_identity,
                 "language": route.language,
                 "route": route.identifier,
                 "spec": route.primary.to_dict(),
@@ -696,7 +957,7 @@ def run(args: argparse.Namespace) -> Path:
                         "verifier",
                         {
                             "pipeline": "0.5",
-                            "source_sha256": media.sha256,
+                            "source_sha256": source_identity,
                             "language": route.language,
                             "route": route.identifier,
                             "spec": verifier_spec.to_dict(),
@@ -808,6 +1069,22 @@ def run(args: argparse.Namespace) -> Path:
                     report.stage(summary)
         readable_segments, corrections = apply_glossary(readable_input, glossary)
         suggestions = suggest_glossary_matches(readable_segments, glossary)
+        diarization_output = diarization
+        if media.section is not None:
+            # Время фрагмента переводим во время исходника в самом конце:
+            # словарь и очередь выше работали с WAV куска, а читать результат
+            # будут рядом с субтитрами и плеером всей записи.
+            offset = media.section.start
+            hypotheses = [_shift_hypothesis(item, offset) for item in hypotheses]
+            readable = hypotheses[0]
+            readable_segments = _shift_all(readable_segments, offset)
+            review_items = _shift_all(review_items, offset)
+            corrections = _shift_all(corrections, offset)
+            suggestions = [_shift_mapping(item, offset) for item in suggestions]
+            if diarization is not None:
+                diarization_output = replace(
+                    diarization, turns=_shift_all(diarization.turns, offset)
+                )
         result = write_bundle(
             output,
             media=media,
@@ -825,7 +1102,7 @@ def run(args: argparse.Namespace) -> Path:
             # который не работал.
             route=route.to_dict()
             | {"verifier_used": verifier_spec.to_dict() if verifier_spec else None},
-            diarization=diarization,
+            diarization=diarization_output,
             warnings=warnings,
             overwrite=args.overwrite,
             prepared_audio=prepared if args.keep_wav else None,
@@ -845,20 +1122,46 @@ def run(args: argparse.Namespace) -> Path:
         return result
 
 
+def _shift_all(items: list[Any], offset: float) -> list[Any]:
+    return [replace(item, start=item.start + offset, end=item.end + offset) for item in items]
+
+
+def _shift_mapping(item: dict[str, Any], offset: float) -> dict[str, Any]:
+    return item | {
+        key: item[key] + offset
+        for key in ("start", "end")
+        if isinstance(item.get(key), (int, float))
+    }
+
+
+def _shift_hypothesis(hypothesis: Hypothesis, offset: float) -> Hypothesis:
+    metadata = dict(hypothesis.metadata)
+    chunks = metadata.get("chunks")
+    if isinstance(chunks, list):
+        metadata["chunks"] = [
+            _shift_mapping(chunk, offset) if isinstance(chunk, dict) else chunk
+            for chunk in chunks
+        ]
+    return replace(
+        hypothesis,
+        segments=_shift_all(hypothesis.segments, offset),
+        metadata=metadata,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    batch = len(args.input) * len(_sections(args)) > 1
     try:
-        output = run(args)
-    except (
-        BackendUnavailable,
-        FileNotFoundError,
-        FileExistsError,
-        MediaToolError,
-        ValueError,
-        OSError,
-        yaml.YAMLError,
-    ) as exc:
+        if not batch:
+            payload: dict[str, Any] = summarize(run(args))
+        else:
+            results = run_batch(args)
+            payload = {"results": results}
+    except FAILURES as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
         return 2
-    print(json.dumps({"output": str(output)}, ensure_ascii=False))
+    print(json.dumps(payload, ensure_ascii=False))
+    if batch and any("error" in item for item in payload["results"]):
+        return 2
     return 0
