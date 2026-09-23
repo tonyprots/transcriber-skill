@@ -34,6 +34,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import tempfile
 from dataclasses import dataclass, field
@@ -100,6 +101,7 @@ class LearnReport:
     reinforced: list[str] = field(default_factory=list)
     pending: list[str] = field(default_factory=list)
     blocked: list[str] = field(default_factory=list)
+    demoted: list[str] = field(default_factory=list)
     total_entries: int = 0
     path: str | None = None
 
@@ -110,6 +112,7 @@ class LearnReport:
             "reinforced": self.reinforced,
             "pending": self.pending,
             "blocked": self.blocked,
+            "demoted": self.demoted,
             "total_entries": self.total_entries,
             "path": self.path,
         }
@@ -121,6 +124,8 @@ class LearnReport:
             parts.append(f"новых терминов {len(self.added)}")
         if self.promoted:
             parts.append(f"включены в автозамену: {', '.join(self.promoted)}")
+        if self.demoted:
+            parts.append(f"сняты с автозамены: {', '.join(self.demoted)}")
         if self.pending:
             parts.append(f"ждут написания {len(self.pending)}")
         if not parts:
@@ -181,6 +186,50 @@ def _mark_source(learned: dict[str, Any], source: str | None) -> bool:
 
 def _alias_letters(alias: str) -> int:
     return sum(1 for char in alias if char.isalpha())
+
+
+def _alias_problem(alias: str, canonical: str, blocked: set[str]) -> str | None:
+    """Почему этот вариант нельзя заменять молча. None — можно."""
+    if _alias_letters(alias) < PROMOTE_MIN_ALIAS_LETTERS:
+        return "слишком короткий вариант"
+    if normalize_text(alias) in blocked:
+        return "встречается как обычное слово"
+    score = phonetic_similarity(alias, canonical)
+    if score < PROMOTE_MIN_PHONETIC:
+        return f"звучит не как «{canonical}» ({score:.2f})"
+    return None
+
+
+def _hold_unsafe_aliases(
+    entry: dict[str, Any], blocked: set[str], report: LearnReport
+) -> None:
+    """Держит автозамену записи на тех же тормозах, что и её включение.
+
+    Порог проверяет варианты один раз, в момент повышения, а записи копят их
+    и дальше. 2026-09-23 на повторе по 161 записи `Bittrex` после повышения
+    подобрал «в» и «вот»: литеральная замена переписала бы каждое «в» в тексте.
+    Поэтому каждый прогон варианты включённой записи проверяются заново;
+    непрошедшие уходят в `learned.held_aliases` — видно, но не заменяется.
+    Не осталось ни одного — запись снимается с автозамены.
+    """
+    learned = entry.setdefault("learned", {})
+    canonical = str(entry["canonical"])
+    safe, held = [], [str(item) for item in learned.get("held_aliases", [])]
+    for alias in entry.get("aliases", []):
+        if _alias_problem(str(alias), canonical, blocked):
+            if alias not in held:
+                held.append(alias)
+        else:
+            safe.append(alias)
+    if len(safe) == len(entry.get("aliases", [])):
+        return
+    entry["aliases"] = safe
+    learned["held_aliases"] = held
+    if not safe:
+        entry["auto_apply"] = False
+        learned["auto_apply_written"] = False
+        learned["held_back"] = "не осталось вариантов, которые можно заменять молча"
+        report.demoted.append(canonical)
 
 
 def _promotable(entry: dict[str, Any], blocked: set[str]) -> tuple[bool, str | None]:
@@ -246,6 +295,14 @@ def learn(
     by_canonical = {
         normalize_text(str(item.get("canonical", ""))): item for item in entries
     }
+    # Человек мог назвать термину другое написание: «Астра» пишется
+    # по-русски, а проверяющая модель снова и снова пишет «Astra». Если
+    # чужой канон уже стоит вариантом в записи, которую правил человек, это
+    # та же запись, иначе скилл вырастил бы рядом прежнюю.
+    for item in entries:
+        if _edited_by_hand(item):
+            for alias in item.get("aliases", []):
+                by_canonical.setdefault(normalize_text(str(alias)), item)
     pending_by_alias: dict[str, dict[str, Any]] = {}
     for item in pending:
         for alias in item.get("aliases", []):
@@ -255,6 +312,15 @@ def learn(
         canonical = str(candidate.get("canonical", "")).strip()
         aliases = [str(alias) for alias in candidate.get("aliases", []) if str(alias).strip()]
         windows = int(candidate.get("count", 1))
+        known_entry = next(
+            (by_canonical[normalize_text(alias)] for alias in aliases
+             if normalize_text(alias) in by_canonical
+             and _edited_by_hand(by_canonical[normalize_text(alias)])),
+            None,
+        )
+        if not canonical and known_entry is not None:
+            # Написание этому месту человек уже назвал — ждать больше нечего.
+            canonical = str(known_entry["canonical"])
         if not canonical:
             # Написания нет ни у одной модели — назвать его может только
             # человек. Копим наблюдения, чтобы он увидел, насколько часто.
@@ -333,6 +399,7 @@ def learn(
         if _edited_by_hand(entry):
             continue
         if entry.get("auto_apply"):
+            _hold_unsafe_aliases(entry, blocked, report)
             continue
         ready, reason = _promotable(entry, blocked)
         if ready:
@@ -375,6 +442,19 @@ def save_document(path: Path, document: dict[str, Any]) -> None:
         except FileNotFoundError:
             pass
         raise
+
+
+def record_fingerprint(sha256: str, origin: str | None = None) -> str:
+    """Чем одна запись отличается от другой для порога «три разных записи».
+
+    По умолчанию — звук. Но у ролика по ссылке звук не единственный: его
+    качают заново, режут на клипы, берут левый канал, и каждый такой файл даёт
+    новый отпечаток. Три клипа одного спикера добирали бы порог в одиночку,
+    поэтому у записи по ссылке отпечаток — адрес.
+    """
+    if origin:
+        return hashlib.sha256(origin.strip().encode("utf-8")).hexdigest()[:12]
+    return sha256[:12]
 
 
 def update_from_run(

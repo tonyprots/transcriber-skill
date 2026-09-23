@@ -10,6 +10,7 @@ import yaml
 from audio_transcription.glossary import GlossaryEntry, merge_glossaries
 from audio_transcription.glossary_store import (
     load_document,
+    record_fingerprint,
     save_document,
     store_path,
     update_from_run,
@@ -168,3 +169,79 @@ def test_saved_document_stays_readable_yaml(tmp_path: Path) -> None:
     text = store.read_text(encoding="utf-8")
     assert text.startswith("# Словарь терминов"), "файл читает человек, а не только скилл"
     assert yaml.safe_load(text)["entries"][0]["canonical"] == "Threads"
+
+
+def _promote_threads(store: Path) -> None:
+    for source in ("rec1", "rec2", "rec3"):
+        entries, _ = update_from_run(store, _run("трэц", "Threads"), source=source)
+    assert entries[0].auto_apply is True
+
+
+def test_switched_on_entry_does_not_pick_up_an_unsafe_alias(tmp_path: Path) -> None:
+    """После повышения запись копит варианты дальше; «в» в них попасть не должно."""
+    store = tmp_path / "glossary.yaml"
+    _promote_threads(store)
+
+    entries, _ = update_from_run(store, _run("в", "Threads"), source="rec4")
+
+    assert entries[0].auto_apply is True
+    assert entries[0].aliases == ("трэц",)
+    assert load_document(store)["entries"][0]["learned"]["held_aliases"] == ["в"]
+
+
+def test_switched_on_entry_is_switched_off_when_its_alias_turns_out_ordinary(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "glossary.yaml"
+    _promote_threads(store)
+
+    entries, report = update_from_run(store, [], blocked={"трэц"}, source="rec4")
+
+    assert entries[0].auto_apply is False
+    assert report.demoted == ["Threads"]
+    assert "сняты с автозамены: Threads" in report.summary()
+
+
+def test_phrase_punctuation_does_not_become_part_of_the_term(tmp_path: Path) -> None:
+    store = tmp_path / "glossary.yaml"
+    entries, _ = update_from_run(
+        store, [_item("вкс, <unk>", "VKS, Байкал", comparison="VKS, Байкал")], source="rec1"
+    )
+
+    assert [(entry.canonical, list(entry.aliases)) for entry in entries] == [("VKS", ["вкс"])]
+
+
+def test_clips_of_one_video_are_one_recording() -> None:
+    """Три клипа одного ролика — одна запись, а не три доказательства."""
+    url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    assert record_fingerprint("a" * 64, url) == record_fingerprint("b" * 64, url)
+    assert record_fingerprint("a" * 64) != record_fingerprint("b" * 64)
+
+
+def test_spelling_named_by_a_human_is_not_relearned(tmp_path: Path) -> None:
+    """«Астра» пишется по-русски; модель, пишущая «Astra», не растит запись заново."""
+    store = tmp_path / "glossary.yaml"
+    save_document(
+        store,
+        {
+            "version": 1,
+            "entries": [
+                {
+                    "canonical": "Астра",
+                    "aliases": ["Astra"],
+                    "auto_apply": True,
+                    "learned": {"auto_apply_written": False, "sources": ["rec1"]},
+                }
+            ],
+            "pending": [],
+        },
+    )
+
+    entries, _ = update_from_run(store, _run("астра", "Astra"), source="rec2")
+    # Латиница у основной модели: раньше это место ушло бы ждать человека.
+    update_from_run(store, _run("Astra", "астро"), source="rec3")
+
+    document = load_document(store)
+    assert [entry.canonical for entry in entries] == ["Астра"]
+    assert document["entries"][0]["aliases"] == ["Astra"], "ручную запись автоматика не дополняет"
+    assert document["pending"] == []

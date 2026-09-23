@@ -43,7 +43,13 @@ from .glossary import (
     merge_glossaries,
     suggest_glossary_matches,
 )
-from .glossary_store import entries_of, load_document, store_path, update_from_run
+from .glossary_store import (
+    entries_of,
+    load_document,
+    record_fingerprint,
+    store_path,
+    update_from_run,
+)
 from .fillers import strip_filler_segments
 from .mining import undisputed_words
 from .models import AudioChunk, Diarization, Hypothesis, ReviewItem, Section
@@ -1040,7 +1046,17 @@ def _transcribe(
         review_items.sort(key=lambda item: (item.start, item.end, item.reason))
         readable_input, fillers_removed = strip_filler_segments(readable.segments)
         learned_report = None
-        if learned_path is not None and not args.no_learn:
+        # Отбор кандидатов ищет латиницу против кириллицы, то есть устроен под
+        # русскую речь. На английской записи латиница с обеих сторон, и в
+        # словарь шли служебные слова («the / tha», «and / an»). Читать словарь
+        # чужой маршрут по-прежнему может, пополнять — нет.
+        learns_from_route = route.language == "ru"
+        if learned_path is not None and not args.no_learn and not learns_from_route:
+            report.stage(
+                "Словарь не пополняется: отбор настроен на русский, "
+                f"а маршрут {route.language}"
+            )
+        if learned_path is not None and not args.no_learn and learns_from_route:
             try:
                 learned_entries, learned_report = update_from_run(
                     learned_path,
@@ -1053,7 +1069,7 @@ def _transcribe(
                     },
                     # Отпечаток записи, а не запуска: перепрогон того же файла
                     # не должен считаться вторым доказательством.
-                    source=media.sha256[:12],
+                    source=record_fingerprint(media.sha256, media.origin),
                 )
                 # Порядок важен: словарь пополняется до применения, поэтому
                 # термин, добравший порог на этой записи, правит уже её текст,

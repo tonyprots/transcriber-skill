@@ -49,6 +49,23 @@ def aligned_words(heard: str, verifier: str) -> list[tuple[str, str]]:
     return list(zip(left, right)) if len(left) == len(right) else []
 
 
+# Края слова, которые принадлежат фразе, а не термину. `+` и `#` не трогаем:
+# без них «C++» и «C#» станут «C».
+_EDGE_PUNCTUATION = re.compile(r"^[^\w+#]+|[^\w+#]+$")
+
+
+def clean_token(token: str) -> str:
+    """Слово из расхождения без пунктуации фразы; служебный токен — пустая строка.
+
+    Расхождение режется по пробелам вместе со знаками: «ВКС, / VKS,» давало
+    канон `VKS,`, и замена срабатывала только перед запятой. `<unk>` — не
+    слово, а метка модели «здесь было что-то непонятное».
+    """
+    if "<" in token or ">" in token:
+        return ""
+    return _EDGE_PUNCTUATION.sub("", token)
+
+
 def term_shaped(heard: str, verifier: str) -> bool:
     """Похоже ли расхождение на термин, а не на обычную ослышку.
 
@@ -81,6 +98,9 @@ def collect_candidates(
             if not left or not right:
                 continue
             for heard, verifier in aligned_words(left, right):
+                heard, verifier = clean_token(heard), clean_token(verifier)
+                if not heard or not verifier:
+                    continue
                 if heard in known or verifier in known:
                     continue
                 if not (_LETTER.search(heard) and _LETTER.search(verifier)):

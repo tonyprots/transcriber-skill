@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "transcriber"
 # Одна точка правды — audio_transcription.__version__; сверяет
 # tests/test_docs_consistency.py.
-version = "0.15.0"
+version = "0.15.1"
 description = "Локальная расшифровка аудио с независимой сверкой двух ASR и диаризацией"
 requires-python = ">=3.10"
 dynamic = ["dependencies", "optional-dependencies"]
