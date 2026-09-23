@@ -2,7 +2,7 @@ import wave
 from pathlib import Path
 
 from audio_transcription.models import AudioChunk
-from audio_transcription.retry import recognize_with_retry
+from audio_transcription.retry import crash_error, recognize_with_retry
 
 
 def write_wav(path: Path, seconds: int = 8) -> None:
@@ -61,3 +61,36 @@ def test_short_failed_window_is_not_split(tmp_path: Path) -> None:
     assert result["status"] == "failed"
     assert result["retry_attempts"] == 1
     assert not (tmp_path / "retry").exists()
+
+
+def test_crash_error_separates_environment_failure_from_empty_answer(tmp_path: Path) -> None:
+    source = tmp_path / "chunk.wav"
+    write_wav(source)
+    chunk = AudioChunk(0, source, 0.0, 8.0)
+
+    def shutting_down(_: AudioChunk) -> dict:
+        raise OSError("dlopen: system is shutting down")
+
+    crashed = recognize_with_retry(chunk, shutting_down, tmp_path / "crash")
+    silent = recognize_with_retry(chunk, lambda _: {"text": ""}, tmp_path / "silent")
+
+    assert crashed["status"] == silent["status"] == "failed"
+    assert "shutting down" in str(crash_error(crashed))
+    assert crash_error(silent) is None
+
+
+def test_crash_inside_partial_window_is_found(tmp_path: Path) -> None:
+    source = tmp_path / "chunk.wav"
+    write_wav(source)
+    chunk = AudioChunk(0, source, 0.0, 8.0)
+
+    def recognize(part: AudioChunk) -> dict:
+        if part.duration > 4:
+            return {"text": ""}
+        if part.start < 4:
+            return {"text": "левая часть"}
+        raise RuntimeError("сбой декодера")
+
+    result = recognize_with_retry(chunk, recognize, tmp_path / "retry")
+    assert result["status"] == "partial"
+    assert crash_error(result) == "сбой декодера"

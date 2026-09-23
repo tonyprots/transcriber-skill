@@ -29,6 +29,7 @@ from .catalog import (
     staleness_warnings,
 )
 from .cache import (
+    crashed_windows,
     cache_key,
     load_diarization,
     load_hypothesis,
@@ -500,6 +501,39 @@ def primary_retry_items(primary: Hypothesis) -> list[ReviewItem]:
     return items
 
 
+# Доля окон, которую основная модель может не распознать без тревоги. На 388
+# прошлых прогонах пустой ответ давал до 10,3 % окон (шум на встрече), поэтому
+# порог вдвое выше. Падение на исключении тревожно при любой доле: в тех же
+# прогонах его не было ни разу.
+FAILED_SHARE_WARNING = 0.2
+
+
+def primary_failure_warning(primary: Hypothesis) -> str | None:
+    """Предупреждение, если основная модель провалила заметную часть окон.
+
+    Без него провал выглядел как успех: 2026-09-23 все 608 окон упали, а
+    `warnings` был пуст, и о пустой расшифровке говорили только 608 пунктов
+    очереди.
+    """
+    chunks = [chunk for chunk in primary.metadata.get("chunks", []) if isinstance(chunk, dict)]
+    if not chunks:
+        return None
+    failed = sum(chunk.get("status") == "failed" for chunk in chunks)
+    crashes = crashed_windows(primary)
+    if not crashes and failed / len(chunks) < FAILED_SHARE_WARNING:
+        return None
+    text = (
+        f"Основная модель {primary.model} не распознала {failed} из {len(chunks)} "
+        f"окон ({failed / len(chunks):.0%}); расшифровка неполна"
+    )
+    if crashes:
+        text += (
+            f". Окон со сбоем среды: {len(crashes)}, первая ошибка: {crashes[0]}. "
+            "В кэш результат не сохранён — повторный прогон посчитает их заново"
+        )
+    return text
+
+
 def _slug(title: str) -> str:
     """Имя каталога из заголовка видео: только то, что безопасно в пути."""
     cleaned = re.sub(r"[^\w\s-]", "", title, flags=re.UNICODE).strip().lower()
@@ -916,6 +950,12 @@ def _transcribe(
         else:
             report.stage(f"Основная модель {route.primary.model}: результат из кэша")
         mark = timed("primary", mark)
+        failure = primary_failure_warning(readable)
+        if failure:
+            # Громче остальных: провал модели нельзя спрятать за `--quiet`,
+            # иначе пустой результат снова выглядит успешным.
+            print(f"Внимание: {failure}", file=sys.stderr, flush=True)
+            warnings.append(failure)
         hypotheses = [readable]
         review_items: list[ReviewItem] = primary_retry_items(readable)
 

@@ -328,3 +328,47 @@ def test_two_sections_of_one_file_do_not_share_cache(
             )
         )
     assert len(keys) == 2 and keys[0] != keys[1]
+
+
+@requires_speech
+def test_crashed_primary_warns_and_is_recomputed_next_run(
+    tmp_path: Path, spoken_audio: Path, monkeypatch, capsys
+) -> None:
+    """Сценарий 2026-09-23: выключение системы уронило все окна основной модели.
+
+    Тогда провал ушёл в кэш, а повтор выдал пустую расшифровку без единого
+    предупреждения. Теперь первый прогон кричит, второй считает заново.
+    """
+    def crashing_backend(backend, chunks, language, work_dir, **kwargs):
+        if backend != "gigaam" or kwargs["config"]["model_name"] != GIGAAM_RUSSIAN.model:
+            return fake_backend(backend, chunks, language, work_dir, **kwargs)
+        chunks = list(chunks)
+        metadata = {"chunks": [
+            {"sequence": chunk.sequence, "start": chunk.start, "end": chunk.end,
+             "text": "", "status": "failed", "retry_attempts": 1, "retry_depth": 0,
+             "error": "dlopen(libonnxruntime.dylib): system is shutting down"}
+            for chunk in chunks
+        ]}
+        return Hypothesis(f"{backend}-fake", language, 0.1, [], metadata=metadata)
+
+    def argv(output: Path) -> list[str]:
+        return [str(spoken_audio), "--output", str(output), "--mode", "fast",
+                "--language", "ru", "--cache-dir", str(tmp_path / "cache"),
+                "--no-glossary", "--quiet"]
+
+    monkeypatch.setattr(cli, "run_isolated_backend", crashing_backend)
+    assert cli.main(argv(tmp_path / "broken")) == 0
+    captured = capsys.readouterr()
+    stdout = json.loads(captured.out)
+    assert any("не распознала" in item and "system is shutting down" in item
+               for item in stdout["warnings"])
+    assert "не распознала" in captured.err
+    manifest = json.loads((tmp_path / "broken" / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["warnings"] == stdout["warnings"]
+
+    monkeypatch.setattr(cli, "run_isolated_backend", fake_backend)
+    assert cli.main(argv(tmp_path / "healed")) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["warnings"] == []
+    assert "не распознала" not in captured.err
+    assert "PostgreSQL" in (tmp_path / "healed" / "readable.md").read_text(encoding="utf-8")

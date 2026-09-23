@@ -10,9 +10,30 @@ from .models import AudioChunk
 
 Recognition = dict[str, Any]
 
+EMPTY_TEXT = "модель вернула пустой текст"
+
 
 def _failure_reason(error: Exception | None, text: str) -> str:
-    return str(error) if error is not None else "модель вернула пустой текст"
+    return str(error) if error is not None else EMPTY_TEXT
+
+
+def crash_error(window: Recognition) -> str | None:
+    """Текст исключения, на котором упало окно или его часть, иначе None.
+
+    Пустой текст — ответ модели: на шуме и тишине он повторяется от прогона к
+    прогону (на 388 прошлых прогонах так кончалось до 10 % окон встречи).
+    Исключение — сбой среды: 2026-09-23 выключение системы уронило все 608 окон
+    с `dlopen ... system is shutting down`. Первое можно помнить, второе нельзя.
+    """
+    subchunks = window.get("subchunks")
+    if subchunks:
+        return next(
+            (error for child in subchunks if (error := crash_error(child))), None
+        )
+    if window.get("status") != "failed":
+        return None
+    error = str(window.get("error") or EMPTY_TEXT)
+    return None if error == EMPTY_TEXT else error
 
 
 def _merge_children(

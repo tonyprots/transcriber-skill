@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import Diarization, Hypothesis
+from .retry import crash_error
 
 
 CACHE_SCHEMA = 1
@@ -23,6 +24,16 @@ def cache_key(stage: str, payload: dict[str, Any]) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
+def crashed_windows(hypothesis: Hypothesis) -> list[str]:
+    """Ошибки окон, упавших на исключении, а не на пустом ответе модели."""
+    chunks = hypothesis.metadata.get("chunks") or []
+    return [
+        error
+        for chunk in chunks
+        if isinstance(chunk, dict) and (error := crash_error(chunk))
+    ]
+
+
 def load_hypothesis(cache_dir: Path, key: str) -> Hypothesis | None:
     path = cache_dir / "hypotheses" / f"{key}.json"
     if not path.is_file():
@@ -30,6 +41,10 @@ def load_hypothesis(cache_dir: Path, key: str) -> Hypothesis | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         hypothesis = Hypothesis.from_dict(payload)
+        # Записи, сохранённые до этой проверки, могли запомнить сбой среды
+        # как результат. Такую запись не отдаём: окна посчитаются заново.
+        if crashed_windows(hypothesis):
+            return None
         metadata = dict(hypothesis.metadata)
         metadata["cache_hit"] = True
         metadata["cached_elapsed_seconds"] = payload.get("elapsed_seconds")
@@ -44,8 +59,18 @@ def load_hypothesis(cache_dir: Path, key: str) -> Hypothesis | None:
         return None
 
 
-def save_hypothesis(cache_dir: Path, key: str, hypothesis: Hypothesis) -> None:
+def save_hypothesis(cache_dir: Path, key: str, hypothesis: Hypothesis) -> bool:
+    """Сохраняет гипотезу, если в ней нет окон, упавших на исключении.
+
+    Иначе сбой одного прогона стал бы ответом всех следующих: 2026-09-23
+    прогон, прерванный выключением системы, запомнил 608 пустых окон, и
+    повтор за 0,24 с выдал пустую расшифровку. Досчитывать только упавшие
+    окна не стали: у сбоя среды обычно падает всё, и выгода была бы мнимой.
+    """
+    if crashed_windows(hypothesis):
+        return False
     _save_json(cache_dir / "hypotheses", key, hypothesis.to_dict())
+    return True
 
 
 def load_diarization(cache_dir: Path, key: str) -> Diarization | None:
