@@ -14,6 +14,7 @@ import subprocess
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 from .audio import find_command
@@ -290,6 +291,40 @@ def fetch_subtitles(
     return files[0], track
 
 
+def expand_playlist(url: str, *, limit: int | None = None) -> list[str]:
+    """Ссылки на ролики плейлиста или канала по порядку; у ролика — он сам.
+
+    Без этого плейлист перечисляли руками: `--no-playlist` стоит во всех
+    вызовах, и ссылка на плейлист давала один первый ролик.
+    """
+    from . import yandex_music
+
+    if yandex_music.track_id(url):
+        return [url]
+    arguments = ["--flat-playlist", "--dump-single-json"]
+    if limit:
+        arguments += ["--playlist-end", str(limit)]
+    payload = _run_yt_dlp(
+        [*arguments, url], failure=f"yt-dlp не открыл плейлист: {url}", playlist=True
+    )
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError as error:
+        raise FetchError(f"yt-dlp вернул не JSON: {error}") from error
+    if data.get("_type") != "playlist":
+        return [url]
+    links = [
+        str(link)
+        for entry in data.get("entries") or []
+        if isinstance(entry, dict)
+        and (link := entry.get("webpage_url") or entry.get("url"))
+        and looks_like_url(str(link))
+    ]
+    if not links:
+        raise FetchError(f"В плейлисте нет доступных роликов: {url}")
+    return links[:limit] if limit else links
+
+
 def fetch_audio(url: str, dest_dir: Path) -> Path:
     """Скачивает лёгкую аудиодорожку без перекодирования — WAV сделает конвейер."""
     from . import yandex_music
@@ -400,8 +435,10 @@ def _clean(line: str) -> str:
     return re.sub(r"\s+", " ", html.unescape(_TAG.sub("", line))).strip()
 
 
-def _run_yt_dlp(arguments: Sequence[str], failure: str) -> str:
-    command = [require_yt_dlp(), "--no-playlist", *arguments]
+def _run_yt_dlp(arguments: Sequence[str], failure: str, *, playlist: bool = False) -> str:
+    # Ссылка на ролик внутри плейлиста (`watch?v=…&list=…`) без этого флага
+    # тянет весь плейлист. Плейлист целиком разворачивает только `expand_playlist`.
+    command = [require_yt_dlp(), *(() if playlist else ("--no-playlist",)), *arguments]
     for pause in (*_RETRY_PAUSES_SECONDS, None):
         completed = subprocess.run(command, capture_output=True, text=True, check=False)
         if completed.returncode == 0:
@@ -409,7 +446,61 @@ def _run_yt_dlp(arguments: Sequence[str], failure: str) -> str:
         if pause is None or "HTTP Error 429" not in completed.stderr:
             break
         _sleep(pause)
-    raise FetchError(_tail(completed.stderr) or failure)
+    raise FetchError(_with_version_hint(_tail(completed.stderr) or failure))
+
+
+# yt-dlp обновляется раз в две-три недели, а сайты ломают его старые версии
+# ещё чаще. Устаревший yt-dlp — самая частая причина отказа ссылки
+# (references/remote-sources.md), поэтому о возрасте говорим прямо в ошибке.
+YT_DLP_SHELF_LIFE_DAYS = 30
+_YT_DLP_VERSION = re.compile(r"^(\d{4})\.(\d{1,2})\.(\d{1,2})")
+
+
+def yt_dlp_status(today: date | None = None) -> dict[str, object]:
+    """Где yt-dlp, какой версии и сколько ей дней. Без сети."""
+    path = find_command("yt-dlp")
+    if not path:
+        return {"path": None, "version": None, "age_days": None, "stale": False}
+    try:
+        version = subprocess.run(
+            [path, "--version"], capture_output=True, text=True, timeout=20, check=False
+        ).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        version = ""
+    age = None
+    if match := _YT_DLP_VERSION.match(version):
+        try:
+            released = date(*map(int, match.groups()))
+        except ValueError:
+            released = None
+        if released:
+            age = ((today or date.today()) - released).days
+    return {
+        "path": path,
+        "version": version or None,
+        "age_days": age,
+        "stale": age is not None and age > YT_DLP_SHELF_LIFE_DAYS,
+    }
+
+
+def update_hint(status: dict[str, object]) -> str:
+    """Команда обновления под способ установки: brew, pip или сам бинарник."""
+    path = str(status.get("path") or "")
+    if "/homebrew/" in path or "/Cellar/" in path or path.startswith("/usr/local/bin"):
+        return "brew upgrade yt-dlp"
+    if "/.venv/" in path or "site-packages" in path or "/pipx/" in path:
+        return "pip install -U yt-dlp"
+    return "yt-dlp -U"
+
+
+def _with_version_hint(message: str) -> str:
+    status = yt_dlp_status()
+    if not status["stale"]:
+        return message
+    return (
+        f"{message}\n(yt-dlp {status['version']} — {status['age_days']} дн.; "
+        f"сайты часто ломают старые версии — обновите, если есть новее: {update_hint(status)})"
+    )
 
 
 def _tail(stderr: str, limit: int = 400) -> str:

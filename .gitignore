@@ -26,3 +26,6 @@ experiments/*
 !experiments/window-cost/
 !experiments/review-queue-eval/
 /scripts/
+
+# Рабочие копии веток (git worktree)
+.worktrees/

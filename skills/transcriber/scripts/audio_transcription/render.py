@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .audio import SAMPLE_RATE, MediaToolError
-from .models import Correction, Diarization, Hypothesis, MediaInfo, ReviewItem, Segment
+from .models import Correction, Diarization, Hypothesis, MediaInfo, ReviewItem, Section, Segment
 from .reconcile import MINOR_KINDS
 
 
@@ -22,7 +22,36 @@ def format_timestamp(seconds: float, *, srt: bool = False) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}{separator}{millis:03d}"
 
 
-def _speaker_name(identifier: str) -> str:
+SpeakerNames = dict[str, str]
+
+
+def parse_speaker_names(text: str) -> SpeakerNames:
+    """`1=Антон,2=Мария` → {"speaker_1": "Антон", "speaker_2": "Мария"}.
+
+    Номер тот же, что в «Спикер 1» готовой расшифровки: по нему имя и
+    назначают, прочитав текст. `unknown=…` переименовывает неразмеченную речь.
+    """
+    names: SpeakerNames = {}
+    for part in filter(None, (item.strip() for item in text.split(","))):
+        key, separator, name = part.partition("=")
+        key, name = key.strip(), name.strip()
+        if not separator or not key or not name:
+            raise ValueError(f"Имя спикера задаётся как НОМЕР=ИМЯ, а не «{part}»")
+        if key.isdigit():
+            key = f"speaker_{int(key)}"
+        elif key.lower() in {"unknown", "неизвестный"}:
+            key = "unknown"
+        elif not (key.startswith("speaker_") and key[8:].isdigit()):
+            raise ValueError(f"Непонятный номер спикера: «{key}»; ожидался 1, 2, … или unknown")
+        names[key] = name
+    if not names:
+        raise ValueError("Не задано ни одного имени спикера")
+    return names
+
+
+def _speaker_name(identifier: str, names: SpeakerNames | None = None) -> str:
+    if names and identifier in names:
+        return names[identifier]
     if identifier == "unknown":
         return "Неизвестный спикер"
     if identifier.startswith("speaker_") and identifier[8:].isdigit():
@@ -30,23 +59,23 @@ def _speaker_name(identifier: str) -> str:
     return identifier
 
 
-def _speaker_prefix(segment: Segment) -> str:
+def _speaker_prefix(segment: Segment, names: SpeakerNames | None = None) -> str:
     if not segment.speakers:
         return ""
-    names = " + ".join(_speaker_name(item) for item in segment.speakers)
-    return f"{names}: " if len(segment.speakers) == 1 else f"Перекрытие ({names}): "
+    label = " + ".join(_speaker_name(item, names) for item in segment.speakers)
+    return f"{label}: " if len(segment.speakers) == 1 else f"Перекрытие ({label}): "
 
 
-def _markdown(segments: list[Segment], title: str) -> str:
+def _markdown(segments: list[Segment], title: str, names: SpeakerNames | None = None) -> str:
     lines = [f"# {title}", ""]
     for segment in segments:
-        prefix = _speaker_prefix(segment)
+        prefix = _speaker_prefix(segment, names)
         lines.append(f"[{format_timestamp(segment.start)}] {prefix}{segment.text.strip()}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _srt(segments: list[Segment]) -> str:
+def _srt(segments: list[Segment], names: SpeakerNames | None = None) -> str:
     blocks = []
     for index, segment in enumerate(segments, start=1):
         blocks.append(
@@ -54,21 +83,21 @@ def _srt(segments: list[Segment]) -> str:
                 [
                     str(index),
                     f"{format_timestamp(segment.start, srt=True)} --> {format_timestamp(segment.end, srt=True)}",
-                    f"{_speaker_prefix(segment)}{segment.text.strip()}",
+                    f"{_speaker_prefix(segment, names)}{segment.text.strip()}",
                 ]
             )
         )
     return "\n\n".join(blocks) + ("\n" if blocks else "")
 
 
-def _vtt(segments: list[Segment]) -> str:
+def _vtt(segments: list[Segment], names: SpeakerNames | None = None) -> str:
     blocks = ["WEBVTT"]
     for segment in segments:
         blocks.append(
             "\n".join(
                 [
                     f"{format_timestamp(segment.start)} --> {format_timestamp(segment.end)}",
-                    f"{_speaker_prefix(segment)}{segment.text.strip()}",
+                    f"{_speaker_prefix(segment, names)}{segment.text.strip()}",
                 ]
             )
         )
@@ -235,6 +264,59 @@ def ensure_disk_space(
         )
 
 
+def _write_texts(
+    directory: Path,
+    lexical_segments: list[Segment],
+    readable_segments: list[Segment],
+    *,
+    scope: str,
+    names: SpeakerNames | None,
+) -> None:
+    """Четыре файла, которые читает человек: в них и только в них живут имена."""
+    # Про фрагмент говорит заголовок: без него таймкоды с 00:10:50
+    # выглядят как потерянное начало записи.
+    (directory / "verbatim.md").write_text(
+        _markdown(lexical_segments, f"Дословная расшифровка{scope}", names), encoding="utf-8"
+    )
+    (directory / "readable.md").write_text(
+        _markdown(readable_segments, f"Читаемая расшифровка{scope}", names), encoding="utf-8"
+    )
+    (directory / "subtitles.srt").write_text(_srt(readable_segments, names), encoding="utf-8")
+    (directory / "subtitles.vtt").write_text(_vtt(readable_segments, names), encoding="utf-8")
+
+
+def rename_speakers(output_dir: Path, names: SpeakerNames) -> list[str]:
+    """Переписывает готовый результат с именами вместо «Спикер N».
+
+    Имена обычно известны только после чтения текста, поэтому пересборка
+    идёт из `segments.json`, без пересчёта звука. Машинные файлы (`raw.json`,
+    `segments.json`, `speakers.json`) хранят исходные метки: имя — подпись для
+    человека, а не данные. Возвращает метки, которых в записи нет.
+    """
+    output_dir = output_dir.expanduser().resolve()
+    manifest_path = output_dir / "manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"Нет manifest.json: {output_dir} — это не результат transcriber")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    stored = json.loads((output_dir / "segments.json").read_text(encoding="utf-8"))
+    readable = [Segment.from_dict(item) for item in stored["readable"]]
+    lexical = [Segment.from_dict(item) for item in stored["hypotheses"][0]["segments"]]
+    present = {speaker for segment in readable + lexical for speaker in segment.speakers}
+    if not present:
+        raise ValueError("В этой расшифровке нет разметки по говорящим: запускали без --diarize")
+    merged = {**(manifest.get("speaker_names") or {}), **names}
+    section = (manifest.get("source") or {}).get("section")
+    scope = (
+        f" (фрагмент {Section(float(section['start']), float(section['end'])).label})"
+        if isinstance(section, dict)
+        else ""
+    )
+    _write_texts(output_dir, lexical, readable, scope=scope, names=merged)
+    manifest["speaker_names"] = merged
+    _write_json(manifest_path, manifest)
+    return sorted(set(names) - present)
+
+
 def write_bundle(
     output_dir: Path,
     *,
@@ -257,6 +339,7 @@ def write_bundle(
     generator: str | None = None,
     fillers_removed: int = 0,
     model_revisions: dict[str, str | None] | None = None,
+    speaker_names: SpeakerNames | None = None,
 ) -> Path:
     output_dir = ensure_output_available(output_dir, overwrite=overwrite)
     staging = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}-", dir=output_dir.parent))
@@ -306,6 +389,7 @@ def write_bundle(
             "warnings": warnings or [],
             "diarization_model": diarization.model if diarization else None,
             "speaker_count": len(diarization.speakers) if diarization else None,
+            "speaker_names": speaker_names or {},
             "timings_seconds": timings or {},
             "files": files,
         }
@@ -313,15 +397,13 @@ def write_bundle(
         _write_json(staging / "raw.json", raw)
         # Про фрагмент говорит заголовок: без него таймкоды с 00:10:50
         # выглядят как потерянное начало записи.
-        scope = f" (фрагмент {media.section.label})" if media.section else ""
-        (staging / "verbatim.md").write_text(
-            _markdown(lexical_segments, f"Дословная расшифровка{scope}"), encoding="utf-8"
+        _write_texts(
+            staging,
+            lexical_segments,
+            readable_segments,
+            scope=f" (фрагмент {media.section.label})" if media.section else "",
+            names=speaker_names,
         )
-        (staging / "readable.md").write_text(
-            _markdown(readable_segments, f"Читаемая расшифровка{scope}"), encoding="utf-8"
-        )
-        (staging / "subtitles.srt").write_text(_srt(readable_segments), encoding="utf-8")
-        (staging / "subtitles.vtt").write_text(_vtt(readable_segments), encoding="utf-8")
         _write_json(
             staging / "segments.json",
             {

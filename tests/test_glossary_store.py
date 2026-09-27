@@ -245,3 +245,86 @@ def test_spelling_named_by_a_human_is_not_relearned(tmp_path: Path) -> None:
     assert [entry.canonical for entry in entries] == ["Астра"]
     assert document["entries"][0]["aliases"] == ["Astra"], "ручную запись автоматика не дополняет"
     assert document["pending"] == []
+
+
+def _learned(canonical: str, aliases: list[str], **learned) -> dict:
+    return {
+        "canonical": canonical,
+        "aliases": aliases,
+        "auto_apply": False,
+        "learned": {"auto_apply_written": False, "windows": 1, **learned},
+    }
+
+
+def test_prune_removes_coincidences_and_keeps_terms() -> None:
+    from audio_transcription.glossary_store import prune
+
+    document = {
+        "entries": [
+            _learned("Zon", ["там"], seen_as_word=True),
+            _learned("D", ["и"]),
+            # Кириллическая запись термина — не мусор, хоть и «обычное слово».
+            _learned("Anthropic", ["антропик"], seen_as_word=True),
+            _learned("SEO", ["там", "сео"], seen_as_word=True),
+            _learned("Q4", ["ку-4"]),
+        ],
+        "pending": [],
+    }
+    cleaned, report = prune(document)
+    assert [item["canonical"] for item in cleaned["entries"]] == ["Anthropic", "SEO", "Q4"]
+    seo = cleaned["entries"][1]
+    assert seo["aliases"] == ["сео"] and seo["learned"]["pruned_aliases"] == ["там"]
+    assert {item["canonical"] for item in cleaned["pruned"]} == {"Zon", "D"}
+    assert all(item["reason"] for item in cleaned["pruned"])
+
+
+def test_prune_never_touches_hand_and_switched_on_entries() -> None:
+    from audio_transcription.glossary_store import prune
+
+    hand = {"canonical": "Битрикс24", "aliases": ["битрикс"], "auto_apply": True}
+    switched_on = {
+        "canonical": "Threads",
+        "aliases": ["трэц"],
+        "auto_apply": True,
+        "learned": {"auto_apply_written": True, "seen_as_word": True},
+    }
+    duplicate = _learned("BITREX", ["битрикс"])
+    cleaned, report = prune({"entries": [hand, switched_on, duplicate], "pending": []})
+    assert cleaned["entries"] == [hand, switched_on]
+    assert "поглощена ручной записью «Битрикс24»" in report.removed[0]["reason"]
+
+
+def test_shared_alias_stays_with_the_stronger_entry() -> None:
+    from audio_transcription.glossary_store import prune
+
+    weak = _learned("OPNN", ["опен"], windows=1)
+    strong = _learned("Open", ["опен", "оупен"], windows=5)
+    cleaned, report = prune({"entries": [weak, strong], "pending": []})
+    assert [item["canonical"] for item in cleaned["entries"]] == ["Open"]
+    assert report.trimmed == [{"canonical": "OPNN", "aliases": ["опен"]}]
+
+
+def test_pruned_term_is_not_learned_again(tmp_path: Path) -> None:
+    store = tmp_path / "glossary.yaml"
+    store.write_text(
+        yaml.safe_dump(
+            {"version": 1, "entries": [], "pending": [], "pruned": [{"canonical": "Zon", "aliases": ["там"], "reason": "x"}]},
+            allow_unicode=True,
+        )
+    )
+    entries, report = update_from_run(store, _run("зон", "Zon"), source="rec1")
+    assert not any(entry.canonical == "Zon" for entry in entries)
+
+
+def test_verifier_spelling_of_a_hand_term_reinforces_it(tmp_path: Path) -> None:
+    store = tmp_path / "glossary.yaml"
+    store.write_text(
+        yaml.safe_dump(
+            {"version": 1, "entries": [{"canonical": "Битрикс24", "aliases": ["битрикс"], "auto_apply": True}]},
+            allow_unicode=True,
+        )
+    )
+    entries, report = update_from_run(store, _run("битрикс", "BITREX"), source="rec1")
+    assert [entry.canonical for entry in entries] == ["Битрикс24"]
+    # Не завели и тут же убрали, а сразу засчитали ручной записи.
+    assert report.added == [] and report.reinforced == ["Битрикс24"]

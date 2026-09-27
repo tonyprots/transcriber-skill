@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from audio_transcription import cli
+from audio_transcription.backends import language_hypothesis
 from audio_transcription.catalog import GIGAAM_RUSSIAN, hf_cache_dir
 from audio_transcription.models import Hypothesis, Segment
 
@@ -55,6 +56,8 @@ def fake_backend(backend: str, chunks, language: str, work_dir: Path, **kwargs) 
     `metadata["chunks"]` обязателен: по `sequence` результат проверяющей
     раскладывается обратно на исходные окна, и без него распаковка вернёт пусто.
     """
+    if backend.endswith("-lid"):
+        return language_hypothesis(backend, [{"ru": 0.97, "en": 0.03}] * len(chunks), 0.1)
     text = PRIMARY_TEXT if backend == "gigaam" else VERIFIER_TEXT
     chunks = list(chunks)
     segments = [Segment(chunk.start, chunk.end, text) for chunk in chunks]

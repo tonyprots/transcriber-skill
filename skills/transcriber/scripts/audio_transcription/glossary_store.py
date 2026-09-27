@@ -25,6 +25,10 @@
     pending:            # термин слышно, правильного написания нет ни у кого
       - aliases: [трэдс, treds]
         runs: 1
+    pruned:             # снято уборкой (`prune`) с причиной; заново не заводится
+      - canonical: Zon
+        aliases: [там]
+        reason: вариант встречается как обычное слово
 
 `entries` читает обычный `load_glossary`, `pending` и `learned` он игнорирует.
 
@@ -102,6 +106,7 @@ class LearnReport:
     pending: list[str] = field(default_factory=list)
     blocked: list[str] = field(default_factory=list)
     demoted: list[str] = field(default_factory=list)
+    pruned: list[str] = field(default_factory=list)
     total_entries: int = 0
     path: str | None = None
 
@@ -113,6 +118,7 @@ class LearnReport:
             "pending": self.pending,
             "blocked": self.blocked,
             "demoted": self.demoted,
+            "pruned": self.pruned,
             "total_entries": self.total_entries,
             "path": self.path,
         }
@@ -128,6 +134,8 @@ class LearnReport:
             parts.append(f"сняты с автозамены: {', '.join(self.demoted)}")
         if self.pending:
             parts.append(f"ждут написания {len(self.pending)}")
+        if self.pruned:
+            parts.append(f"убрано мусорных {len(self.pruned)}")
         if not parts:
             return None
         return f"Словарь: {'; '.join(parts)} (всего записей {self.total_entries})"
@@ -153,8 +161,9 @@ def load_document(path: Path) -> dict[str, Any]:
     payload.setdefault("version", 1)
     payload.setdefault("entries", [])
     payload.setdefault("pending", [])
-    if not isinstance(payload["entries"], list) or not isinstance(payload["pending"], list):
-        raise ValueError(f"В словаре {path} entries и pending должны быть списками")
+    payload.setdefault("pruned", [])
+    if not all(isinstance(payload[key], list) for key in ("entries", "pending", "pruned")):
+        raise ValueError(f"В словаре {path} entries, pending и pruned должны быть списками")
     return payload
 
 
@@ -303,6 +312,13 @@ def learn(
         if _edited_by_hand(item):
             for alias in item.get("aliases", []):
                 by_canonical.setdefault(normalize_text(str(alias)), item)
+    # Снятое уборкой не возвращается из следующего расхождения: иначе «E ← и»
+    # вырастало бы заново после каждого прогона.
+    pruned_canonicals = {
+        normalize_text(str(item.get("canonical", "")))
+        for item in document.get("pruned", [])
+        if isinstance(item, dict)
+    }
     pending_by_alias: dict[str, dict[str, Any]] = {}
     for item in pending:
         for alias in item.get("aliases", []):
@@ -318,9 +334,15 @@ def learn(
              and _edited_by_hand(by_canonical[normalize_text(alias)])),
             None,
         )
-        if not canonical and known_entry is not None:
-            # Написание этому месту человек уже назвал — ждать больше нечего.
+        if known_entry is not None and (
+            not canonical or normalize_text(canonical) not in by_canonical
+        ):
+            # Написание этому месту человек уже назвал — ждать больше нечего,
+            # а своё написание проверяющей («BITREX» против ручного
+            # «Битрикс24») — не повод растить рядом вторую запись.
             canonical = str(known_entry["canonical"])
+        if canonical and normalize_text(canonical) in pruned_canonicals:
+            continue
         if not canonical:
             # Написания нет ни у одной модели — назвать его может только
             # человек. Копим наблюдения, чтобы он увидел, насколько часто.
@@ -374,7 +396,10 @@ def learn(
             report.added.append(canonical)
         else:
             learned = entry.setdefault("learned", {})
+            dropped = {normalize_text(str(item)) for item in learned.get("pruned_aliases", [])}
             for alias in aliases:
+                if normalize_text(alias) in dropped:
+                    continue
                 if not _edited_by_hand(entry) and alias not in entry.get("aliases", []):
                     entry.setdefault("aliases", []).append(alias)
             learned["latin"] = bool(learned.get("latin", False)) or bool(
@@ -415,7 +440,147 @@ def learn(
     document["version"] = document.get("version", 1)
     document["entries"] = entries
     document["pending"] = pending
-    report.total_entries = len(entries)
+    document, pruned = prune(document, today=today)
+    report.pruned = [str(item.get("canonical")) for item in pruned.removed]
+    report.total_entries = len(document["entries"])
+    return document, report
+
+
+# Вариант короче трёх букв — «и», «в», «с», «НА». Такой запись не сделает
+# термином никогда: литеральная замена двухбуквенного куска бьёт по тексту.
+PRUNE_MAX_ALIAS_LETTERS = 2
+
+
+@dataclass
+class PruneReport:
+    removed: list[dict[str, Any]] = field(default_factory=list)
+    trimmed: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"removed": self.removed, "trimmed": self.trimmed}
+
+
+def _junk_alias(alias: str, canonical: str, seen_as_word: bool) -> str | None:
+    """Почему вариант — совпадение, а не ослышка термина. None — ослышка.
+
+    Одного флага «встречается как обычное слово» мало: «антропик» обе модели
+    пишут кириллицей, и Anthropic от этого не перестаёт быть термином. Мусор
+    отличает второе условие — вариант не звучит как канон («там» → «Zon»).
+    """
+    if sum(char.isalnum() for char in alias) <= PRUNE_MAX_ALIAS_LETTERS:
+        return "короче трёх знаков"
+    if seen_as_word:
+        score = phonetic_similarity(alias, canonical)
+        if score < PROMOTE_MIN_PHONETIC:
+            return f"обычное слово, не похожее на «{canonical}» ({score:.2f})"
+    return None
+
+
+def prune(
+    document: dict[str, Any], *, today: date | None = None
+) -> tuple[dict[str, Any], PruneReport]:
+    """Уборка словаря: мусор, дубли ручных записей и спорные варианты.
+
+    Ревью 2026-09-27: из 195 записей треть не могла стать термином никогда
+    («E ← и», «Zon ← там», «M ← угу»), а подсветку в review-needed.md давала.
+    Ручные записи не трогаются. Снятое не удаляется, а уезжает в `pruned` с
+    причиной — и оттуда же `learn` узнаёт, что заводить это заново не надо.
+    """
+    today = today or date.today()
+    report = PruneReport()
+    entries = [dict(item) for item in document.get("entries", [])]
+    hand = [item for item in entries if _edited_by_hand(item)]
+    hand_terms: dict[str, str] = {}
+    for item in hand:
+        for term in (item.get("canonical", ""), *item.get("aliases", [])):
+            hand_terms.setdefault(normalize_text(str(term)), str(item.get("canonical")))
+
+    def drop(item: dict[str, Any], reason: str) -> None:
+        report.removed.append(
+            {
+                "canonical": item.get("canonical"),
+                "aliases": list(item.get("aliases", [])),
+                "reason": reason,
+                "pruned_on": today.isoformat(),
+            }
+        )
+
+    kept: list[dict[str, Any]] = []
+    for item in entries:
+        if item in hand:
+            kept.append(item)
+            continue
+        owner = next(
+            (
+                hand_terms[normalize_text(str(term))]
+                for term in (item.get("canonical", ""), *item.get("aliases", []))
+                if normalize_text(str(term)) in hand_terms
+            ),
+            None,
+        )
+        if owner is not None:
+            drop(item, f"поглощена ручной записью «{owner}»")
+            continue
+        if item.get("auto_apply") or (item.get("learned") or {}).get("held_aliases"):
+            # Включённую запись держит `_hold_unsafe_aliases` на своих порогах,
+            # а снятая им с автозамены остаётся на виду: она была термином.
+            kept.append(item)
+            continue
+        learned = item.setdefault("learned", {})
+        canonical = str(item.get("canonical", ""))
+        junk = {
+            str(alias): reason
+            for alias in item.get("aliases", [])
+            if (reason := _junk_alias(str(alias), canonical, bool(learned.get("seen_as_word"))))
+        }
+        if len(junk) == len(item.get("aliases", [])):
+            drop(item, "нет вариантов" if not junk else f"все варианты — мусор: {'; '.join(f'{a} — {r}' for a, r in junk.items())}")
+            continue
+        if junk:
+            item["aliases"] = [alias for alias in item["aliases"] if str(alias) not in junk]
+            learned["pruned_aliases"] = sorted({*map(str, learned.get("pruned_aliases", [])), *junk})
+            report.trimmed.append({"canonical": canonical, "aliases": sorted(junk)})
+        kept.append(item)
+
+    # Один вариант — у одной записи: иначе замена зависит от порядка в файле.
+    # Хозяин — ручная запись, затем включённая, затем набравшая больше окон.
+    def rank(item: dict[str, Any]) -> tuple[int, int, int]:
+        learned = item.get("learned") or {}
+        return (
+            item in hand,
+            bool(item.get("auto_apply")),
+            int(learned.get("windows", 0)),
+        )
+
+    owners: dict[str, dict[str, Any]] = {}
+    for item in sorted(kept, key=rank, reverse=True):
+        for alias in item.get("aliases", []):
+            owners.setdefault(normalize_text(str(alias)), item)
+    result: list[dict[str, Any]] = []
+    for item in kept:
+        if item in hand:
+            result.append(item)
+            continue
+        foreign = [
+            str(alias)
+            for alias in item.get("aliases", [])
+            if owners[normalize_text(str(alias))] is not item
+        ]
+        if foreign:
+            learned = item.setdefault("learned", {})
+            item["aliases"] = [alias for alias in item.get("aliases", []) if str(alias) not in foreign]
+            learned["pruned_aliases"] = sorted(
+                {*map(str, learned.get("pruned_aliases", [])), *foreign}
+            )
+            report.trimmed.append({"canonical": item.get("canonical"), "aliases": foreign})
+            if not item["aliases"]:
+                drop(item, "все варианты принадлежат другим записям")
+                continue
+        result.append(item)
+
+    document = dict(document)
+    document["entries"] = result
+    document["pruned"] = [*document.get("pruned", []), *report.removed]
     return document, report
 
 

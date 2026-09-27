@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from audio_transcription.exiting import exit_after_flush
 from audio_transcription.fetching import (
     FetchError,
+    expand_playlist,
     fetch_audio,
     fetch_subtitles,
     probe_remote,
@@ -82,6 +83,17 @@ def build_parser() -> argparse.ArgumentParser:
             "Со --subtitles: если у ролика нет субтитров, искать ту же запись на "
             "YouTube и брать её субтитры — только после сверки по звуку в двух точках"
         ),
+    )
+    parser.add_argument(
+        "--playlist",
+        action="store_true",
+        help="Ссылку на плейлист или канал развернуть в ролики и обработать пакетом",
+    )
+    parser.add_argument(
+        "--playlist-limit",
+        type=int,
+        metavar="N",
+        help="С --playlist: только первые N роликов",
     )
     parser.add_argument(
         "--output",
@@ -224,6 +236,17 @@ def _slug(title: str) -> str:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     destination = (args.output or Path("media")).expanduser().resolve()
+    if args.playlist_limit is not None and (not args.playlist or args.playlist_limit < 1):
+        print("Ошибка: --playlist-limit — положительное число и только вместе с --playlist", file=sys.stderr)
+        return 1
+    if args.playlist:
+        try:
+            args.url = [
+                video for url in args.url for video in expand_playlist(url, limit=args.playlist_limit)
+            ]
+        except FetchError as error:
+            print(f"Ошибка: {error}", file=sys.stderr)
+            return 1
     if len(args.url) == 1:
         try:
             payload = run(args, args.url[0], destination)

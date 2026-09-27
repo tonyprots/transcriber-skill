@@ -380,6 +380,45 @@ class WhisperBackend:
             },
         )
 
+    def detect_language(
+        self,
+        chunks: list[AudioChunk],
+        *,
+        progress: ProgressCallback | None = None,
+    ) -> Hypothesis:
+        """Язык речи по нескольким окнам — без распознавания текста."""
+        model_name = f"faster-whisper-{self.model_name}"
+        if not chunks:
+            return language_hypothesis(model_name, [], 0.0)
+        try:
+            module = import_module("faster_whisper")
+            decode_audio = import_module("faster_whisper.audio").decode_audio
+        except (ImportError, AttributeError) as exc:
+            raise BackendMissing("Не установлен faster-whisper для CPU-fallback.") from exc
+        model = load_with_hub_fallback(
+            lambda: module.WhisperModel(
+                self.model_name,
+                device="cpu",
+                compute_type="int8",
+                local_files_only=self.offline or os.environ.get("HF_HUB_OFFLINE") == "1",
+            ),
+            offline=self.offline,
+            label=f"faster-whisper {self.model_name}",
+        )
+        started = time.monotonic()
+        windows: list[dict[str, float]] = []
+        try:
+            for index, chunk in enumerate(chunks, start=1):
+                _, _, ranked = model.detect_language(decode_audio(str(chunk.path)))
+                windows.append({str(code): float(share) for code, share in ranked})
+                if progress:
+                    progress(index, len(chunks))
+        except Exception as exc:
+            raise BackendUnavailable(
+                f"Не удалось определить язык через {self.model_name}: {exc}"
+            ) from exc
+        return language_hypothesis(model_name, windows, time.monotonic() - started)
+
 
 class MLXWhisperBackend:
     """Независимая проверка Whisper Turbo, оптимизированная для Apple Silicon."""
@@ -523,3 +562,90 @@ class MLXWhisperBackend:
                 "chunks": chunk_results,
             },
         )
+
+    def detect_language(
+        self,
+        chunks: list[AudioChunk],
+        *,
+        progress: ProgressCallback | None = None,
+    ) -> Hypothesis:
+        """Язык речи по первому токену Whisper — без распознавания текста.
+
+        `generate_transcription(language=None)` у MLX-сборки падает: в репозитории
+        весов нет процессора HF, а без него нет токенизатора. Токены языков у
+        многоязычного Whisper стоят подряд сразу за `<|startoftranscript|>`, и
+        порядок у них тот же, что в `LANGUAGES`, поэтому токенизатор не нужен.
+        """
+        if not chunks:
+            return language_hypothesis(self.model_name, [], 0.0)
+        try:
+            mx = import_module("mlx.core")
+            utils = import_module("mlx_audio.stt.utils")
+            whisper_audio = import_module("mlx_audio.stt.models.whisper.audio")
+            languages = import_module("mlx_audio.stt.models.whisper.tokenizer").LANGUAGES
+        except (ImportError, AttributeError, RuntimeError) as exc:
+            raise BackendMissing(
+                f"Whisper Turbo MLX недоступен на этой машине: {exc}"
+            ) from exc
+        model = load_with_hub_fallback(
+            lambda: utils.load_model(self.model_name),
+            offline=self.offline,
+            label="Whisper Turbo MLX",
+        )
+        started = time.monotonic()
+        windows: list[dict[str, float]] = []
+        try:
+            codes = list(languages)[: model.num_languages]
+            for index, chunk in enumerate(chunks, start=1):
+                mel = whisper_audio.log_mel_spectrogram(
+                    utils.load_audio(str(chunk.path)),
+                    n_mels=model.dims.n_mels,
+                    padding=whisper_audio.N_SAMPLES,
+                )
+                frames = whisper_audio.pad_or_trim(
+                    mel, whisper_audio.N_FRAMES, axis=-2
+                ).astype(model.dtype)[None]
+                logits = model.logits(
+                    mx.array([[WHISPER_START_OF_TRANSCRIPT]]), model.encoder(frames)
+                )[0, 0]
+                first = WHISPER_START_OF_TRANSCRIPT + 1
+                shares = mx.softmax(
+                    logits[first : first + len(codes)].astype(mx.float32)
+                ).tolist()
+                windows.append(dict(zip(codes, map(float, shares))))
+                if progress:
+                    progress(index, len(chunks))
+        except Exception as exc:
+            raise BackendUnavailable(
+                f"Не удалось определить язык через Whisper Turbo MLX: {exc}"
+            ) from exc
+        return language_hypothesis(self.model_name, windows, time.monotonic() - started)
+
+
+# Одинаков у всех многоязычных Whisper, от tiny до large-v3-turbo.
+WHISPER_START_OF_TRANSCRIPT = 50258
+
+
+def language_hypothesis(
+    model: str, windows: list[dict[str, float]], elapsed_seconds: float
+) -> Hypothesis:
+    """Итог определения языка в форме гипотезы: так его везёт тот же воркер
+    и хранит тот же кэш. Доли по окнам усредняются — одно окно с музыкой или
+    чужой цитатой не перевешивает остальные."""
+    totals: dict[str, float] = {}
+    for window in windows:
+        for code, share in window.items():
+            totals[code] = totals.get(code, 0.0) + share / len(windows)
+    ranked = sorted(totals.items(), key=lambda item: item[1], reverse=True)[:5]
+    return Hypothesis(
+        model=model,
+        language=ranked[0][0] if ranked else "und",
+        elapsed_seconds=elapsed_seconds,
+        segments=[],
+        metadata={
+            "role": "language_id",
+            "language_probability": round(ranked[0][1], 4) if ranked else 0.0,
+            "top_languages": [[code, round(share, 4)] for code, share in ranked],
+            "windows": len(windows),
+        },
+    )

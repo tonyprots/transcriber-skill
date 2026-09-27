@@ -44,6 +44,14 @@ def _transcribe(payload: dict[str, Any], progress_path: Path) -> Hypothesis:
         _write_json(progress_path, {"completed": completed, "total": total})
 
     progress(0, len(chunks))
+    if backend == "mlx-whisper-lid":
+        return MLXWhisperBackend(
+            str(config["model_name"]), offline=bool(config.get("offline", False))
+        ).detect_language(chunks, progress=progress)
+    if backend == "faster-whisper-lid":
+        return WhisperBackend(
+            str(config["model_name"]), offline=bool(config.get("offline", False))
+        ).detect_language(chunks, progress=progress)
     if backend == "gigaam":
         model = GigaAMBackend(
             str(config["model_name"]),

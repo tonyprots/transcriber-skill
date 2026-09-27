@@ -40,6 +40,18 @@ if ! command -v ffmpeg >/dev/null 2>&1; then
   fi
 fi
 
+# yt-dlp нужен только ссылкам, поэтому его отсутствие не повод падать.
+# Ставим из brew: там он обновляется вместе с остальным, а в .venv его
+# версию никто бы не поднимал.
+if ! command -v yt-dlp >/dev/null 2>&1; then
+  if [ "$(uname -s)" = "Darwin" ] && command -v brew >/dev/null 2>&1; then
+    echo "Не найден yt-dlp (нужен для ссылок), ставлю через Homebrew вместе с deno"
+    brew install yt-dlp deno || echo "yt-dlp не поставился: ссылки не откроются, файлы работают" >&2
+  else
+    echo "Не найден yt-dlp: ссылки не откроются. Установка: pipx install yt-dlp или пакет дистрибутива" >&2
+  fi
+fi
+
 VENV="$SKILL_DIR/.venv"
 if [ ! -x "$VENV/bin/python" ]; then
   echo "Создаю $VENV на $("$PYTHON" --version)"

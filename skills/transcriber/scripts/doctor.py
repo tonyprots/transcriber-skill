@@ -36,6 +36,12 @@ from audio_transcription.catalog import (  # noqa: E402
     route_download_gb,
     search_term,
 )
+from audio_transcription.audio import find_command  # noqa: E402
+from audio_transcription.fetching import (  # noqa: E402
+    YT_DLP_SHELF_LIFE_DAYS,
+    update_hint,
+    yt_dlp_status,
+)
 
 REQUIRED_MODULES = {
     "onnx_asr": "onnx-asr[cpu,hub]",
@@ -46,6 +52,7 @@ REQUIRED_MODULES = {
 APPLE_MODULES = {"mlx_audio": "mlx-audio (Whisper Turbo MLX и диаризация Sortformer)"}
 
 HUB_TIMEOUT_SECONDS = 10
+YT_DLP_RELEASES = "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest"
 HUB_SEARCH_LIMIT = 100
 
 
@@ -179,6 +186,32 @@ def check_hub_updates(today: date | None = None) -> dict:
     return {"checked": True, "error": "; ".join(errors) if errors else None, "findings": findings}
 
 
+def check_yt_dlp(check_updates: bool = False) -> dict:
+    """yt-dlp нужен только ссылкам, но для них он главное звено.
+
+    Сайты ломают его старые версии каждые несколько недель, а до 0.16 doctor
+    про него молчал: версия 39-дневной давности выглядела как «всё готово».
+    """
+    status = dict(yt_dlp_status())
+    # Для YouTube yt-dlp с конца 2025 года нужен внешний JS-движок, по
+    # умолчанию deno; без него часть форматов не отдаётся.
+    status["deno"] = find_command("deno")
+    status["latest"] = None
+    if check_updates and status["path"]:
+        try:
+            from urllib.request import Request, urlopen
+
+            request = Request(YT_DLP_RELEASES, headers={"Accept": "application/vnd.github+json"})
+            with urlopen(request, timeout=HUB_TIMEOUT_SECONDS) as response:  # noqa: S310 — адрес зашит
+                status["latest"] = json.loads(response.read().decode("utf-8")).get("tag_name")
+        except Exception as error:  # noqa: BLE001 — сеть не обязательна
+            status["latest_error"] = str(error)
+    # Возраст — только догадка: если новее релиза нет, старая версия и есть последняя.
+    if status["latest"] and status["latest"] == status["version"]:
+        status["stale"] = False
+    return status
+
+
 def collect(check_updates: bool = False) -> dict:
     apple = platform.system() == "Darwin" and platform.machine() == "arm64"
     skill_dir = Path(__file__).resolve().parents[1]
@@ -200,6 +233,7 @@ def collect(check_updates: bool = False) -> dict:
         "updates": check_hub_updates() if check_updates else {"checked": False, "findings": []},
         "fluidaudio_binary": str(fluid_binary) if fluid_binary else None,
         "fluidaudio_models": (_fluid_models_dir() / "plda-parameters.json").is_file(),
+        "yt_dlp": check_yt_dlp(check_updates),
         "free_gb": round(shutil.disk_usage(Path.home()).free / 1024**3, 1),
     }
     problems = []
@@ -219,6 +253,22 @@ def collect(check_updates: bool = False) -> dict:
         warnings.append("не Apple Silicon: диаризация и Whisper Turbo MLX недоступны, Whisper работает на CPU")
     if report["free_gb"] < 8:
         warnings.append("меньше 8 ГБ свободно: модели занимают около 4 ГБ, временные WAV — ещё гигабайты")
+
+    yt_dlp = report["yt_dlp"]
+    if not yt_dlp["path"]:
+        warnings.append("нет yt-dlp: ссылки не открыть, только файлы (brew install yt-dlp)")
+    else:
+        if yt_dlp["stale"]:
+            warnings.append(
+                f"yt-dlp {yt_dlp['version']} — {yt_dlp['age_days']} дн., старше "
+                f"{YT_DLP_SHELF_LIFE_DAYS}: сайты ломают старые версии. Есть ли новее, "
+                f"покажет --check-updates; обновление — {update_hint(yt_dlp)}"
+            )
+        latest = yt_dlp.get("latest")
+        if latest and yt_dlp["version"] and latest > yt_dlp["version"]:
+            warnings.append(f"вышел yt-dlp {latest}, стоит {yt_dlp['version']}: {update_hint(yt_dlp)}")
+        if not yt_dlp["deno"]:
+            warnings.append("нет deno: YouTube отдаёт yt-dlp не все форматы (brew install deno)")
 
     stale = [row for row in models if row["stale"]]
     if stale:
@@ -272,6 +322,17 @@ def render(report: dict) -> str:
         f"CoreML-модели {mark(report['fluidaudio_models'])}"
     )
 
+    yt_dlp = report["yt_dlp"]
+    if yt_dlp["path"]:
+        age = f", {yt_dlp['age_days']} дн." if yt_dlp["age_days"] is not None else ""
+        latest = f", последняя {yt_dlp['latest']}" if yt_dlp.get("latest") else ""
+        lines.append(
+            f"yt-dlp (ссылки) {mark(not yt_dlp['stale'])} {yt_dlp['version'] or 'версия неизвестна'}"
+            f"{age}{latest}   deno {mark(yt_dlp['deno'])}"
+        )
+    else:
+        lines.append("yt-dlp (ссылки) ✗ не установлен — работают только файлы")
+
     updates = report["updates"]
     if updates["checked"]:
         if updates["findings"]:
@@ -299,7 +360,7 @@ def main() -> int:
     parser.add_argument(
         "--check-updates",
         action="store_true",
-        help="Спросить Hugging Face о новых версиях моделей (нужна сеть)",
+        help="Спросить Hugging Face о новых версиях моделей и GitHub о новом yt-dlp (нужна сеть)",
     )
     args = parser.parse_args()
     report = collect(check_updates=args.check_updates)

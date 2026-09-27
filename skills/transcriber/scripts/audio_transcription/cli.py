@@ -18,13 +18,21 @@ import yaml
 
 from . import __version__
 from .audio import MediaToolError, prepare_audio, split_speech_windows
-from .fetching import FetchError, RemoteMedia, fetch_audio, looks_like_url, probe_remote
+from .fetching import (
+    FetchError,
+    RemoteMedia,
+    expand_playlist,
+    fetch_audio,
+    looks_like_url,
+    probe_remote,
+)
 from .machine_lock import machine_slot
 from .backends import BackendMissing, BackendUnavailable
 from .catalog import (
     FASTER_WHISPER_FALLBACK,
     SILERO_VAD,
     SORTFORMER,
+    WHISPER_TURBO,
     revisions_for_models,
     staleness_warnings,
 )
@@ -57,8 +65,14 @@ from .models import AudioChunk, Diarization, Hypothesis, ReviewItem, Section
 from .packing import PackedWindow, build_packed_windows, unpack_hypothesis
 from .isolated import run_isolated_backend, run_isolated_diarization
 from .reconcile import find_review_items, normalize_text, segments_for_windows
-from .render import ensure_disk_space, ensure_output_available, write_bundle
-from .routing import BackendSpec, diarization_backend, language_route
+from .render import ensure_disk_space, ensure_output_available, parse_speaker_names, write_bundle
+from .routing import (
+    AUTO_LANGUAGE,
+    BackendSpec,
+    diarization_backend,
+    language_route,
+    normalize_language,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -82,6 +96,20 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--playlist",
+        action="store_true",
+        help=(
+            "Ссылка на плейлист или канал разворачивается в ролики, и они идут "
+            "пакетом. Без флага берётся только сам ролик"
+        ),
+    )
+    parser.add_argument(
+        "--playlist-limit",
+        type=int,
+        metavar="N",
+        help="С --playlist: только первые N роликов (у канала их бывают тысячи)",
+    )
+    parser.add_argument(
         "--section",
         action="append",
         type=_section_argument,
@@ -101,7 +129,14 @@ def build_parser() -> argparse.ArgumentParser:
             "fast — одна основная, на русском с лёгкой проверяющей"
         ),
     )
-    parser.add_argument("--language", default="ru", help="Код языка, по умолчанию ru")
+    parser.add_argument(
+        "--language",
+        default="auto",
+        help=(
+            "Код языка (ru, en, …) или auto (по умолчанию): у ссылки язык берётся "
+            "из её описания, у файла Whisper определяет его по трём окнам речи"
+        ),
+    )
     parser.add_argument(
         "--glossary",
         type=Path,
@@ -179,6 +214,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Разрешить непустой каталог результата; прежний уезжает в архивный рядом",
     )
     parser.add_argument(
+        "--skip-done",
+        action="store_true",
+        help=(
+            "Пропустить запись, у которой каталог результата уже содержит "
+            "manifest.json: так продолжают прерванную пачку, не скачивая готовое заново"
+        ),
+    )
+    parser.add_argument(
         "--keep-wav",
         action="store_true",
         help="Оставить подготовленный prepared.wav в каталоге результата (плюс размер записи)",
@@ -198,6 +241,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--diarize",
         action="store_true",
         help="Определить говорящих и разрезать общие VAD-окна по сменам спикера",
+    )
+    parser.add_argument(
+        "--speaker-names",
+        type=_speaker_names_argument,
+        metavar="1=ИМЯ,2=ИМЯ",
+        help=(
+            "Имена вместо «Спикер N» в текстах и субтитрах; требует --diarize. "
+            "Готовый результат переименовывает scripts/rename_speakers.py"
+        ),
     )
     parser.add_argument(
         "--diarization-model",
@@ -243,6 +295,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Остановить ASR, если он не завершил ни одного окна за это число секунд",
     )
     return parser
+
+
+def _speaker_names_argument(text: str) -> dict[str, str]:
+    try:
+        return parse_speaker_names(text)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
 
 
 def _section_argument(text: str) -> Section:
@@ -534,6 +593,134 @@ def primary_failure_warning(primary: Hypothesis) -> str | None:
     return text
 
 
+# Из скольких окон речи судить о языке: начало, середина и конец. Заставка
+# или вступление на другом языке не должны решать за всю запись.
+LANGUAGE_SAMPLE_WINDOWS = 3
+# Ниже этой доли у первого языка решение ненадёжно — о нём надо сказать.
+LANGUAGE_CONFIDENCE_WARNING = 0.6
+
+
+def language_sample(chunks: list[AudioChunk], count: int = LANGUAGE_SAMPLE_WINDOWS) -> list[AudioChunk]:
+    if len(chunks) <= count:
+        return list(chunks)
+    step = (len(chunks) - 1) / (count - 1)
+    return [chunks[round(index * step)] for index in range(count)]
+
+
+def resolve_language(
+    args: argparse.Namespace,
+    *,
+    remote: RemoteMedia | None,
+    chunks: list[AudioChunk],
+    work_dir: Path,
+    source_identity: str,
+    report: ProgressReporter,
+) -> tuple[str, dict[str, Any]]:
+    """Язык записи и то, откуда он известен.
+
+    До 0.16 язык по умолчанию был русским, и английская запись без
+    `--language en` молча уходила в GigaAM, которая отдавала мусор.
+    """
+    requested = normalize_language(args.language)
+    if requested != AUTO_LANGUAGE:
+        return requested, {"method": "argument", "language": requested}
+    if remote is not None and remote.language:
+        language = normalize_language(remote.language)
+        if language != AUTO_LANGUAGE:
+            report.stage(f"Язык из описания ссылки: {language}")
+            return language, {"method": "source-metadata", "language": language}
+    if not chunks:
+        return "ru", {"method": "default", "language": "ru"}
+    sample = language_sample(chunks)
+    key = cache_key(
+        "language",
+        {
+            "pipeline": "1",
+            "source_sha256": source_identity,
+            "whisper_backend": args.whisper_backend,
+            "sample": [[chunk.sequence, round(chunk.start, 6), round(chunk.end, 6)] for chunk in sample],
+        },
+    )
+    found = None if args.no_cache else load_hypothesis(args.cache_dir, key)
+    if found is None:
+        report.stage(f"Определяю язык, окон речи для пробы: {len(sample)}")
+        try:
+            found = _run_language_id(args, sample, work_dir, report)
+        except BackendUnavailable as error:
+            return "ru", {
+                "method": "default",
+                "language": "ru",
+                "warning": (
+                    f"Язык определить не удалось ({error}); взят русский. "
+                    "Если запись на другом языке, повторите с --language"
+                ),
+            }
+        if not args.no_cache:
+            save_hypothesis(args.cache_dir, key, found)
+    language = normalize_language(found.language)
+    if language in {AUTO_LANGUAGE, "und"}:
+        return "ru", {
+            "method": "default",
+            "language": "ru",
+            "warning": "Whisper не назвал язык; взят русский. Если запись на другом языке, повторите с --language",
+        }
+    probability = float(found.metadata.get("language_probability") or 0.0)
+    detection: dict[str, Any] = {
+        "method": "whisper-language-id",
+        "language": language,
+        "probability": probability,
+        "model": found.model,
+        "top_languages": found.metadata.get("top_languages", []),
+        "windows": found.metadata.get("windows"),
+    }
+    report.stage(f"Язык: {language} ({probability:.0%})")
+    if probability < LANGUAGE_CONFIDENCE_WARNING:
+        others = ", ".join(
+            f"{code} {share:.0%}" for code, share in detection["top_languages"][:3]
+        )
+        detection["warning"] = (
+            f"Язык определён неуверенно ({others}); если выбран не тот, "
+            "повторите с --language"
+        )
+    return language, detection
+
+
+def _run_language_id(
+    args: argparse.Namespace,
+    sample: list[AudioChunk],
+    work_dir: Path,
+    report: ProgressReporter,
+) -> Hypothesis:
+    """Тот же выбор, что у `run_whisper`: MLX на Apple Silicon, иначе CPU."""
+    if args.whisper_backend in {"auto", "mlx"}:
+        try:
+            return run_isolated_backend(
+                "mlx-whisper-lid",
+                sample,
+                AUTO_LANGUAGE,
+                work_dir,
+                config={"model_name": args.whisper_model or WHISPER_TURBO.model, "offline": args.offline},
+                stall_timeout_seconds=args.backend_stall_timeout,
+                on_progress=report.windows("Определение языка"),
+            )
+        except BackendMissing:
+            if args.whisper_backend == "mlx":
+                raise
+    fallback = FASTER_WHISPER_FALLBACK.model
+    return run_isolated_backend(
+        "faster-whisper-lid",
+        sample,
+        AUTO_LANGUAGE,
+        work_dir,
+        config={
+            "model_name": fallback if args.whisper_backend == "auto" else (args.whisper_model or fallback),
+            "offline": args.offline,
+        },
+        stall_timeout_seconds=args.backend_stall_timeout,
+        on_progress=report.windows("Определение языка"),
+    )
+
+
 def _slug(title: str) -> str:
     """Имя каталога из заголовка видео: только то, что безопасно в пути."""
     cleaned = re.sub(r"[^\w\s-]", "", title, flags=re.UNICODE).strip().lower()
@@ -562,6 +749,8 @@ def _validate(args: argparse.Namespace) -> None:
         raise ValueError("--diarization-chunk-seconds должен быть положительным")
     if args.expected_speakers is not None and not args.diarize:
         raise ValueError("--expected-speakers требует --diarize")
+    if args.speaker_names and not args.diarize:
+        raise ValueError("--speaker-names требует --diarize: без него говорящих не различить")
     if args.diarize and (platform.system() != "Darwin" or platform.machine() != "arm64"):
         raise ValueError(
             "--diarize работает только на macOS Apple Silicon: Sortformer требует MLX, "
@@ -608,8 +797,11 @@ def run(args: argparse.Namespace) -> Path:
         output = Path(f"{_output_stem(remote, None, section)}.transcript").resolve()
     else:
         output = source.with_name(f"{_output_stem(None, source, section)}.transcript")  # type: ignore[union-attr]
-    output = ensure_output_available(output, overwrite=args.overwrite)
     report = ProgressReporter(enabled=not args.quiet)
+    if args.skip_done and _is_done(output):
+        report.stage(f"Уже расшифровано, пропускаю: {output}")
+        return output
+    output = ensure_output_available(output, overwrite=args.overwrite)
     with tempfile.TemporaryDirectory(prefix="transcriber-download-") as downloads:
         download_seconds = None
         if remote is not None:
@@ -656,8 +848,19 @@ def run_batch(args: argparse.Namespace) -> list[dict[str, Any]]:
             while candidate in taken:
                 candidate, attempt = base / f"{name}-{attempt}", attempt + 1
             taken.add(candidate)
-            jobs.append((section, ensure_output_available(candidate, overwrite=args.overwrite)))
-        plan.append((raw, remote, source, jobs))
+            if args.skip_done and _is_done(candidate):
+                report.stage(f"Уже расшифровано, пропускаю: {candidate.name}")
+                results.append({"input": raw, "skipped": True, **summarize(candidate)})
+                continue
+            # Занятый каталог — отказ одной записи, а не всей пачки: раньше
+            # один такой каталог ронял пакет до первого скачанного байта.
+            try:
+                jobs.append((section, ensure_output_available(candidate, overwrite=args.overwrite)))
+            except FAILURES as error:
+                report.stage(f"Пропускаю {candidate.name}: {error}")
+                results.append(_failure(raw, section, error))
+        if jobs:
+            plan.append((raw, remote, source, jobs))
     total = sum(len(jobs) for *_, jobs in plan)
     done = 0
     for raw, remote, source, jobs in plan:
@@ -692,6 +895,11 @@ def run_batch(args: argparse.Namespace) -> list[dict[str, Any]]:
                     results.append({"input": raw, **summarize(path)})
                 download_seconds = None
     return results
+
+
+def _is_done(output: Path) -> bool:
+    """Готов тот каталог, где есть манифест: он пишется последним."""
+    return (output.expanduser() / "manifest.json").is_file()
 
 
 def _failure(raw: str, section: Section | None, error: BaseException) -> dict[str, Any]:
@@ -735,7 +943,6 @@ def _transcribe(
     report: "ProgressReporter",
     download_seconds: float | None,
 ) -> Path:
-    route = language_route(args.language)
     diarization_kind = (
         diarization_backend(args.diarization_backend, args.expected_speakers)
         if args.diarize
@@ -808,7 +1015,23 @@ def _transcribe(
             )
         mark = timed("vad", mark)
         report.stage(f"Речевых окон: {len(base_chunks)}")
-        warnings: list[str] = [route.warning] if route.warning else []
+        warnings: list[str] = []
+        language, detection = resolve_language(
+            args,
+            remote=remote,
+            chunks=base_chunks,
+            work_dir=work_dir,
+            source_identity=source_identity,
+            report=report,
+        )
+        if detection.get("warning"):
+            report.stage(f"Внимание: {detection['warning']}")
+            warnings.append(str(detection["warning"]))
+        if detection["method"] == "whisper-language-id":
+            mark = timed("language_id", mark)
+        route = language_route(language)
+        if route.warning:
+            warnings.append(route.warning)
         # Устаревание моделей проверяется на каждом прогоне: doctor.py после
         # установки никто не запускает, и сигнал бы туда не дошёл.
         verifier_spec = route.verifier_for(args.mode)
@@ -1157,7 +1380,10 @@ def _transcribe(
             # `verifier_used` манифест в режиме fast называл бы Whisper,
             # который не работал.
             route=route.to_dict()
-            | {"verifier_used": verifier_spec.to_dict() if verifier_spec else None},
+            | {
+                "verifier_used": verifier_spec.to_dict() if verifier_spec else None,
+                "language_detection": detection,
+            },
             diarization=diarization_output,
             warnings=warnings,
             overwrite=args.overwrite,
@@ -1166,6 +1392,7 @@ def _transcribe(
             generator=f"transcriber {__version__}",
             fillers_removed=fillers_removed,
             model_revisions=revisions_for_models([SILERO_VAD.model, *used_models]),
+            speaker_names=args.speaker_names,
         )
         # Результат уже на диске. Уборка временных WAV идёт отдельной стадией,
         # потому что антивирус, проверяющий каждую файловую операцию,
@@ -1205,8 +1432,30 @@ def _shift_hypothesis(hypothesis: Hypothesis, offset: float) -> Hypothesis:
     )
 
 
+def expand_inputs(args: argparse.Namespace) -> list[str]:
+    """Ссылки-плейлисты превращаются в ролики; файлы и прочие ссылки — как есть."""
+    if args.playlist_limit is not None and args.playlist_limit < 1:
+        raise ValueError("--playlist-limit должен быть положительным")
+    if not args.playlist:
+        if args.playlist_limit is not None:
+            raise ValueError("--playlist-limit требует --playlist")
+        return list(args.input)
+    expanded: list[str] = []
+    for raw in args.input:
+        if looks_like_url(raw):
+            expanded.extend(expand_playlist(raw, limit=args.playlist_limit))
+        else:
+            expanded.append(raw)
+    return expanded
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    try:
+        args.input = expand_inputs(args)
+    except FAILURES as exc:
+        print(f"Ошибка: {exc}", file=sys.stderr)
+        return 2
     batch = len(args.input) * len(_sections(args)) > 1
     try:
         if not batch:

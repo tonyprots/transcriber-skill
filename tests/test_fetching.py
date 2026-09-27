@@ -17,6 +17,9 @@ def yt_dlp(monkeypatch):
     def install(stdout: str = "", returncode: int = 0, stderr: str = "") -> list[list[str]]:
         calls: list[list[str]] = []
         monkeypatch.setattr(fetching, "require_yt_dlp", lambda: "yt-dlp")
+        # Возраст yt-dlp проверяется только на отказе и отдельным вызовом;
+        # здесь он свежий, чтобы счёт вызовов описывал саму операцию.
+        monkeypatch.setattr(fetching, "yt_dlp_status", lambda today=None: {"stale": False})
 
         def fake_run(command, **kwargs):
             calls.append(command)
@@ -285,3 +288,57 @@ def test_vk_track_origin_is_reported_as_unknown(yt_dlp) -> None:
     assert track is not None and track.kind == "unknown"
     assert media.summary(("ru",))["subtitles"]["origin_unknown"] == ["ru"]
     assert "происхождение не сообщается" in fetching.render_captions(media, track, [])
+
+
+def test_playlist_expands_to_videos_in_order(yt_dlp) -> None:
+    payload = {
+        "_type": "playlist",
+        "entries": [
+            {"url": "https://www.youtube.com/watch?v=a"},
+            None,
+            {"webpage_url": "https://www.youtube.com/watch?v=b", "url": "b"},
+            {"url": "not-a-link"},
+        ],
+    }
+    calls = yt_dlp(stdout=json.dumps(payload))
+    assert fetching.expand_playlist("https://www.youtube.com/playlist?list=x", limit=5) == [
+        "https://www.youtube.com/watch?v=a",
+        "https://www.youtube.com/watch?v=b",
+    ]
+    assert "--no-playlist" not in calls[0]
+    assert calls[0][calls[0].index("--playlist-end") + 1] == "5"
+
+
+def test_single_video_is_its_own_playlist(yt_dlp) -> None:
+    yt_dlp(stdout=json.dumps({"_type": "video", "id": "a"}))
+    assert fetching.expand_playlist("https://youtu.be/a") == ["https://youtu.be/a"]
+
+
+def test_empty_playlist_is_an_error(yt_dlp) -> None:
+    yt_dlp(stdout=json.dumps({"_type": "playlist", "entries": []}))
+    with pytest.raises(fetching.FetchError, match="нет доступных"):
+        fetching.expand_playlist("https://www.youtube.com/playlist?list=x")
+
+
+def test_stale_yt_dlp_is_named_in_the_error(yt_dlp, monkeypatch) -> None:
+    yt_dlp(returncode=1, stderr="ERROR: Unable to extract")
+    monkeypatch.setattr(
+        fetching,
+        "yt_dlp_status",
+        lambda today=None: {"stale": True, "version": "2026.08.19", "age_days": 60, "path": "/opt/homebrew/bin/yt-dlp"},
+    )
+    with pytest.raises(fetching.FetchError, match="brew upgrade yt-dlp"):
+        fetching.probe_remote("https://www.youtube.com/watch?v=abc")
+
+
+def test_yt_dlp_age_from_version(monkeypatch) -> None:
+    from datetime import date
+
+    monkeypatch.setattr(fetching, "find_command", lambda name: "/opt/homebrew/bin/yt-dlp")
+    monkeypatch.setattr(
+        fetching.subprocess, "run", lambda *a, **k: CompletedProcess(a, 0, "2026.08.19\n", "")
+    )
+    status = fetching.yt_dlp_status(today=date(2026, 9, 27))
+    assert status["version"] == "2026.08.19" and status["age_days"] == 39 and status["stale"]
+    assert fetching.update_hint(status) == "brew upgrade yt-dlp"
+    assert fetching.update_hint({"path": "/Users/x/.venv/bin/yt-dlp"}) == "pip install -U yt-dlp"

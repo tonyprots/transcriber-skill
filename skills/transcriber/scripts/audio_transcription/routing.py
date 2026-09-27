@@ -9,11 +9,17 @@ from .catalog import VOSK_RUSSIAN as _VOSK_RUSSIAN
 from .catalog import WHISPER_TURBO as _WHISPER_TURBO
 
 __all__ = [
+    "AUTO_LANGUAGE",
     "BackendSpec",
     "LanguageRoute",
     "diarization_backend",
     "language_route",
+    "normalize_language",
 ]
+
+# Значение `--language` по умолчанию: язык берётся из описания ссылки или
+# определяется по речи (`cli.resolve_language`). Маршрута с таким именем нет.
+AUTO_LANGUAGE = "auto"
 
 
 @dataclass(frozen=True)
@@ -61,6 +67,8 @@ def normalize_language(language: str) -> str:
 
 def language_route(language: str) -> LanguageRoute:
     normalized = normalize_language(language)
+    if normalized == AUTO_LANGUAGE:
+        raise ValueError("Язык auto нужно сначала определить: маршрут строится по коду языка")
     if normalized == "ru":
         return LanguageRoute(
             "ru-gigaam-v3e2e-whisper-turbo",
