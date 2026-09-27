@@ -43,15 +43,18 @@
 - **Цитата без расшифровки часа.** `--section 10:50-11:30` расшифровывает
   только кусок, таймкоды остаются по исходнику. Нашли цифру в субтитрах —
   проверили её по звуку за полминуты.
-- **Пачкой.** Десяток ссылок одним вызовом, каждая в свой каталог; отказ
-  одной не останавливает остальные. Прогоны встают в общую очередь на
-  машину и не отнимают друг у друга ядра.
+- **Пачкой.** Десяток ссылок или целый плейлист (`--playlist`) одним
+  вызовом, каждая запись в свой каталог; отказ одной не останавливает
+  остальные, а `--skip-done` продолжает прерванную пачку с того же места.
+  Прогоны встают в общую очередь на машину и не отнимают друг у друга ядра.
 - **Спикеры:** `--diarize` делит разговор по голосам, справляется и со
-  встречей на шестерых.
-- **Языки:** русский и английский идут проверенными маршрутами с замерами,
-  остальные — одним Whisper с предупреждением.
+  встречей на шестерых. Имена вместо «Спикер 1» ставятся флагом или потом,
+  в готовую расшифровку, без пересчёта звука.
+- **Языки:** язык запись скилл определяет сам. Русский и английский идут
+  проверенными маршрутами с замерами, остальные — одним Whisper с
+  предупреждением.
 
-Версия 0.15.2. Автор — [Антон Проценко](https://tonyprots.ru).
+Версия 0.16.0. Автор — [Антон Проценко](https://tonyprots.ru).
 
 ## Что внутри
 
@@ -153,15 +156,16 @@ MLX-модель Whisper можно подставить флагом `--whisper
 Из терминала:
 
 ```bash
-.venv/bin/python scripts/transcribe.py запись.m4a --language ru --output out/
+.venv/bin/python scripts/transcribe.py запись.m4a --output out/
 ```
 
 На входе принимается и ссылка на видео — YouTube и остальные сотни сайтов,
 которые знает `yt-dlp`. Тогда скилл скачает звук сам и запишет ссылку в
-`manifest.json` → `source.origin`:
+`manifest.json` → `source.origin`. Язык берётся из метаданных ссылки или
+определяется по трём окнам речи; `--language ru` задаёт его явно:
 
 ```bash
-.venv/bin/python scripts/transcribe.py "https://youtu.be/..." --language en --output out/
+.venv/bin/python scripts/transcribe.py "https://youtu.be/..." --output out/
 ```
 
 Когда точность не нужна, у видео можно забрать готовые субтитры — это секунды
@@ -191,12 +195,16 @@ MLX-модель Whisper можно подставить флагом `--whisper
 не расшифровывая час записи.
 
 ```bash
-.venv/bin/python scripts/transcribe.py URL1 URL2 --mode fast --output out/
+.venv/bin/python scripts/transcribe.py URL1 URL2 --mode fast --output out/ --skip-done
+.venv/bin/python scripts/transcribe.py PLAYLIST_URL --playlist --playlist-limit 20 --output out/
 .venv/bin/python scripts/transcribe.py URL --section 10:50-11:30 --section 26:40-27:10 --output clips/
 ```
 
 Прогоны встают в общую очередь на машину: второй ждёт первого, а не делит с
 ним ядра.
+
+Имена говорящих — `--speaker-names 1=Антон,2=Мария` вместе с `--diarize`
+или потом: `scripts/rename_speakers.py out/ 1=Антон,2=Мария`.
 
 Полезные флаги: `--diarize --expected-speakers N`, `--glossary словарь.yaml`
 (пример в [assets/glossary.example.yaml](skills/transcriber/assets/glossary.example.yaml)),
@@ -215,7 +223,9 @@ stderr, в stdout только JSON с путём результата.
 Написание, которое не далось ни одной модели, скилл не выдумывает — такие
 термины копятся в разделе `pending` и ждут человека; список выводится в
 `review-needed.md`. Ручная правка сильнее автоматики: изменённый `auto_apply`
-скилл больше не трогает. Выключается всё это `--no-learn` (не пополнять) и
+скилл больше не трогает. Мусор, который так и не стал термином (варианты в
+пару букв, обычные слова, не похожие на канон), словарь убирает сам в раздел
+`pruned`; `scripts/glossary_prune.py --dry-run` покажет, что уйдёт. Выключается всё это `--no-learn` (не пополнять) и
 `--no-glossary` (не использовать вовсе).
 
 Свой выверенный словарь по-прежнему можно передать флагом `--glossary` — он
@@ -358,8 +368,9 @@ It takes files or links: YouTube and hundreds of sites via yt-dlp, VK Video,
 Rutube and Yandex Music podcast episodes. It can grab existing captions in
 seconds, borrow captions from a YouTube copy of a Rutube/VK video after
 verifying by audio that it is the same recording, transcribe only a
-`--section` of a long video for quote checking, and process batches with a
-machine-wide run queue.
+`--section` of a long video for quote checking, and process batches and
+playlists with a machine-wide run queue and resumable `--skip-done`. The
+language is detected automatically; speakers can be renamed after the fact.
 The default max mode runs at a quarter to a third of real time on an Apple M1. Install
 with `/plugin marketplace add tonyprots/transcriber-skill` or
 `npx skills add tonyprots/transcriber-skill`, then run
