@@ -104,6 +104,26 @@ def _vtt(segments: list[Segment], names: SpeakerNames | None = None) -> str:
     return "\n\n".join(blocks) + "\n"
 
 
+# Сколько строк раздела разворачивать. На диктовке в 8 минут было 67 мест
+# «Слушать», на встрече в 15 минут — 247 (2026-10-01); дальше первых сорока
+# строк их не читал ни человек, ни агент. Остальное не пропадает: все места
+# лежат в `segments.json` → `review_items`.
+REVIEW_SECTION_LIMIT = 25
+
+
+def _limited(items: list[ReviewItem], heading: str) -> tuple[list[ReviewItem], str]:
+    shown = items[:REVIEW_SECTION_LIMIT]
+    if len(items) == len(shown):
+        return shown, f"## {heading} — {len(items)}"
+    return shown, f"## {heading} — {len(items)}, здесь первые {len(shown)}"
+
+
+def _rest_line(total: int, shown: int) -> list[str]:
+    if total <= shown:
+        return []
+    return ["", f"Ещё {total - shown} — в `segments.json` → `review_items`."]
+
+
 def _review_sections(items: list[ReviewItem]) -> list[str]:
     """Очередь порядком важности, а не порядком записи.
 
@@ -117,9 +137,10 @@ def _review_sections(items: list[ReviewItem]) -> list[str]:
     listen.sort(key=lambda item: (-item.weight, item.start))
     lines: list[str] = []
     if listen:
+        shown, heading = _limited(listen, "Слушать")
         lines.extend(
             [
-                f"## Слушать — {len(listen)}",
+                heading,
                 "",
                 "Сверху те места, где расхождение длиннее: одно слово может "
                 "оказаться опечаткой, развалившаяся фраза — потерянной мыслью. "
@@ -127,19 +148,26 @@ def _review_sections(items: list[ReviewItem]) -> list[str]:
                 "",
             ]
         )
-        lines.extend(_review_line(item) for item in listen)
+        lines.extend(_review_line(item) for item in shown)
+        lines.extend(_rest_line(len(listen), len(shown)))
         lines.append("")
     if spelling:
+        # Сначала самые весомые, показываются — порядком записи.
+        shown, heading = _limited(
+            sorted(spelling, key=lambda item: (-item.weight, item.start)),
+            "То же слово записано иначе",
+        )
         lines.extend(
             [
-                f"## То же слово записано иначе — {len(spelling)}",
+                heading,
                 "",
                 "Слушать нечего: модели согласны, что слово прозвучало, и "
                 "расходятся в написании. Отсюда берутся записи словаря.",
                 "",
             ]
         )
-        lines.extend(_review_line(item) for item in sorted(spelling, key=lambda i: i.start))
+        lines.extend(_review_line(item) for item in sorted(shown, key=lambda i: i.start))
+        lines.extend(_rest_line(len(spelling), len(shown)))
         lines.append("")
     if minor:
         lines.extend(
@@ -165,8 +193,10 @@ def _review_markdown(
     items: list[ReviewItem],
     suggestions: list[dict[str, Any]],
     learned: dict[str, Any] | None = None,
+    corrections: list[Correction] | None = None,
 ) -> str:
     lines = ["# Требует проверки", ""]
+    taken = [item for item in corrections or [] if item.rule == "verifier_canonical"]
     # Включившаяся замена — первое, что человек должен увидеть: дальше она
     # будет молча применяться к каждой расшифровке, и «молча» здесь опаснее
     # любого расхождения в очереди.
@@ -185,8 +215,48 @@ def _review_markdown(
         )
         lines.extend(f"- {term}" for term in promoted)
         lines.append("")
+    if taken:
+        # Правка текста по второй модели — то же «молча», что и включённая
+        # замена, поэтому стоит наверху, а не теряется среди расхождений.
+        lines.extend(
+            [
+                f"## Взято у проверяющей — {len(taken)}",
+                "",
+                "Модели разошлись, и проверяющая написала термин так, как он "
+                "записан в словаре, а основная — похожее по звучанию. В тексте "
+                "стоит термин; в очередь эти места не попали.",
+                "",
+            ]
+        )
+        lines.extend(
+            f"- [{format_timestamp(item.start)}] «{item.before}» → {item.after}" for item in taken
+        )
+        lines.append("")
+    dropped = sorted(
+        (item for item in items if item.kind == "verifier_only"), key=lambda item: item.start
+    )
+    if dropped:
+        # Текст здесь не правится (вставка у проверяющей на эталоне вредит),
+        # но выпавшее название меняет смысл фразы — поэтому место наверху.
+        lines.extend(
+            [
+                f"## Возможно, выпало из текста — {len(dropped)}",
+                "",
+                "Здесь у основной модели пусто, а проверяющая услышала название или "
+                "термин словаря. В текст это не вставлено: проверяющая иногда "
+                "дописывает то, чего не было. ∅ — место пропуска.",
+                "",
+            ]
+        )
+        lines.extend(
+            f"- [{format_timestamp(item.start)}] «{item.verifier_span.strip()}» — в контексте: "
+            f"{item.readable_text.strip()}"
+            for item in dropped
+        )
+        lines.append("")
+    items = [item for item in items if item.kind not in {"verifier_canonical", "verifier_only"}]
     if not items and not suggestions:
-        if promoted:
+        if promoted or taken or dropped:
             return "\n".join(lines).rstrip() + "\n"
         return "# Требует проверки\n\nРасхождений выше заданного порога не найдено.\n"
     lines.extend(_review_sections(items))
@@ -300,7 +370,11 @@ def rename_speakers(output_dir: Path, names: SpeakerNames) -> list[str]:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     stored = json.loads((output_dir / "segments.json").read_text(encoding="utf-8"))
     readable = [Segment.from_dict(item) for item in stored["readable"]]
-    lexical = [Segment.from_dict(item) for item in stored["hypotheses"][0]["segments"]]
+    # До схемы 7 гипотезы лежали и в `segments.json`; теперь только в `raw.json`.
+    hypotheses = stored.get("hypotheses") or json.loads(
+        (output_dir / "raw.json").read_text(encoding="utf-8")
+    )["hypotheses"]
+    lexical = [Segment.from_dict(item) for item in hypotheses[0]["segments"]]
     present = {speaker for segment in readable + lexical for speaker in segment.speakers}
     if not present:
         raise ValueError("В этой расшифровке нет разметки по говорящим: запускали без --diarize")
@@ -370,7 +444,7 @@ def write_bundle(
         if diarization is not None:
             files.append("speakers.json")
         manifest = {
-            "schema_version": 6,
+            "schema_version": 7,
             "generator": generator,
             "created_at": datetime.now().astimezone().isoformat(),
             "mode": mode,
@@ -383,7 +457,7 @@ def write_bundle(
             # именно получен этот результат.
             "model_revisions": model_revisions or {},
             "language_route": route,
-            "review_count": len(review_items),
+            "review_count": sum(item.kind != "verifier_canonical" for item in review_items),
             "automatic_correction_count": len(corrections),
             "fillers_removed": fillers_removed,
             "warnings": warnings or [],
@@ -406,9 +480,10 @@ def write_bundle(
         )
         _write_json(
             staging / "segments.json",
+            # Гипотезы моделей — только в `raw.json`: до схемы 7 здесь лежала
+            # их полная копия, половина веса файла (180 КБ на 9 минут).
             {
                 "readable": [segment.to_dict() for segment in readable_segments],
-                "hypotheses": [hypothesis.to_dict() for hypothesis in hypotheses],
                 "review_items": [item.to_dict() for item in review_items],
             },
         )
@@ -426,7 +501,7 @@ def write_bundle(
         if diarization is not None:
             _write_json(staging / "speakers.json", diarization.to_dict())
         (staging / "review-needed.md").write_text(
-            _review_markdown(review_items, suggestions, learned), encoding="utf-8"
+            _review_markdown(review_items, suggestions, learned, corrections), encoding="utf-8"
         )
         if prepared_audio is not None:
             shutil.copy2(prepared_audio, staging / "prepared.wav")

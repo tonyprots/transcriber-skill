@@ -89,8 +89,13 @@ class ReviewItem:
     # двадцатисекундном окне и развалившаяся фраза — разная работа для человека.
     weight: int = 1
     # `substantive` — слушать, `spelling` — то же слово записано иначе
-    # (кандидат в словарь), `window` — отметка на всё окно без точного места.
+    # (кандидат в словарь), `window` — отметка на всё окно без точного места,
+    # `verifier_canonical` — место закрыто каноном словаря от проверяющей.
     kind: str = "substantive"
+    # Разошедшиеся фрагменты как есть. `differing_tokens` склеивает их через
+    # « / » и теряет сторону, когда одна из них пустая.
+    primary_span: str = ""
+    verifier_span: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)

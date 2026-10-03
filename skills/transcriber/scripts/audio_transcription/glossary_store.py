@@ -48,6 +48,10 @@ from typing import Any
 
 import yaml
 
+# libyaml разбирает словарь на 127 КБ за 0,04 с против 0,26 с у чистого Python,
+# а читается он дважды за прогон. Без libyaml остаётся безопасный загрузчик.
+_YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
 from .glossary import GlossaryEntry, parse_entries
 from .mining import collect_candidates
 from .phonetic import phonetic_similarity
@@ -155,7 +159,7 @@ def load_document(path: Path) -> dict[str, Any]:
     """Читает файл словаря. Нет файла — пустой документ, а не ошибка."""
     if not path.is_file():
         return {"version": 1, "entries": [], "pending": []}
-    payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    payload = yaml.load(path.read_text(encoding="utf-8"), Loader=_YAML_LOADER) or {}
     if not isinstance(payload, dict):
         raise ValueError(f"Словарь {path} должен быть отображением с ключом entries")
     payload.setdefault("version", 1)

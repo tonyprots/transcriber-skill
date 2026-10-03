@@ -4,6 +4,8 @@ import argparse
 import json
 import platform
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -49,8 +51,10 @@ from .glossary import (
     GlossaryEntry,
     apply_glossary,
     load_glossary,
+    mark_verifier_only_terms,
     merge_glossaries,
     suggest_glossary_matches,
+    take_verifier_canonicals,
 )
 from .glossary_store import (
     entries_of,
@@ -219,6 +223,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Пропустить запись, у которой каталог результата уже содержит "
             "manifest.json: так продолжают прерванную пачку, не скачивая готовое заново"
+        ),
+    )
+    parser.add_argument(
+        "--early-text",
+        type=Path,
+        help=(
+            "Записать сюда читаемый текст сразу после основной модели, не дожидаясь "
+            "проверяющей: она текст не меняет и досчитывается ради очереди и словаря"
         ),
     )
     parser.add_argument(
@@ -734,6 +746,8 @@ def _spoken_duration(remote: RemoteMedia) -> str:
 
 
 def _validate(args: argparse.Namespace) -> None:
+    if args.early_text is not None and len(args.input) * len(_sections(args)) > 1:
+        raise ValueError("--early-text пишет один файл и годится только для одной записи")
     if not 0 <= args.review_threshold <= 1:
         raise ValueError("--review-threshold должен быть в диапазоне [0, 1]")
     if args.verifier_window_seconds < 0:
@@ -802,10 +816,10 @@ def run(args: argparse.Namespace) -> Path:
         report.stage(f"Уже расшифровано, пропускаю: {output}")
         return output
     output = ensure_output_available(output, overwrite=args.overwrite)
-    with tempfile.TemporaryDirectory(prefix="transcriber-download-") as downloads:
+    with scratch_dir("transcriber-download-") as downloads:
         download_seconds = None
         if remote is not None:
-            source, download_seconds = _download(remote, Path(downloads), report)
+            source, download_seconds = _download(remote, downloads, report)
         return _transcribe(
             args,
             source=source,  # type: ignore[arg-type]
@@ -864,11 +878,11 @@ def run_batch(args: argparse.Namespace) -> list[dict[str, Any]]:
     total = sum(len(jobs) for *_, jobs in plan)
     done = 0
     for raw, remote, source, jobs in plan:
-        with tempfile.TemporaryDirectory(prefix="transcriber-download-") as downloads:
+        with scratch_dir("transcriber-download-") as downloads:
             download_seconds = None
             if remote is not None:
                 try:
-                    source, download_seconds = _download(remote, Path(downloads), report)
+                    source, download_seconds = _download(remote, downloads, report)
                 except FAILURES as error:
                     report.stage(f"Не скачалось {raw}: {error}")
                     results.extend(_failure(raw, section, error) for section, _ in jobs)
@@ -933,6 +947,65 @@ def summarize(output: Path) -> dict[str, Any]:
     }
 
 
+@contextmanager
+def scratch_dir(prefix: str) -> Iterator[Path]:
+    """Временный каталог, который убирается не на глазах у вызывающего.
+
+    Антивирус проверяет каждое удаление, и уборка сотен WAV растягивалась до
+    десяти минут после готового результата (`.memory/defender-slow-temp-cleanup.md`).
+    Всё это время stdout молчал, Handy не получал текст, а следующая запись
+    пачки ждала. Удаление уходит отдельному процессу вне нашей сессии: он
+    переживает выход интерпретатора и никого не задерживает.
+    """
+    path = Path(tempfile.mkdtemp(prefix=prefix))
+    try:
+        yield path
+    finally:
+        try:
+            subprocess.Popen(
+                ["rm", "-rf", str(path)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError:
+            shutil.rmtree(path, ignore_errors=True)
+
+
+def write_plain_text(path: Path, segments: list[Any]) -> None:
+    """Читаемый текст без заголовков и таймкодов — для буфера обмена и агента.
+
+    Сегмент — окно речи, и окно режет фразу где придётся, поэтому абзац
+    продолжается, пока предыдущий кусок не кончится концом предложения.
+    """
+    text = ""
+    for segment in segments:
+        chunk = segment.text.strip()
+        if not chunk:
+            continue
+        if not text:
+            text = chunk
+        elif text.endswith((".", "!", "?", "…")):
+            text += "\n\n" + chunk
+        else:
+            text += " " + chunk
+    path = path.expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(text + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def disputed_primary_words(review_items: list[ReviewItem]) -> set[str]:
+    """Слова основной модели, на которых проверяющая с ней разошлась."""
+    words: set[str] = set()
+    for item in review_items:
+        for pair in item.differing_tokens:
+            words.update(normalize_text(pair.split(" / ", 1)[0]).split())
+    return words
+
+
 def _transcribe(
     args: argparse.Namespace,
     *,
@@ -963,8 +1036,7 @@ def _transcribe(
         timings[stage] = round(time.monotonic() - since, 2)
         return time.monotonic()
 
-    with tempfile.TemporaryDirectory(prefix="transcriber-asr-") as temporary, ExitStack() as held:
-        work_dir = Path(temporary)
+    with scratch_dir("transcriber-asr-") as work_dir, ExitStack() as held:
         scope = f", фрагмент {section.label}" if section else ""
         report.stage(f"Подготовка аудио: {source.name}{scope}")
         prepared, media = prepare_audio(source, work_dir, section)
@@ -1181,6 +1253,15 @@ def _transcribe(
             warnings.append(failure)
         hypotheses = [readable]
         review_items: list[ReviewItem] = primary_retry_items(readable)
+        if args.early_text is not None:
+            early_segments, _ = apply_glossary(
+                strip_filler_segments(readable.segments)[0], glossary
+            )
+            write_plain_text(args.early_text, early_segments)
+            # Отдельной строкой и мимо `--quiet`: по ней вызывающий узнаёт, что
+            # текст можно брать, не дожидаясь проверки.
+            print(f"Текст основной модели готов: {args.early_text}", file=sys.stderr, flush=True)
+        verifier_ran = False
 
         # `fast` раньше шёл вообще без проверки, и пользователь не получал ни
         # одного указания, где текст мог поехать. Русскому маршруту добавлена
@@ -1193,8 +1274,7 @@ def _transcribe(
             # он накрывал 78–90 % ошибок вместо 98–100 % и почти не экономил
             # время, потому что Whisper платит за упакованный пакет, а полный
             # набор окон пакуется плотнее выборки.
-            verifier_chunks = chunks
-            if verifier_chunks:
+            if chunks:
                 # Склейка окупается только у Whisper: он доводит любой вход до
                 # 30 секунд и потому платит за вызов, а не за длину. GigaAM
                 # считает пропорционально длине, склеивать ей нечего.
@@ -1206,21 +1286,14 @@ def _transcribe(
                 packed_windows = (
                     build_packed_windows(
                         prepared,
-                        verifier_chunks,
+                        chunks,
                         work_dir,
                         max_seconds=args.verifier_window_seconds,
                     )
                     if pack_windows
-                    else [PackedWindow(chunk=chunk, sources=(chunk,)) for chunk in verifier_chunks]
+                    else [PackedWindow(chunk=chunk, sources=(chunk,)) for chunk in chunks]
                 )
                 packed_chunks = [window.chunk for window in packed_windows]
-                windows = [(chunk.start, chunk.end) for chunk in verifier_chunks]
-                selected_primary = Hypothesis(
-                    model=readable.model,
-                    language=readable.language,
-                    elapsed_seconds=readable.elapsed_seconds,
-                    segments=segments_for_windows(readable.segments, windows),
-                )
                 try:
                     verifier_key = cache_key(
                         "verifier",
@@ -1248,7 +1321,7 @@ def _transcribe(
                                     round(chunk.end, 6),
                                     list(chunk.speakers),
                                 ]
-                                for chunk in verifier_chunks
+                                for chunk in chunks
                             ],
                         },
                     )
@@ -1260,10 +1333,10 @@ def _transcribe(
                     if packed_hypothesis is None:
                         report.stage(
                             f"Независимая проверка: {verifier_spec.model}, "
-                            f"окон {len(verifier_chunks)}"
+                            f"окон {len(chunks)}"
                             + (
                                 f"; упакованы в {len(packed_chunks)}"
-                                if len(packed_chunks) < len(verifier_chunks)
+                                if len(packed_chunks) < len(chunks)
                                 else ""
                             )
                         )
@@ -1291,9 +1364,21 @@ def _transcribe(
                     # заставлять пересчитывать час распознавания.
                     verifier = unpack_hypothesis(packed_hypothesis, packed_windows)
                     hypotheses.append(verifier)
+                    verifier_ran = True
                     review_items.extend(
                         find_review_items(
-                            canonicalized(selected_primary, glossary),
+                            # Окна без длительности сверять не с чем: их
+                            # отсекает фильтр по пересечению с окнами VAD.
+                            canonicalized(
+                                replace(
+                                    readable,
+                                    segments=segments_for_windows(
+                                        readable.segments,
+                                        [(chunk.start, chunk.end) for chunk in chunks],
+                                    ),
+                                ),
+                                glossary,
+                            ),
                             canonicalized(verifier, glossary),
                             threshold=args.review_threshold,
                             comparison_label=f"Независимый {verifier.model}",
@@ -1301,11 +1386,10 @@ def _transcribe(
                     )
                 except BackendUnavailable as error:
                     warnings.append(str(error))
-                    review_items.extend(verifier_failure_items(verifier_chunks, readable))
-            timed("verifier", mark)
+                    review_items.extend(verifier_failure_items(chunks, readable))
+            mark = timed("verifier", mark)
 
         report.stage(f"Сборка результата: {output}")
-        timings["total"] = round(time.monotonic() - started_at, 2)
         review_items.sort(key=lambda item: (item.start, item.end, item.reason))
         readable_input, fillers_removed = strip_filler_segments(readable.segments)
         learned_report = None
@@ -1347,7 +1431,25 @@ def _transcribe(
                 if summary:
                     report.stage(summary)
         readable_segments, corrections = apply_glossary(readable_input, glossary)
-        suggestions = suggest_glossary_matches(readable_segments, glossary)
+        if verifier_ran:
+            # После пополнения словаря: обучение видит место таким, каким его
+            # услышали модели, а не уже закрытым.
+            readable_segments, review_items, taken = take_verifier_canonicals(
+                readable_segments, review_items, glossary
+            )
+            corrections = sorted([*corrections, *taken], key=lambda item: (item.start, item.end))
+            review_items = mark_verifier_only_terms(
+                review_items, glossary, latin_is_signal=route.language == "ru"
+            )
+        suggestions = suggest_glossary_matches(
+            readable_segments,
+            glossary,
+            only_words=disputed_primary_words(review_items) if verifier_ran else None,
+        )
+        timed("glossary", mark)
+        # Итог считаем после словаря: раньше он стоял до пополнения и подсказок,
+        # и 10–30 секунд хвоста в ориентиры скорости не попадали.
+        timings["total"] = round(time.monotonic() - started_at, 2)
         diarization_output = diarization
         if media.section is not None:
             # Время фрагмента переводим во время исходника в самом конце:
@@ -1398,10 +1500,7 @@ def _transcribe(
         # потому что антивирус, проверяющий каждую файловую операцию,
         # растягивает её на минуты; без этой строки в логе прогон выглядит
         # зависшим после готового каталога.
-        report.stage(
-            f"Результат записан: {output}. Уборка временных файлов "
-            f"({sum(1 for _ in work_dir.rglob('*.wav'))} WAV)"
-        )
+        report.stage(f"Результат записан: {output}")
         return result
 
 

@@ -414,6 +414,8 @@ def find_review_items(
                     reason=_reason(comparison_label, item, score, threshold),
                     weight=item.weight,
                     kind=item.kind,
+                    primary_span=item.left,
+                    verifier_span=item.right,
                 )
             )
         if not work and low_confidence:

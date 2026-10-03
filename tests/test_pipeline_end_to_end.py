@@ -110,7 +110,7 @@ def test_pipeline_writes_full_contract(tmp_path: Path, spoken_audio: Path, monke
     }
 
     manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == 6
+    assert manifest["schema_version"] == 7
     assert manifest["mode"] == "max"
     assert manifest["language_route"]["verifier_used"] is not None
     assert manifest["timings_seconds"]["total"] > 0

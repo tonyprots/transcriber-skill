@@ -40,7 +40,7 @@ def test_write_bundle_creates_contract(tmp_path: Path) -> None:
     }
     assert {path.name for path in output.iterdir()} == expected
     manifest = json.loads((output / "manifest.json").read_text())
-    assert manifest["schema_version"] == 6
+    assert manifest["schema_version"] == 7
     assert manifest["model_revisions"] == {}
     assert "Привет, мир!" in (output / "readable.md").read_text()
 
