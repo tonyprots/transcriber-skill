@@ -86,3 +86,22 @@ def test_long_sections_are_cut_with_pointer():
     assert f"## Слушать — {REVIEW_SECTION_LIMIT + 7}, здесь первые {REVIEW_SECTION_LIMIT}" in text
     assert text.count("- [") == REVIEW_SECTION_LIMIT
     assert "Ещё 7 — в `segments.json` → `review_items`." in text
+
+
+def test_typical_whisper_artifact_is_collapsed():
+    found = find_review_items(
+        Hypothesis("gigaam", "ru", 0.0, [Segment(0.0, 10.0, "Ну вот и всё на сегодня.")]),
+        Hypothesis("whisper", "ru", 0.0, [Segment(0.0, 10.0, "Ну вот и всё на сегодня. Продолжение следует...")]),
+    )
+    assert [item.kind for item in found] == ["verifier_artifact"]
+    text = _review_markdown(found, [])
+    assert "## Слушать" not in text
+    assert "## Мелкие расхождения — 1" in text
+
+
+def test_artifact_phrase_inside_real_speech_is_not_collapsed():
+    found = find_review_items(
+        Hypothesis("gigaam", "ru", 0.0, [Segment(0.0, 10.0, "Ну и всё.")]),
+        Hypothesis("whisper", "ru", 0.0, [Segment(0.0, 10.0, "Ну и всё. Продолжение следует, сказал он и ушёл домой")]),
+    )
+    assert [item.kind for item in found] == ["substantive"]

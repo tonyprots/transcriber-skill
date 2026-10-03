@@ -81,7 +81,25 @@ _SPELLING_SIMILARITY = 0.62
 
 # Виды расхождений, которые не считаются работой для человека: в отчёте они
 # сворачиваются в одну строку, в `segments.json` остаются целиком.
-MINOR_KINDS = frozenset({"filler", "equivalent", "disfluency"})
+MINOR_KINDS = frozenset({"filler", "equivalent", "disfluency", "verifier_artifact"})
+
+# Фразы, которые Whisper дописывает в тишину или на краю окна: следы
+# субтитров из его обучающих данных. В наших прогонах «Продолжение
+# следует...» встретилось 19 раз, подписи редакторов субтитров — ещё 9; ни
+# одна не была сказана. Признак срабатывает, только если у основной модели
+# на этом месте пусто, а фраза занимает почти весь фрагмент.
+_VERIFIER_ARTIFACTS = re.compile(
+    r"продолжение следует|dimatorzok|редактор субтитров|корректор а кулакова"
+    r"|спасибо за просмотр|подписывайтесь на (наш )?канал|ставьте лайки"
+)
+_ARTIFACT_SPARE_WORDS = 2
+
+
+def _verifier_artifact(left_key: str, right_key: str) -> bool:
+    if left_key or not right_key:
+        return False
+    rest = _VERIFIER_ARTIFACTS.sub(" ", right_key)
+    return rest != right_key and len(rest.split()) <= _ARTIFACT_SPARE_WORDS
 
 
 def normalize_text(text: str) -> str:
@@ -285,7 +303,9 @@ def disagreements(left: str, right: str) -> list[Disagreement]:
         )
         novel_left = [word for word in left_content.split() if word not in context]
         novel_right = [word for word in right_content.split() if word not in context]
-        if _equivalent(left_key, right_key):
+        if _verifier_artifact(left_key, right_key):
+            kind = "verifier_artifact"
+        elif _equivalent(left_key, right_key):
             kind = "equivalent"
         elif left_content == right_content:
             # Остатки совпали — разошлись только паразиты, даже если сам
@@ -442,6 +462,8 @@ def _reason(label: str, item: Disagreement, window_score: float, threshold: floa
         return f"{label}: повтор или обрыв речи"
     if item.kind == "equivalent":
         return f"{label}: то же число записано иначе"
+    if item.kind == "verifier_artifact":
+        return f"{label}: типовая выдумка проверяющей"
     if not item.right:
         return f"{label}: слова нет в проверочной гипотезе"
     if not item.left:
