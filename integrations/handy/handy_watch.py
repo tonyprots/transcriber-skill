@@ -216,8 +216,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--output-root", type=Path, required=True, help="куда класть расшифровки")
     parser.add_argument("--recordings", type=Path, default=HANDY_RECORDINGS)
     parser.add_argument("--state", type=Path, default=STATE_FILE)
-    parser.add_argument("--min-seconds", type=float, default=60.0,
-                        help="записи короче Handy распознаёт сам (по умолчанию 60)")
+    parser.add_argument("--min-seconds", type=float, default=20.0,
+                        help="записи короче Handy распознаёт сам (по умолчанию 20)")
     parser.add_argument("--mode", default="max")
     parser.add_argument("--language", default="ru")
     parser.add_argument("--no-clipboard", dest="clipboard", action="store_false",

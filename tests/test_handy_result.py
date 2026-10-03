@@ -52,10 +52,18 @@ def env(tmp_path: Path):
     root.mkdir()
     state = tmp_path / "state.json"
     out = handy_watch.output_dir_for(wav, root)
-    return {"wav": wav, "fake": fake, "root": root, "state": state, "out": out}
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    clip = tmp_path / "clipboard.txt"
+    pbcopy = bin_dir / "pbcopy"
+    pbcopy.write_text(f"#!/bin/sh\ncat > '{clip}'\n", encoding="utf-8")
+    pbcopy.chmod(0o755)
+    return {"wav": wav, "fake": fake, "root": root, "state": state, "out": out, "bin": bin_dir, "clip": clip}
 
 
 def run_result(env: dict, timeout: float = 20, *extra: str) -> subprocess.CompletedProcess:
+    # Свой pbcopy: тест не трогает настоящий буфер и видит, что в него ушло.
+    path = f"{env['bin']}{os.pathsep}{os.environ.get('PATH', '')}"
     return subprocess.run(
         [
             sys.executable, str(HANDY / "handy_result.py"), str(env["wav"]),
@@ -63,7 +71,7 @@ def run_result(env: dict, timeout: float = 20, *extra: str) -> subprocess.Comple
             "--python", sys.executable, "--transcribe", str(env["fake"]),
             "--timeout", str(timeout), *extra,
         ],
-        capture_output=True, text=True, timeout=timeout + 10,
+        capture_output=True, text=True, timeout=timeout + 10, env={**os.environ, "PATH": path},
     )
 
 
@@ -82,6 +90,8 @@ def test_ready_text_is_returned_without_a_run(env):
     assert result.returncode == 0
     assert "готовый" in result.stdout
     assert calls(env) == 0
+    # Готовый текст в буфер уже клал наблюдатель: не перетираем буфер повторно.
+    assert not env["clip"].exists()
 
 
 def test_waits_for_running_watcher_instead_of_second_run(env):
@@ -115,6 +125,8 @@ def test_runs_itself_when_watcher_did_not_take_it(env, status):
     assert "расшифровал сам" in result.stdout
     assert "текст основной модели" in result.stdout
     assert calls(env) == 1
+    # Как у наблюдателя: свой прогон тоже кончается текстом в буфере.
+    assert env["clip"].read_text(encoding="utf-8") == "текст основной модели"
     marker = handy_watch.running_marker_path(env["out"])
     deadline = time.time() + 10
     while marker.exists() and time.time() < deadline:

@@ -36,6 +36,7 @@ from handy_watch import (  # noqa: E402
     marker_alive,
     output_dir_for,
     running_marker_path,
+    to_clipboard,
 )
 
 PLIST = Path.home() / "Library/LaunchAgents/ru.tonyprots.handy-transcriber.plist"
@@ -70,8 +71,9 @@ def watcher_busy(root: Path) -> bool:
     return any(marker_alive(m) for m in root.glob("*.running"))
 
 
-def report(wav: Path, out: Path, how: str) -> int:
+def report(wav: Path, out: Path, how: str, *, clipboard: bool = False) -> int:
     early = early_text_path(out)
+    text = early.read_text(encoding="utf-8").strip()
     print(f"# {wav.name}: {how}")
     print(f"# текст: {early}")
     readable = out / "readable.md"
@@ -105,8 +107,16 @@ def report(wav: Path, out: Path, how: str) -> int:
             print(f"# возможно, выпало из текста (слышит только проверяющая): {', '.join(dropped)}")
     else:
         print(f"# полный набор досчитывается: {out}")
+    if clipboard:
+        # Запись, которую наблюдатель не взял (короче порога), кончается так
+        # же, как взятая: текст в буфере, вставить его может сам человек.
+        try:
+            to_clipboard(text)
+            print("# текст скопирован в буфер обмена")
+        except (OSError, subprocess.CalledProcessError):
+            pass
     print()
-    print(early.read_text(encoding="utf-8").strip())
+    print(text)
     return 0
 
 
@@ -159,11 +169,11 @@ def run(args: argparse.Namespace) -> int:
         # Каталог результата скилл подменяет целиком, поэтому readable.md
         # появляется только вместе с полным набором.
         if (full if args.full else early).exists():
-            return report(wav, out, waited_for)
+            return report(wav, out, waited_for, clipboard=job is not None)
         if job is not None:
             if job.poll() is not None:
                 if (full if args.full else early).exists():
-                    return report(wav, out, waited_for)
+                    return report(wav, out, waited_for, clipboard=True)
                 break
         elif marker_alive(marker):
             waited_for = "дождался прогона наблюдателя"

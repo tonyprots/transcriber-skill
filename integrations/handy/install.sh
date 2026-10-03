@@ -1,7 +1,7 @@
 #!/bin/bash
 # Ставит launchd-агента, который прогоняет длинные диктовки Handy через transcriber.
 #
-#   integrations/handy/install.sh --output-root <папка> [--agent-python <путь>] [--min-seconds 60]
+#   integrations/handy/install.sh --output-root <папка> [--agent-python <путь>] [--min-seconds 20]
 #   integrations/handy/install.sh --uninstall
 #
 # --agent-python — интерпретатор, которому macOS уже дала доступ к папке
@@ -17,7 +17,7 @@ REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 
 AGENT_PYTHON="/usr/bin/python3"
 OUTPUT_ROOT=""
-MIN_SECONDS="60"
+MIN_SECONDS="20"
 UNINSTALL=0
 while [ $# -gt 0 ]; do
   case "$1" in
