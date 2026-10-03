@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 
+from .fillers import strip_fillers
 from .models import Hypothesis, ReviewItem, Segment
 
 
@@ -199,12 +200,14 @@ def rebalance_boundaries(
                 right_primary.text, " ".join(right)
             )
 
+        # Перенос может опустошить окно целиком: на r7 чаще всего так и было —
+        # в коротком окне с «М-м» у проверяющей стояло одно слово соседа.
         best = (score(left_words, right_words), left_words, right_words)
         for count in range(1, _BOUNDARY_WORDS + 1):
             candidates = []
-            if count < len(left_words):
+            if count <= len(left_words):
                 candidates.append((left_words[:-count], left_words[-count:] + right_words))
-            if count < len(right_words):
+            if count <= len(right_words):
                 candidates.append((left_words + right_words[:count], right_words[count:]))
             for left, right in candidates:
                 current = score(left, right)
@@ -212,10 +215,15 @@ def rebalance_boundaries(
                     best = (current, left, right)
         _, left, right = best
         if left is not left_words:
-            result[index] = (left_primary, replace(left_verifier, text=" ".join(left)))
+            # Окно может остаться без слов проверяющей: всё, что Whisper в нём
+            # «услышал», оказалось словом соседа («М-м.» против «Классный»).
+            result[index] = (
+                left_primary,
+                replace(left_verifier, text=" ".join(left)) if left else None,
+            )
             result[index + 1] = (
                 right_primary,
-                replace(right_verifier, text=" ".join(right)),
+                replace(right_verifier, text=" ".join(right)) if right else None,
             )
     return result
 
@@ -459,6 +467,10 @@ def find_review_items(
         align_segments(readable.segments, lexical.segments)
     ):
         if lexical_segment is None:
+            if not without_fillers(normalize_text(strip_fillers(readable_segment.text)[0])):
+                # У основной одни паразиты («М-м.»), у проверяющей пусто:
+                # спорить не о чем, а пункт с весом окна занимал бы очередь.
+                continue
             items.append(
                 ReviewItem(
                     start=readable_segment.start,

@@ -164,3 +164,21 @@ def test_boundary_words_stay_when_windows_are_apart_or_nothing_improves() -> Non
         (Segment(2.0, 4.0, "пять шесть"), Segment(2.0, 4.0, "пять шесть")),
     ]
     assert rebalance_boundaries(real) == real
+
+
+def test_boundary_transfer_may_empty_a_window() -> None:
+    """Самый частый случай на r7: в окне с «М-м» у Whisper одно слово соседа."""
+    primary = [
+        Segment(0.0, 0.8, "М-м."),
+        Segment(1.6, 3.0, "Классный музей стоит зайти."),
+    ]
+    verifier = [
+        Segment(0.0, 0.8, "Классный"),
+        Segment(1.6, 3.0, "музей, стоит зайти."),
+    ]
+    items = find_review_items(
+        Hypothesis("primary", "ru", 0.0, primary, {}),
+        Hypothesis("verifier", "ru", 0.0, verifier, {}),
+    )
+    # Ни «М-м / Классный», ни «Классный» отдельно, ни пустого окна с «М-м».
+    assert items == []
