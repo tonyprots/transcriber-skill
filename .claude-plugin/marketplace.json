@@ -10,7 +10,7 @@
       "name": "transcriber",
       "source": "./",
       "description": "Локальная расшифровка аудио и видео, в том числе по ссылке на YouTube, ВК Видео и Рутуб: две независимые ASR, субтитры, диаризация и словарь терминов (ru, en).",
-      "version": "0.18.1",
+      "version": "0.18.2",
       "author": { "name": "Anton Protsenko", "url": "https://tonyprots.ru" },
       "license": "MIT",
       "keywords": ["transcription", "asr", "whisper", "gigaam", "diarization", "russian"],
