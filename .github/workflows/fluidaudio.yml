@@ -1,0 +1,53 @@
+name: fluidaudio
+
+# Сборка fluidaudiocli для диаризации 5+ голосов из закреплённого коммита
+# FluidAudio. Бинарник не лежит в git: его кладёт в Release с тегом
+# fluidaudio-<коммит> эта сборка, рядом — attestation происхождения, а setup.sh
+# качает его и сверяет с суммой из bin/macos-arm64/fluidaudiocli.sha256.
+# Новый коммит FluidAudio = новый тег, новая сумма и перемер схемы из шести
+# голосов (experiments/diarization-bakeoff).
+on:
+  push:
+    tags: ["fluidaudio-*"]
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+env:
+  FLUIDAUDIO_COMMIT: 5c19d5e12320e22bbfb7a1877b089d2665a69add
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: исходники FluidAudio
+        run: |
+          git init -q FluidAudio && cd FluidAudio
+          git remote add origin https://github.com/FluidInference/FluidAudio
+          git fetch -q --depth 1 origin "$FLUIDAUDIO_COMMIT"
+          git checkout -q FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$FLUIDAUDIO_COMMIT"
+      - name: сборка
+        working-directory: FluidAudio
+        run: |
+          swift --version
+          swift build -c release --product fluidaudiocli
+          mkdir -p ../dist
+          cp .build/release/fluidaudiocli ../dist/fluidaudiocli
+          cd ../dist
+          codesign --force --sign - fluidaudiocli
+          shasum -a 256 fluidaudiocli | tee fluidaudiocli.sha256
+          ./fluidaudiocli --help >/dev/null 2>&1 || ./fluidaudiocli help >/dev/null 2>&1 || true
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/fluidaudiocli
+      - name: релиз
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/fluidaudiocli dist/fluidaudiocli.sha256 \
+            --repo "$GITHUB_REPOSITORY" --prerelease \
+            --title "fluidaudiocli ${FLUIDAUDIO_COMMIT:0:7}" \
+            --notes "fluidaudiocli для диаризации 5+ голосов, собран этой сборкой из FluidInference/FluidAudio@${FLUIDAUDIO_COMMIT} на macos-14 (arm64), подпись ad-hoc. Происхождение: gh attestation verify fluidaudiocli --repo ${GITHUB_REPOSITORY}. Лицензия Apache-2.0."
