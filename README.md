@@ -28,6 +28,14 @@
 - **Текст не ждёт проверки.** С `--early-text` читаемый текст готов сразу
   после основной модели, в 3–4 раза раньше конца прогона: проверяющая его не
   меняет и досчитывается ради очереди и словаря.
+- **Названия не теряются молча.** Если основная модель исказила термин из
+  словаря, а проверяющая написала его как надо («Макросов» → Microsoft), в
+  тексте встаёт правильное написание. Если основная название уронила совсем
+  («OpenAI понижает лимиты» → «понижает лимиты»), место выходит наверх
+  отчёта: «Возможно, выпало из текста». Типовые выдумки Whisper
+  («Продолжение следует...») в очередь не попадают.
+- **Короткая очередь.** Разделы отчёта показывают по 25 самых весомых мест,
+  остальное лежит в `segments.json`: отчёт читается, а не листается.
 - **Всё считается локально.** Запись не уходит в облако, исходный файл не
   меняется. Наружу скилл ходит только за самим видео, когда вы дали ссылку.
 
@@ -54,6 +62,10 @@
 - **Спикеры:** `--diarize` делит разговор по голосам, справляется и со
   встречей на шестерых. Имена вместо «Спикер 1» ставятся флагом или потом,
   в готовую расшифровку, без пересчёта звука.
+- **Диктовки из [Handy](https://github.com/cjpais/Handy):** фоновый агент
+  macOS прогоняет каждую запись длиннее минуты, кладёт текст в буфер обмена
+  и отдаёт его агенту одной командой — без второго прогона.
+  [integrations/handy](integrations/handy/README.md).
 - **Языки:** язык запись скилл определяет сам. Русский и английский идут
   проверенными маршрутами с замерами, остальные — одним Whisper с
   предупреждением.
@@ -375,6 +387,9 @@ verifying by audio that it is the same recording, transcribe only a
 `--section` of a long video for quote checking, and process batches and
 playlists with a machine-wide run queue and resumable `--skip-done`. The
 language is detected automatically; speakers can be renamed after the fact.
+Glossary terms the verifier spelled right replace near-misses of the primary
+model, names the primary model dropped are surfaced at the top of the review
+queue, and a launchd watcher transcribes Handy dictations in the background.
 The default max mode runs at a quarter to a third of real time on an Apple M1. Install
 with `/plugin marketplace add tonyprots/transcriber-skill` or
 `npx skills add tonyprots/transcriber-skill`, then run
