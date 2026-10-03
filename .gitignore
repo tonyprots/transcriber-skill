@@ -25,6 +25,11 @@ transcript.txt
 experiments/*
 !experiments/window-cost/
 !experiments/review-queue-eval/
+!experiments/public-benchmark/
+!experiments/english-bakeoff/
+!experiments/youtube-benchmark/
+experiments/*/*.log
+experiments/youtube-benchmark/results*.json
 /scripts/
 
 # Рабочие копии веток (git worktree)

@@ -40,6 +40,14 @@ _TRACK_URL = re.compile(
 _ALBUM_URL = re.compile(r"^https?://music\.yandex\.[a-z]+/album/\d+/?(?:[?#]|$)", re.IGNORECASE)
 
 
+# API неофициальный: когда он меняется, человеку нужен обходной путь, а не
+# только текст ошибки.
+_MANUAL = (
+    " Скилл ходит в неофициальный API Яндекс Музыки, и тот мог измениться: "
+    "скачайте выпуск вручную и передайте файл."
+)
+
+
 def track_id(url: str) -> str | None:
     """Номер выпуска из ссылки или None, если ссылка не на Яндекс Музыку."""
     match = _TRACK_URL.match(url.strip())
@@ -88,14 +96,14 @@ def download(url: str, dest_dir: Path) -> Path:
         if item.get("codec") == "mp3" and not item.get("preview")
     ]
     if not variants:
-        raise FetchError("Яндекс Музыка не отдала ни одного полного mp3 для выпуска")
+        raise FetchError("Яндекс Музыка не отдала ни одного полного mp3 для выпуска" + _MANUAL)
     # Для распознавания речи битрейт выше 64 кбит/с ничего не даёт — берём
     # самый лёгкий: быстрее качается, конвейер всё равно сведёт в 16 кГц моно.
     variant = min(variants, key=lambda item: item.get("bitrateInKbps") or 0)
     info = ElementTree.fromstring(_get(variant["downloadInfoUrl"]))
     fields = {name: info.findtext(name) or "" for name in ("host", "path", "ts", "s")}
     if not all(fields.values()):
-        raise FetchError("Описание файла Яндекс Музыки пришло без хоста или подписи")
+        raise FetchError("Описание файла Яндекс Музыки пришло без хоста или подписи" + _MANUAL)
     sign = hashlib.md5(
         (_SIGN_SALT + fields["path"][1:] + fields["s"]).encode()
     ).hexdigest()
@@ -110,7 +118,7 @@ def download(url: str, dest_dir: Path) -> Path:
             shutil.copyfileobj(response, sink, length=1 << 20)
     except (urllib.error.URLError, OSError) as error:
         target.unlink(missing_ok=True)
-        raise FetchError(f"Не удалось скачать выпуск Яндекс Музыки: {error}") from error
+        raise FetchError(f"Не удалось скачать выпуск Яндекс Музыки: {error}" + _MANUAL) from error
     if target.stat().st_size == 0:
         raise FetchError("Яндекс Музыка отдала пустой файл")
     return target
@@ -127,7 +135,7 @@ def _json(url: str) -> dict[str, Any]:
     try:
         return json.loads(_get(url))
     except json.JSONDecodeError as error:
-        raise FetchError(f"Яндекс Музыка вернула не JSON: {error}") from error
+        raise FetchError(f"Яндекс Музыка вернула не JSON: {error}" + _MANUAL) from error
 
 
 def _get(url: str) -> bytes:
@@ -135,7 +143,7 @@ def _get(url: str) -> bytes:
         with _open(url) as response:
             return response.read()
     except urllib.error.URLError as error:
-        raise FetchError(f"Яндекс Музыка не ответила: {error}") from error
+        raise FetchError(f"Яндекс Музыка не ответила: {error}" + _MANUAL) from error
 
 
 def _open(url: str):

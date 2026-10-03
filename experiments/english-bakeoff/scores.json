@@ -1,0 +1,62 @@
+[
+  {
+    "model": "parakeet-tdt-0.6b-v3",
+    "role": "кандидат в основные",
+    "status": "candidate",
+    "word_errors": 227,
+    "word_total": 1248,
+    "wer": 0.1819,
+    "cer": 0.1506,
+    "rtfx": 11.9,
+    "wall_seconds": 43.0,
+    "slices": {
+      "ami": 0.0554,
+      "earnings22": 0.217
+    }
+  },
+  {
+    "model": "whisper-large-v3-turbo-mlx-fp16",
+    "role": "основная сейчас",
+    "status": "incumbent",
+    "word_errors": 231,
+    "word_total": 1248,
+    "wer": 0.1851,
+    "cer": 0.1118,
+    "rtfx": 3.7,
+    "wall_seconds": 138.8,
+    "slices": {
+      "ami": 0.1808,
+      "earnings22": 0.1863
+    }
+  },
+  {
+    "model": "canary-1b-v2",
+    "role": "кандидат в проверяющие: AED против TDT",
+    "status": "candidate",
+    "word_errors": 256,
+    "word_total": 1248,
+    "wer": 0.2051,
+    "cer": 0.1498,
+    "rtfx": 3.4,
+    "wall_seconds": 150.9,
+    "slices": {
+      "ami": 0.1771,
+      "earnings22": 0.2129
+    }
+  },
+  {
+    "model": "gigaam-multilingual-ctc-int8",
+    "role": "проверяющая сейчас",
+    "status": "incumbent",
+    "word_errors": 365,
+    "word_total": 1248,
+    "wer": 0.2925,
+    "cer": 0.1806,
+    "rtfx": 31.9,
+    "wall_seconds": 16.0,
+    "slices": {
+      "ami": 0.31,
+      "earnings22": 0.2876
+    }
+  }
+]

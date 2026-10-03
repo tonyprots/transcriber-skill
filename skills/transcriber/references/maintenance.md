@@ -21,8 +21,58 @@
 и дату `calibrated` в `scripts/audio_transcription/catalog.py` без нового замера
 не двигай.
 
-Если модель исчезла с хаба, прогон падает с ошибкой загрузки. Не ищи замену
-молча: скажи пользователю и предложи выбрать новую вместе.
+Веса каждой модели закреплены коммитом (`revision` в `catalog.py`), поэтому
+новая версия на хабе ничего не меняет, пока её не закрепят. Если закреплённый
+коммит пропал с хаба (автор переписал историю), прогон не падает: сначала
+ищет эти веса в локальном кэше, потом берёт текущий `main`, громко предупреждает
+и пишет в `manifest.json` → `model_revisions` отметку `pinned: false`. Это сигнал
+перезакрепить модель. Если исчез весь репозиторий, прогон падает с ошибкой
+загрузки. Не ищи замену молча: скажи пользователю и предложи выбрать новую
+вместе.
+
+Для опытов на свежих весах есть `TRANSCRIBER_UNPIN=1`: всё грузится с `main`, а
+манифест помечает такие прогоны. Кэш гипотез их не смешивает с закреплёнными —
+ревизия входит в ключ.
+
+### Сменить ревизию модели (для мейнтейнера)
+
+1. `doctor.py --check-updates` назвал новый коммит, или его видно на странице
+   репозитория.
+2. Прогнать замер маршрута на новом коммите (`TRANSCRIBER_UNPIN=1` или
+   временная правка `revision`): для русского — `experiments/public-benchmark`
+   и личная выборка, для английского — `experiments/english-bakeoff`.
+3. Хуже не стало — в одном коммите: новый `revision` и `calibrated` в
+   `catalog.py`, новые цифры в [quality.md](quality.md). Стало хуже — оставить
+   старый коммит и записать отказ в [decisions.md](decisions.md).
+4. `pytest -m slow` — сквозной прогон на настоящих весах, затем релиз.
+
+## Релиз (для мейнтейнера)
+
+Установщик ставит последний тег `v*`, поэтому каждая версия, попавшая в
+`main`, получает тег, а тег ставится только после:
+
+- `pytest` и `ruff check skills tests` (то же делает CI на Linux и macOS);
+- `pytest -m slow` на Apple Silicon со скачанными весами — CI его не гоняет;
+- версии в `pyproject.toml`, `audio_transcription/__init__.py` и `SKILL.md`
+  совпадают (это проверяет `tests/test_docs_consistency.py`).
+
+Зависимости Python закреплены в `requirements.lock` с хешами. После правки
+`requirements.txt` или `requirements-apple.txt` lock пересобирается
+(`uv` нужен только мейнтейнеру):
+
+```bash
+cd skills/transcriber
+printf -- '-r requirements.txt\nmlx-audio>=0.5,<0.6 ; sys_platform == "darwin" and platform_machine == "arm64"\n' > lock.in
+uv pip compile lock.in --universal --python-version 3.10 --generate-hashes --no-header -o requirements.lock
+rm lock.in
+```
+
+Существующий `requirements.lock` служит предпочтением: uv меняет только то, чего
+требует правка. Поднять всё до свежих версий — `--upgrade`, и это тот же
+перемер перед релизом, что и смена весов.
+
+Новый `fluidaudiocli` — это новая сумма в `bin/macos-arm64/fluidaudiocli.sha256`
+и новый коммит апстрима в `third-party/fluidaudio/NOTICE.md`, в том же коммите.
 
 ## yt-dlp
 

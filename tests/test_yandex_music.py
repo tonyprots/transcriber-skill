@@ -101,3 +101,9 @@ def test_preview_only_track_is_refused(api, tmp_path: Path) -> None:
     with pytest.raises(FetchError, match="превью"):
         fetching.fetch_audio("https://music.yandex.ru/album/1/track/140105021", tmp_path)
     assert not any(tmp_path.iterdir())
+
+
+def test_api_shape_failure_suggests_manual_download(monkeypatch) -> None:
+    monkeypatch.setattr(yandex_music, "_get", lambda url: b"<html>")
+    with pytest.raises(FetchError, match="скачайте выпуск вручную"):
+        yandex_music.probe("https://music.yandex.ru/album/1/track/2")

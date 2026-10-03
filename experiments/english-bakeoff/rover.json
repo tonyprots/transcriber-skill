@@ -1,0 +1,15 @@
+{
+  "members": [
+    "whisper-large-v3-turbo-mlx-fp16",
+    "parakeet-tdt-0.6b-v3",
+    "canary-1b-v2"
+  ],
+  "singles": {
+    "whisper-large-v3-turbo-mlx-fp16": 0.1851,
+    "parakeet-tdt-0.6b-v3": 0.1819,
+    "canary-1b-v2": 0.2051
+  },
+  "rover": 0.1939,
+  "oracle_pick": 0.129,
+  "items": 40
+}

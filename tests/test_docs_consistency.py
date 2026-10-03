@@ -98,3 +98,33 @@ def test_manifest_generator_uses_same_version() -> None:
     """Версия в манифесте — часть аудит-следа, она не должна быть отдельной строкой."""
     cli = (SKILL / "scripts" / "audio_transcription" / "cli.py").read_text(encoding="utf-8")
     assert 'generator=f"transcriber {__version__}"' in cli
+
+
+EXPERIMENT_REF = re.compile(r"experiments/([a-z0-9-]+)")
+
+
+def _published_experiments() -> set[str]:
+    import subprocess
+
+    try:
+        listed = subprocess.run(
+            ["git", "-C", str(ROOT), "ls-files", "experiments"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip("нет git: опубликованное не проверить")
+    return {line.split("/")[1] for line in listed.splitlines() if line.count("/") >= 2}
+
+
+def test_experiment_references_are_published_or_marked() -> None:
+    # Ссылка на замер, которого нет в репозитории, выглядит как доказательство,
+    # а проверить её нельзя. Каталог с личными записями помечается прямо в той же
+    # строке: «не опубликовано». Локальная копия каталога не в счёт — только git.
+    published = _published_experiments()
+    unmarked = []
+    for document in [ROOT / "README.md", *sorted(SKILL.rglob("*.md"))]:
+        for number, line in enumerate(document.read_text(encoding="utf-8").splitlines(), 1):
+            for name in EXPERIMENT_REF.findall(line):
+                if name not in published and "не опубликован" not in line:
+                    unmarked.append(f"{document.relative_to(ROOT)}:{number} experiments/{name}")
+    assert not unmarked, "\n".join(unmarked)
