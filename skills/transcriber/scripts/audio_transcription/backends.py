@@ -8,6 +8,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
+from .audio import SAMPLE_RATE, chunk_waveform
 from .catalog import FASTER_WHISPER_FALLBACK, WHISPER_TURBO
 from .weights import Weights, weights_for
 from .models import AudioChunk, Hypothesis, Segment
@@ -230,12 +231,14 @@ class GigaAMBackend:
                 progress(0, len(chunks))
             segments: list[Segment] = []
             chunk_results: list[dict[str, Any]] = []
-            retry_dir = chunks[0].path.parent / "retry-gigaam"
             for index, chunk in enumerate(chunks, start=1):
                 result = recognize_with_retry(
                     chunk,
-                    lambda part: {"text": str(model.recognize(str(part.path))).strip()},
-                    retry_dir,
+                    lambda part: {
+                        "text": str(
+                            model.recognize(chunk_waveform(part), sample_rate=SAMPLE_RATE)
+                        ).strip()
+                    },
                 )
                 text = str(result["text"])
                 chunk_results.append(result)
@@ -320,11 +323,10 @@ class WhisperBackend:
             segments: list[Segment] = []
             chunk_results: list[dict[str, Any]] = []
             detected = language
-            retry_dir = chunks[0].path.parent / "retry-faster-whisper"
 
             def recognize(part: AudioChunk) -> dict[str, Any]:
                 raw_segments, info = model.transcribe(
-                    str(part.path),
+                    chunk_waveform(part),
                     language=language,
                     beam_size=self.beam_size,
                     vad_filter=False,
@@ -364,7 +366,7 @@ class WhisperBackend:
                 }
 
             for index, chunk in enumerate(chunks, start=1):
-                result = recognize_with_retry(chunk, recognize, retry_dir)
+                result = recognize_with_retry(chunk, recognize)
                 text = str(result["text"])
                 confidence = result.get("confidence")
                 if confidence is None:
@@ -418,7 +420,6 @@ class WhisperBackend:
             return language_hypothesis(model_name, [], 0.0)
         try:
             module = import_module("faster_whisper")
-            decode_audio = import_module("faster_whisper.audio").decode_audio
         except (ImportError, AttributeError) as exc:
             raise BackendMissing("Не установлен faster-whisper для CPU-fallback.") from exc
         pinned = _PinnedLoad(self.model_name)
@@ -436,7 +437,7 @@ class WhisperBackend:
         windows: list[dict[str, float]] = []
         try:
             for index, chunk in enumerate(chunks, start=1):
-                _, _, ranked = model.detect_language(decode_audio(str(chunk.path)))
+                _, _, ranked = model.detect_language(chunk_waveform(chunk))
                 windows.append({str(code): float(share) for code, share in ranked})
                 if progress:
                     progress(index, len(chunks))
@@ -502,12 +503,11 @@ class MLXWhisperBackend:
         try:
             if progress:
                 progress(0, len(chunks))
-            retry_dir = chunks[0].path.parent / "retry-mlx-whisper"
 
             def recognize(part: AudioChunk) -> dict[str, Any]:
                 answer = generate.generate_transcription(
                     model=model,
-                    audio=str(part.path),
+                    audio=chunk_waveform(part),
                     language=language,
                     hotwords=hotwords or None,
                     word_timestamps=True,
@@ -555,7 +555,7 @@ class MLXWhisperBackend:
                 }
 
             for index, chunk in enumerate(chunks, start=1):
-                result = recognize_with_retry(chunk, recognize, retry_dir)
+                result = recognize_with_retry(chunk, recognize)
                 text = str(result["text"])
                 confidence = result.get("confidence")
                 if confidence is None:
@@ -634,7 +634,7 @@ class MLXWhisperBackend:
             codes = list(languages)[: model.num_languages]
             for index, chunk in enumerate(chunks, start=1):
                 mel = whisper_audio.log_mel_spectrogram(
-                    utils.load_audio(str(chunk.path)),
+                    chunk_waveform(chunk),
                     n_mels=model.dims.n_mels,
                     padding=whisper_audio.N_SAMPLES,
                 )

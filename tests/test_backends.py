@@ -17,7 +17,10 @@ def test_gigaam_passes_quantization_to_onnx_asr(monkeypatch, tmp_path: Path) -> 
     captured = {}
 
     class FakeModel:
-        def recognize(self, path: str) -> str:
+        def recognize(self, waveform, sample_rate: int) -> str:
+            # Окно приходит массивом из памяти, а не путём к файлу.
+            captured["samples"] = len(waveform)
+            captured["sample_rate"] = sample_rate
             return "hello"
 
     def load_model(name: str, path=None, **kwargs):
@@ -29,13 +32,22 @@ def test_gigaam_passes_quantization_to_onnx_asr(monkeypatch, tmp_path: Path) -> 
     pinned = Weights(tmp_path / "snapshots" / ("a" * 40), "a" * 40, True)
     monkeypatch.setattr(backends, "weights_for", lambda model, quantization=None: pinned)
     monkeypatch.setitem(sys.modules, "onnx_asr", SimpleNamespace(load_model=load_model))
+    import wave
+
+    prepared = tmp_path / "prepared.wav"
+    with wave.open(str(prepared), "wb") as target:
+        target.setnchannels(1)
+        target.setsampwidth(2)
+        target.setframerate(16_000)
+        target.writeframes(b"\0\0" * 32_000)
     hypothesis = backends.GigaAMBackend(
         "gigaam-multilingual-ctc",
         quantization="int8",
     ).transcribe_chunks(
-        [AudioChunk(0, tmp_path / "chunk.wav", 0.0, 1.0)],
+        [AudioChunk(0, prepared, 0.5, 1.5)],
         "en",
     )
+    assert (captured["samples"], captured["sample_rate"]) == (16_000, 16_000)
     assert hypothesis.text == "hello"
     assert captured["quantization"] == "int8"
     assert hypothesis.metadata["quantization"] == "int8"

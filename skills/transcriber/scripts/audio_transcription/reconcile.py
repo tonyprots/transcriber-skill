@@ -155,6 +155,71 @@ def align_segments(
     return pairs
 
 
+_BOUNDARY_GAP_SECONDS = 1.0
+_BOUNDARY_WORDS = 2
+
+
+def _matched_words(left: str, right: str) -> int:
+    left_keys = _word_tokens(left)[1]
+    right_keys = _word_tokens(right)[1]
+    return sum(
+        block.size
+        for block in SequenceMatcher(None, left_keys, right_keys).get_matching_blocks()
+    )
+
+
+def rebalance_boundaries(
+    pairs: list[tuple[Segment, Segment | None]],
+) -> list[tuple[Segment, Segment | None]]:
+    """Возвращает слово проверяющей в то окно, где его услышала основная.
+
+    Текст проверяющей раскладывается по окнам через пословные таймкоды
+    (`packing.unpack_hypothesis`), а у Whisper они плывут на доли секунды.
+    Слово на стыке окон уезжало к соседу, и одно и то же слово, услышанное
+    обеими моделями, давало два пункта очереди: «выпало» в одном окне и
+    «лишнее» в соседнем. Здесь на каждом стыке пробуется перенести одно-два
+    крайних слова проверяющей через границу; перенос принимается, только если
+    совпадений с основной на паре окон становится строго больше.
+    """
+    result = list(pairs)
+    for index in range(len(result) - 1):
+        (left_primary, left_verifier), (right_primary, right_verifier) = (
+            result[index],
+            result[index + 1],
+        )
+        if left_verifier is None or right_verifier is None:
+            continue
+        if right_primary.start - left_primary.end > _BOUNDARY_GAP_SECONDS:
+            continue
+        left_words = left_verifier.text.split()
+        right_words = right_verifier.text.split()
+
+        def score(left: list[str], right: list[str]) -> int:
+            return _matched_words(left_primary.text, " ".join(left)) + _matched_words(
+                right_primary.text, " ".join(right)
+            )
+
+        best = (score(left_words, right_words), left_words, right_words)
+        for count in range(1, _BOUNDARY_WORDS + 1):
+            candidates = []
+            if count < len(left_words):
+                candidates.append((left_words[:-count], left_words[-count:] + right_words))
+            if count < len(right_words):
+                candidates.append((left_words + right_words[:count], right_words[count:]))
+            for left, right in candidates:
+                current = score(left, right)
+                if current > best[0]:
+                    best = (current, left, right)
+        _, left, right = best
+        if left is not left_words:
+            result[index] = (left_primary, replace(left_verifier, text=" ".join(left)))
+            result[index + 1] = (
+                right_primary,
+                replace(right_verifier, text=" ".join(right)),
+            )
+    return result
+
+
 @dataclass(frozen=True)
 class Disagreement:
     """Одно разошедшееся место внутри окна, а не всё окно целиком.
@@ -390,8 +455,8 @@ def find_review_items(
     comparison_label: str = "Лексическая GigaAM",
 ) -> list[ReviewItem]:
     items: list[ReviewItem] = []
-    for readable_segment, lexical_segment in align_segments(
-        readable.segments, lexical.segments
+    for readable_segment, lexical_segment in rebalance_boundaries(
+        align_segments(readable.segments, lexical.segments)
     ):
         if lexical_segment is None:
             items.append(

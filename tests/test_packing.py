@@ -126,14 +126,16 @@ def test_packed_window_sequences_are_unique(tmp_path: Path) -> None:
         handle.setsampwidth(2)
         handle.setframerate(16000)
         handle.writeframes(b"\0\0" * 16000 * 50)
-    for index in range(5):
-        (tmp_path / f"chunk-{index}.wav").write_bytes(b"")
     chunks = [
         chunk(0, 0.0, 2.0), chunk(1, 2.5, 4.0),   # группа 0 (склейка)
         chunk(2, 20.0, 22.0),                     # группа 1 (одиночная)
         chunk(3, 40.0, 42.0), chunk(4, 42.5, 44.0),  # группа 2 (склейка)
     ]
-    windows = build_packed_windows(prepared, chunks, tmp_path, max_seconds=24.0)
+    windows = build_packed_windows(prepared, chunks, max_seconds=24.0)
     sequences = [window.chunk.sequence for window in windows]
     assert len(sequences) == len(set(sequences)) == 3
     assert windows[1].chunk.path == chunks[2].path
+    # Склейка — отрезок того же prepared.wav, а не новый файл на диске.
+    assert windows[0].chunk.path == prepared
+    assert (windows[0].chunk.start, windows[0].chunk.end) == (0.0, 4.0)
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["prepared.wav"]

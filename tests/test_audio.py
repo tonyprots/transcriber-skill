@@ -41,22 +41,55 @@ def test_pack_speech_spans_keeps_context_and_respects_limit() -> None:
     assert packed == [(0, 83_200), (396_800, 433_200)]
 
 
-def test_split_audio_chunk_preserves_absolute_timeline(tmp_path: Path) -> None:
-    source = tmp_path / "chunk.wav"
-    with wave.open(str(source), "wb") as target:
+def _write_ramp(path: Path, samples: int) -> None:
+    """WAV, где значение сэмпла равно его номеру: по срезу видно, откуда он."""
+    import numpy as np
+
+    with wave.open(str(path), "wb") as target:
         target.setnchannels(1)
         target.setsampwidth(2)
         target.setframerate(16_000)
-        target.writeframes(b"\0\0" * 64_000)
-    left, right = audio.split_audio_chunk(
-        AudioChunk(3, source, 12.0, 16.0),
-        tmp_path / "split",
-        label="test",
-    )
+        target.writeframes((np.arange(samples) % 32_000).astype("<i2").tobytes())
+
+
+def test_split_audio_chunk_preserves_absolute_timeline(tmp_path: Path) -> None:
+    source = tmp_path / "prepared.wav"
+    _write_ramp(source, 16_000 * 20)
+    left, right = audio.split_audio_chunk(AudioChunk(3, source, 12.0, 16.0))
     assert (left.start, left.end) == (12.0, 14.0)
     assert (right.start, right.end) == (14.0, 16.0)
-    with wave.open(str(left.path), "rb") as part:
-        assert part.getnframes() == 32_000
+    assert left.path == right.path == source
+    assert len(audio.chunk_waveform(left)) == 32_000
+    # Половинки стыкуются сэмпл в сэмпл: ни потерянного, ни задвоенного.
+    whole = audio.chunk_waveform(AudioChunk(3, source, 12.0, 16.0))
+    halves = [*audio.chunk_waveform(left), *audio.chunk_waveform(right)]
+    assert list(whole) == halves
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["prepared.wav"]
+
+
+def test_chunk_waveform_is_a_slice_of_prepared(tmp_path: Path) -> None:
+    source = tmp_path / "prepared.wav"
+    _write_ramp(source, 16_000 * 3)
+    samples = audio.chunk_waveform(AudioChunk(0, source, 1.0, 1.5))
+    assert samples.dtype.name == "float32"
+    assert len(samples) == 8_000
+    assert round(float(samples[0]) * 32768) == 16_000
+    # Окно за концом записи обрезается, а не падает.
+    tail = audio.chunk_waveform(AudioChunk(1, source, 2.5, 4.0))
+    assert len(tail) == 8_000
+
+
+def test_chunk_waveform_rejects_unprepared_audio(tmp_path: Path) -> None:
+    import pytest
+
+    source = tmp_path / "stereo.wav"
+    with wave.open(str(source), "wb") as target:
+        target.setnchannels(2)
+        target.setsampwidth(2)
+        target.setframerate(16_000)
+        target.writeframes(b"\0\0\0\0" * 100)
+    with pytest.raises(audio.MediaToolError):
+        audio.chunk_waveform(AudioChunk(0, source, 0.0, 0.001))
 
 
 def test_vad_load_respects_offline(monkeypatch, tmp_path: Path) -> None:
@@ -90,6 +123,6 @@ def test_vad_load_respects_offline(monkeypatch, tmp_path: Path) -> None:
     import pytest
 
     with pytest.raises(Exception):
-        audio.split_speech_windows(tmp_path / "prepared.wav", tmp_path, offline=True)
+        audio.split_speech_windows(tmp_path / "prepared.wav", offline=True)
     assert seen["offline"] == "1"
     assert seen["path"] == tmp_path

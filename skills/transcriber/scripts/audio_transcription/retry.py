@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any
 
 from .audio import split_audio_chunk
@@ -66,12 +65,10 @@ def _merge_children(
 def recognize_with_retry(
     chunk: AudioChunk,
     recognize: Callable[[AudioChunk], Recognition],
-    retry_dir: Path,
     *,
     max_depth: int = 2,
     min_part_seconds: float = 2.0,
     _depth: int = 0,
-    _branch: str = "root",
 ) -> Recognition:
     """Повторяет только сбойное окно, рекурсивно деля его на равные части."""
     error: Exception | None = None
@@ -105,21 +102,15 @@ def recognize_with_retry(
             "error": reason,
         }
 
-    left, right = split_audio_chunk(
-        chunk,
-        retry_dir,
-        label=f"d{_depth + 1}-{_branch}",
-    )
+    left, right = split_audio_chunk(chunk)
     children = [
         recognize_with_retry(
             child,
             recognize,
-            retry_dir,
             max_depth=max_depth,
             min_part_seconds=min_part_seconds,
             _depth=_depth + 1,
-            _branch=f"{_branch}{side}",
         )
-        for child, side in ((left, "l"), (right, "r"))
+        for child in (left, right)
     ]
     return _merge_children(chunk, children, reason=reason)

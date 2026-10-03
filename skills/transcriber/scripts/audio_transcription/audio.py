@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import wave
 from dataclasses import replace
+from functools import lru_cache
 from pathlib import Path
 
 from .models import AudioChunk, MediaInfo, Section
@@ -158,52 +159,58 @@ def pack_speech_spans(
     return packed
 
 
-def _write_pcm16(path: Path, samples: object) -> None:
+@lru_cache(maxsize=2)
+def _pcm16(path: Path) -> object:
+    """Весь подготовленный WAV в памяти, один раз на процесс.
+
+    Окна раньше нарезались на диск отдельными WAV, по одному на окно, склейку
+    и ретрай. Антивирус проверяет каждое создание и удаление файла, и VAD
+    часовой записи растягивался с 5 секунд до пяти минут
+    (`.memory/defender-slow-temp-cleanup.md`). Теперь окно — это отрезок
+    `prepared.wav`, а звук режется срезом массива. Час записи — 115 МБ int16.
+    """
     import numpy as np
 
-    pcm = (np.clip(samples, -1.0, 1.0) * 32767).astype("<i2")
-    with wave.open(str(path), "wb") as handle:
-        handle.setnchannels(1)
-        handle.setsampwidth(2)
-        handle.setframerate(SAMPLE_RATE)
-        handle.writeframes(pcm.tobytes())
+    with wave.open(str(path), "rb") as source:
+        if (source.getnchannels(), source.getsampwidth(), source.getframerate()) != (
+            1,
+            2,
+            SAMPLE_RATE,
+        ):
+            raise MediaToolError(f"Ожидался PCM16 mono {SAMPLE_RATE} Hz: {path}")
+        frames = source.readframes(source.getnframes())
+    return np.frombuffer(frames, dtype="<i2")
 
 
-def split_audio_chunk(
-    chunk: AudioChunk,
-    output_dir: Path,
-    *,
-    label: str,
-) -> tuple[AudioChunk, AudioChunk]:
-    """Делит PCM WAV пополам, сохраняя абсолютные таймкоды родительского окна."""
-    output_dir.mkdir(parents=True, exist_ok=True)
-    with wave.open(str(chunk.path), "rb") as source:
-        params = source.getparams()
-        frame_count = source.getnframes()
-        frames = source.readframes(frame_count)
-    if frame_count < 2:
-        raise MediaToolError(f"Окно слишком короткое для retry-split: {chunk.path}")
+def _frame_bounds(chunk: AudioChunk, total: int) -> tuple[int, int]:
+    first = max(0, min(total, round(chunk.start * SAMPLE_RATE)))
+    return first, max(first, min(total, round(chunk.end * SAMPLE_RATE)))
 
-    frame_size = params.nchannels * params.sampwidth
-    midpoint = frame_count // 2
-    boundary = chunk.start + chunk.duration * midpoint / frame_count
-    parts = (
-        (0, midpoint, chunk.start, boundary),
-        (midpoint, frame_count, boundary, chunk.end),
+
+def chunk_waveform(chunk: AudioChunk) -> object:
+    """Звук окна как float32 16 kHz — то, что принимают все три рантайма ASR."""
+    import numpy as np
+
+    samples = _pcm16(chunk.path.resolve())
+    first, last = _frame_bounds(chunk, len(samples))
+    return samples[first:last].astype(np.float32) / 32768.0
+
+
+def split_audio_chunk(chunk: AudioChunk) -> tuple[AudioChunk, AudioChunk]:
+    """Делит окно пополам по сэмплу, сохраняя абсолютные таймкоды родителя."""
+    first = round(chunk.start * SAMPLE_RATE)
+    last = round(chunk.end * SAMPLE_RATE)
+    if last - first < 2:
+        raise MediaToolError(f"Окно слишком короткое для retry-split: {chunk.start:.3f} с")
+    boundary = (first + last) // 2 / SAMPLE_RATE
+    return (
+        AudioChunk(chunk.sequence, chunk.path, chunk.start, boundary, chunk.speakers),
+        AudioChunk(chunk.sequence, chunk.path, boundary, chunk.end, chunk.speakers),
     )
-    result: list[AudioChunk] = []
-    for index, (start_frame, end_frame, start, end) in enumerate(parts):
-        path = output_dir / f"chunk-{chunk.sequence:04d}-{label}-{index}.wav"
-        with wave.open(str(path), "wb") as target:
-            target.setparams(params)
-            target.writeframes(frames[start_frame * frame_size : end_frame * frame_size])
-        result.append(AudioChunk(chunk.sequence, path, start, end, chunk.speakers))
-    return result[0], result[1]
 
 
 def split_speech_windows(
     prepared: Path,
-    work_dir: Path,
     *,
     max_seconds: float = 20.0,
     pad_seconds: float = 0.2,
@@ -262,18 +269,12 @@ def split_speech_windows(
         if pack
         else raw_spans
     )
-    chunk_dir = work_dir / "chunks"
-    chunk_dir.mkdir(parents=True, exist_ok=True)
-    chunks = []
-    for sequence, (start, end) in enumerate(spans):
-        path = chunk_dir / f"chunk-{sequence:04d}.wav"
-        _write_pcm16(path, waveforms[0, start:end])
-        chunks.append(
-            AudioChunk(
-                sequence=sequence,
-                path=path,
-                start=start / SAMPLE_RATE,
-                end=end / SAMPLE_RATE,
-            )
+    return [
+        AudioChunk(
+            sequence=sequence,
+            path=prepared,
+            start=start / SAMPLE_RATE,
+            end=end / SAMPLE_RATE,
         )
-    return chunks
+        for sequence, (start, end) in enumerate(spans)
+    ]

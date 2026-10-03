@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import wave
 from pathlib import Path
 
 from .models import AudioChunk, SpeakerTurn
@@ -85,7 +84,6 @@ def split_chunks_by_diarization(
     prepared: Path,
     base_chunks: list[AudioChunk],
     turns: list[SpeakerTurn],
-    work_dir: Path,
     *,
     min_seconds: float = 0.1,
     merge_gap_seconds: float = 0.8,
@@ -93,13 +91,6 @@ def split_chunks_by_diarization(
     """Режет общие VAD-окна по сменам говорящих, не дублируя overlap-аудио."""
     if not base_chunks:
         return []
-    with wave.open(str(prepared), "rb") as source:
-        params = source.getparams()
-        frame_count = source.getnframes()
-        frames = source.readframes(frame_count)
-    frame_size = params.nchannels * params.sampwidth
-    sample_rate = params.framerate
-
     intervals: list[tuple[float, float, tuple[str, ...]]] = []
     for chunk in base_chunks:
         boundaries = {chunk.start, chunk.end}
@@ -127,15 +118,8 @@ def split_chunks_by_diarization(
             else:
                 intervals.append((start, end, speakers))
 
-    chunk_dir = work_dir / "speaker-chunks"
-    chunk_dir.mkdir(parents=True, exist_ok=True)
-    result = []
-    for sequence, (start, end, speakers) in enumerate(intervals):
-        start_frame = max(0, min(frame_count, round(start * sample_rate)))
-        end_frame = max(start_frame, min(frame_count, round(end * sample_rate)))
-        path = chunk_dir / f"chunk-{sequence:04d}.wav"
-        with wave.open(str(path), "wb") as target:
-            target.setparams(params)
-            target.writeframes(frames[start_frame * frame_size : end_frame * frame_size])
-        result.append(AudioChunk(sequence, path, start, end, speakers))
-    return result
+    # Окно — отрезок prepared.wav; звук режет воркер срезом массива.
+    return [
+        AudioChunk(sequence, prepared, start, end, speakers)
+        for sequence, (start, end, speakers) in enumerate(intervals)
+    ]

@@ -1157,7 +1157,7 @@ def _transcribe(
         )
         ensure_disk_space(work_dir, media.duration_seconds)
         # Очередь занимаем после скачивания и ffmpeg — им делить машину
-        # незачем, — а отпускаем до уборки временных WAV: её растягивает
+        # незачем, — а отпускаем до уборки временного каталога: её растягивает
         # антивирус, и следующий прогон ждать её не должен.
         timings["queue"] = round(
             held.enter_context(
@@ -1179,7 +1179,6 @@ def _transcribe(
         with report.waiting("Silero VAD"):
             base_chunks = split_speech_windows(
                 prepared,
-                work_dir,
                 max_seconds=args.speech_window_seconds,
                 pack=not args.diarize,
                 offline=args.offline,
@@ -1277,7 +1276,6 @@ def _transcribe(
                     prepared,
                     base_chunks,
                     diarization.turns,
-                    work_dir,
                 )
             mark = timed("diarization", mark)
             if not diarization.speakers and base_chunks:
@@ -1401,7 +1399,6 @@ def _transcribe(
                     build_packed_windows(
                         prepared,
                         chunks,
-                        work_dir,
                         max_seconds=args.verifier_window_seconds,
                     )
                     if pack_windows
@@ -1631,10 +1628,9 @@ def _transcribe(
             ),
             speaker_names=args.speaker_names,
         )
-        # Результат уже на диске. Уборка временных WAV идёт отдельной стадией,
-        # потому что антивирус, проверяющий каждую файловую операцию,
-        # растягивает её на минуты; без этой строки в логе прогон выглядит
-        # зависшим после готового каталога.
+        # Результат уже на диске; дальше только уборка временного каталога в
+        # отдельном процессе (`scratch_dir`). Без этой строки в логе прогон
+        # выглядит зависшим после готового каталога.
         report.stage(f"Результат записан: {output}")
         return result
 

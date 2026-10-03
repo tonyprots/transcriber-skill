@@ -48,38 +48,26 @@ def plan_packing(
     return [tuple(group) for group in groups]
 
 
-def _read_frames(prepared: Path) -> tuple[wave._wave_params, bytes]:
-    with wave.open(str(prepared), "rb") as source:
-        params = source.getparams()
-        frames = source.readframes(source.getnframes())
-    return params, frames
-
-
 def build_packed_windows(
     prepared: Path,
     chunks: list[AudioChunk],
-    work_dir: Path,
     *,
     max_seconds: float = 24.0,
     max_gap_seconds: float = 3.0,
 ) -> list[PackedWindow]:
-    """Режет из подготовленного WAV длинные окна под проверочную модель."""
+    """Длинные окна под проверочную модель — отрезки того же prepared.wav."""
     if not chunks:
         return []
     groups = plan_packing(chunks, max_seconds=max_seconds, max_gap_seconds=max_gap_seconds)
-    params, frames = _read_frames(prepared)
-    frame_size = params.nchannels * params.sampwidth
-    rate = params.framerate
-    total_frames = len(frames) // frame_size
-
-    packed_dir = work_dir / "verifier-windows"
-    packed_dir.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(prepared), "rb") as source:
+        rate = source.getframerate()
+        total_frames = source.getnframes()
 
     windows: list[PackedWindow] = []
     for sequence, group in enumerate(groups):
-        # Одиночное окно переупаковывать незачем — берём готовый файл, но
-        # номер даём по группе: у исходного окна он может совпасть с номером
-        # соседней склейки, и тогда unpack_hypothesis перепутает результаты.
+        # Номер даём по группе даже одиночному окну: у исходного он может
+        # совпасть с номером соседней склейки, и тогда unpack_hypothesis
+        # перепутает результаты.
         if len(group) == 1:
             single = group[0]
             windows.append(
@@ -89,19 +77,13 @@ def build_packed_windows(
                 )
             )
             continue
-        start = group[0].start
-        end = group[-1].end
-        first = max(0, int(round(start * rate)))
-        last = min(total_frames, int(round(end * rate)))
-        path = packed_dir / f"packed-{sequence:04d}.wav"
-        with wave.open(str(path), "wb") as target:
-            target.setparams(params)
-            target.writeframes(frames[first * frame_size : last * frame_size])
+        first = max(0, int(round(group[0].start * rate)))
+        last = min(total_frames, int(round(group[-1].end * rate)))
         windows.append(
             PackedWindow(
                 chunk=AudioChunk(
                     sequence=sequence,
-                    path=path,
+                    path=prepared,
                     start=first / rate,
                     end=last / rate,
                 ),

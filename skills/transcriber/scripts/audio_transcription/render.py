@@ -319,12 +319,13 @@ def ensure_disk_space(
     """Ставит отказ до расшифровки, а не после часа работы.
 
     Прогон 2026-09-04 умер на 92-м окне из 536, когда на диске осталось 140 МБ:
-    воркер убило молча, а текст ошибки пришёл через 13 минут уборки. Временные
-    WAV занимают примерно три длительности записи при 16 кГц моно.
+    воркер убило молча, а текст ошибки пришёл через 13 минут уборки. Тогда окна
+    лежали на диске отдельными WAV и занимали три длительности записи; теперь
+    на диске только prepared.wav — одна длительность при 16 кГц моно.
     """
     if duration_seconds is None:
         return
-    needed = int(duration_seconds * SAMPLE_RATE * 2 * 3) + headroom_bytes
+    needed = int(duration_seconds * SAMPLE_RATE * 2) + headroom_bytes
     free = shutil.disk_usage(work_dir).free
     if free < needed:
         raise MediaToolError(

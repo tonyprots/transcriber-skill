@@ -129,3 +129,38 @@ def test_verifier_word_is_assigned_to_only_one_adjacent_segment() -> None:
     assert pairs[1][1] is not None
     assert pairs[1][1].text == "второй"
 
+
+
+def test_boundary_word_returns_to_the_window_where_primary_heard_it() -> None:
+    """Whisper отдал «ты» соседнему окну: без переноса это два пункта очереди."""
+    from audio_transcription.reconcile import rebalance_boundaries
+
+    primary = [
+        Segment(0.0, 2.0, "другим шрифтом как-то"),
+        Segment(2.0, 4.0, "ты пишешь про шоудер"),
+    ]
+    verifier = [
+        Segment(0.0, 2.0, "другим шрифтом как ты"),
+        Segment(2.0, 4.0, "пишешь про шоудер"),
+    ]
+    readable = Hypothesis("primary", "ru", 0.0, primary, {})
+    checked = Hypothesis("verifier", "ru", 0.0, verifier, {})
+    pairs = rebalance_boundaries(list(zip(primary, verifier)))
+    assert [pair[1].text for pair in pairs] == ["другим шрифтом как", "ты пишешь про шоудер"]
+    assert not any("ты" in item.differing_tokens[0].split() for item in find_review_items(readable, checked) if item.differing_tokens)
+
+
+def test_boundary_words_stay_when_windows_are_apart_or_nothing_improves() -> None:
+    from audio_transcription.reconcile import rebalance_boundaries
+
+    apart = [
+        (Segment(0.0, 2.0, "раз два три"), Segment(0.0, 2.0, "раз два три четыре")),
+        (Segment(5.0, 7.0, "четыре пять"), Segment(5.0, 7.0, "пять")),
+    ]
+    assert rebalance_boundaries(apart) == apart
+    # Слово есть только у проверяющей: переносить его некуда, спор остаётся.
+    real = [
+        (Segment(0.0, 2.0, "раз два"), Segment(0.0, 2.0, "раз два три")),
+        (Segment(2.0, 4.0, "пять шесть"), Segment(2.0, 4.0, "пять шесть")),
+    ]
+    assert rebalance_boundaries(real) == real

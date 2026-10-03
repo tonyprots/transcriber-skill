@@ -41,7 +41,6 @@ def test_split_chunks_uses_speaker_boundaries_without_duplication(tmp_path: Path
             SpeakerTurn(4.0, 6.0, ("speaker_1", "speaker_2")),
             SpeakerTurn(6.0, 10.0, ("speaker_2",)),
         ],
-        tmp_path,
     )
     assert [(item.start, item.end, item.speakers) for item in chunks] == [
         (0.0, 4.0, ("speaker_1",)),
@@ -49,6 +48,9 @@ def test_split_chunks_uses_speaker_boundaries_without_duplication(tmp_path: Path
         (6.0, 10.0, ("speaker_2",)),
     ]
     assert sum(item.duration for item in chunks) == 10.0
+    # Окна — отрезки prepared.wav, нарезка ничего не пишет на диск.
+    assert {item.path for item in chunks} == {prepared}
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["prepared.wav"]
 
 
 def test_split_chunks_merges_short_silence_for_same_speaker(tmp_path: Path) -> None:
@@ -65,7 +67,6 @@ def test_split_chunks_merges_short_silence_for_same_speaker(tmp_path: Path) -> N
             AudioChunk(1, tmp_path / "b.wav", 2.5, 5.0),
         ],
         [SpeakerTurn(0.0, 5.0, ("speaker_1",))],
-        tmp_path,
     )
     assert [(item.start, item.end, item.speakers) for item in chunks] == [
         (0.0, 5.0, ("speaker_1",))

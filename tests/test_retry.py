@@ -21,7 +21,7 @@ def test_empty_window_is_split_and_recovered(tmp_path: Path) -> None:
     def recognize(part: AudioChunk) -> dict:
         return {"text": "" if part.duration > 4 else f"часть-{part.start:g}"}
 
-    result = recognize_with_retry(chunk, recognize, tmp_path / "retry")
+    result = recognize_with_retry(chunk, recognize)
     assert result["status"] == "recovered"
     assert result["retry_attempts"] == 3
     assert result["retry_depth"] == 1
@@ -42,7 +42,7 @@ def test_unrecoverable_half_is_marked_partial(tmp_path: Path) -> None:
             return {"text": "левая часть"}
         raise RuntimeError("сбой декодера")
 
-    result = recognize_with_retry(chunk, recognize, tmp_path / "retry")
+    result = recognize_with_retry(chunk, recognize)
     assert result["status"] == "partial"
     assert result["text"] == "левая часть"
     assert result["retry_depth"] == 2
@@ -56,7 +56,6 @@ def test_short_failed_window_is_not_split(tmp_path: Path) -> None:
     result = recognize_with_retry(
         chunk,
         lambda _: {"text": ""},
-        tmp_path / "retry",
     )
     assert result["status"] == "failed"
     assert result["retry_attempts"] == 1
@@ -71,8 +70,8 @@ def test_crash_error_separates_environment_failure_from_empty_answer(tmp_path: P
     def shutting_down(_: AudioChunk) -> dict:
         raise OSError("dlopen: system is shutting down")
 
-    crashed = recognize_with_retry(chunk, shutting_down, tmp_path / "crash")
-    silent = recognize_with_retry(chunk, lambda _: {"text": ""}, tmp_path / "silent")
+    crashed = recognize_with_retry(chunk, shutting_down)
+    silent = recognize_with_retry(chunk, lambda _: {"text": ""})
 
     assert crashed["status"] == silent["status"] == "failed"
     assert "shutting down" in str(crash_error(crashed))
@@ -91,6 +90,6 @@ def test_crash_inside_partial_window_is_found(tmp_path: Path) -> None:
             return {"text": "левая часть"}
         raise RuntimeError("сбой декодера")
 
-    result = recognize_with_retry(chunk, recognize, tmp_path / "retry")
+    result = recognize_with_retry(chunk, recognize)
     assert result["status"] == "partial"
     assert crash_error(result) == "сбой декодера"
