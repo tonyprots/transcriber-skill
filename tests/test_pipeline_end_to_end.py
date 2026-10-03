@@ -194,7 +194,11 @@ def test_pipeline_on_real_models(tmp_path: Path, spoken_audio: Path) -> None:
 
     manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
     # Ревизии весов проставлены настоящие — именно они делают прогон воспроизводимым.
-    assert manifest["model_revisions"][GIGAAM_RUSSIAN.model]
+    assert manifest["model_revisions"][GIGAAM_RUSSIAN.model] == GIGAAM_RUSSIAN.revision
+    # И это те веса, которые воркер загрузил на самом деле, а не запись каталога.
+    raw = json.loads((output / "raw.json").read_text(encoding="utf-8"))
+    primary = next(h for h in raw["hypotheses"] if h["model"] == GIGAAM_RUSSIAN.model)
+    assert primary["metadata"]["weights"] == {"revision": GIGAAM_RUSSIAN.revision, "pinned": True}
     text = (output / "verbatim.md").read_text(encoding="utf-8")
     assert "бюджет" in text.lower()
 

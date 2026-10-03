@@ -10,7 +10,7 @@ import wave
 from pathlib import Path
 from typing import Any
 
-from .backends import BackendMissing, load_with_hub_fallback
+from .backends import BackendMissing, _PinnedLoad, load_with_hub_fallback
 from .catalog import fluidaudio_binary_path
 from .diarization import partition_turns
 from .models import Diarization, SpeakerTurn
@@ -59,8 +59,10 @@ def _run_sortformer(
 
     started = time.monotonic()
     _write_json(progress_path, {"stage": "loading", "completed": 0})
+    pinned = _PinnedLoad(str(config["model_name"]))
     model = load_with_hub_fallback(
-        lambda: load(str(config["model_name"])),
+        # Path, а не str: MLX узнаёт семейство по имени репозитория в пути.
+        lambda: load(pinned.path() or str(config["model_name"])),
         offline=bool(config.get("offline", False)),
         label="Sortformer",
     )
@@ -99,6 +101,7 @@ def _run_sortformer(
             "threshold": float(config.get("threshold", 0.4)),
             "chunk_seconds": chunk_seconds,
             "max_speakers": 4,
+            "weights": pinned.metadata(),
             "raw_turns": [turn.to_dict() for turn in raw_turns],
         },
     )

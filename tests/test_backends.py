@@ -20,10 +20,14 @@ def test_gigaam_passes_quantization_to_onnx_asr(monkeypatch, tmp_path: Path) -> 
         def recognize(self, path: str) -> str:
             return "hello"
 
-    def load_model(name: str, **kwargs):
-        captured.update({"name": name, **kwargs})
+    def load_model(name: str, path=None, **kwargs):
+        captured.update({"name": name, "path": path, **kwargs})
         return FakeModel()
 
+    from audio_transcription.weights import Weights
+
+    pinned = Weights(tmp_path / "snapshots" / ("a" * 40), "a" * 40, True)
+    monkeypatch.setattr(backends, "weights_for", lambda model, quantization=None: pinned)
     monkeypatch.setitem(sys.modules, "onnx_asr", SimpleNamespace(load_model=load_model))
     hypothesis = backends.GigaAMBackend(
         "gigaam-multilingual-ctc",
@@ -35,6 +39,9 @@ def test_gigaam_passes_quantization_to_onnx_asr(monkeypatch, tmp_path: Path) -> 
     assert hypothesis.text == "hello"
     assert captured["quantization"] == "int8"
     assert hypothesis.metadata["quantization"] == "int8"
+    # Модель грузится из закреплённого снапшота, и гипотеза помнит, из какого.
+    assert captured["path"] == pinned.path
+    assert hypothesis.metadata["weights"] == {"revision": "a" * 40, "pinned": True}
 
 
 def test_hub_fallback_retries_offline_when_hub_is_down(monkeypatch) -> None:

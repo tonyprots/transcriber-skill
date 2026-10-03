@@ -228,8 +228,13 @@ def split_speech_windows(
     waveforms, lengths, sample_rate = read_wav_files(str(prepared), SAMPLE_RATE, "mean")
     if sample_rate != SAMPLE_RATE:
         raise MediaToolError(f"Ожидалось {SAMPLE_RATE} Hz, получено {sample_rate} Hz")
+    from .catalog import SILERO_VAD
+    from .weights import fetch
+
     vad = load_with_hub_fallback(
-        lambda: onnx_asr.load_vad("silero", providers=["CPUExecutionProvider"]),
+        lambda: onnx_asr.load_vad(
+            "silero", fetch(SILERO_VAD).path, providers=["CPUExecutionProvider"]
+        ),
         offline=offline,
         label="Silero VAD",
     )

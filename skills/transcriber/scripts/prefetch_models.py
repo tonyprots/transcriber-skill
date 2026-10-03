@@ -8,6 +8,7 @@ en  — Silero VAD, Whisper Turbo, Parakeet TDT 0.6B v3;
 all — всё вместе. --diarize добавляет Sortformer (только Apple Silicon).
 На Linux и Intel вместо Whisper MLX скачивается faster-whisper medium.
 Повторный запуск ничего не качает: всё уже в ~/.cache/huggingface.
+Качается закреплённая ревизия каждой модели (`revision` в каталоге), а не `main`.
 
 Сколько это весит, печатает `--print-size ru|en|all`: размеры считаются по
 scripts/audio_transcription/catalog.py, чтобы число в подсказках установщика
@@ -73,37 +74,26 @@ def main(argv: list[str] | None = None) -> int:
         print(format_gb(route_download_gb(args.route, apple=_apple(), diarize=args.diarize)))
         return 0
 
-    import onnx_asr
+    from audio_transcription.weights import fetch
 
-    def load_onnx(entry):
-        kwargs = {"providers": ["CPUExecutionProvider"]}
-        if entry.quantization:
-            kwargs["quantization"] = entry.quantization
-        return lambda: onnx_asr.load_model(entry.model, **kwargs)
+    def pinned(entry):
+        # Те же коммиты и те же файлы, что потом грузит прогон: иначе первая
+        # расшифровка докачивала бы закреплённую ревизию поверх свежего main.
+        return lambda: fetch(entry, quiet=False)
 
-    steps: list[tuple[str, object]] = [
-        (SILERO_VAD.label, lambda: onnx_asr.load_vad(SILERO_VAD.model, providers=["CPUExecutionProvider"]))
-    ]
+    steps: list[tuple[str, object]] = [(SILERO_VAD.label, pinned(SILERO_VAD))]
     if args.route in ("ru", "all"):
-        steps.append((_label(GIGAAM_RUSSIAN), load_onnx(GIGAAM_RUSSIAN)))
+        steps.append((_label(GIGAAM_RUSSIAN), pinned(GIGAAM_RUSSIAN)))
         # Проверяющая для режима fast. Без неё fast работает, но молча:
         # очередь проверки просто не соберётся.
-        steps.append((_label(VOSK_RUSSIAN), load_onnx(VOSK_RUSSIAN)))
-    if _apple():
-        from huggingface_hub import snapshot_download
-
-        steps.append((_label(WHISPER_TURBO), lambda: snapshot_download(WHISPER_TURBO.repo)))
-    else:
-        from faster_whisper import download_model
-
-        steps.append((_label(FASTER_WHISPER_FALLBACK), lambda: download_model(FASTER_WHISPER_FALLBACK.model)))
+        steps.append((_label(VOSK_RUSSIAN), pinned(VOSK_RUSSIAN)))
+    whisper = WHISPER_TURBO if _apple() else FASTER_WHISPER_FALLBACK
+    steps.append((_label(whisper), pinned(whisper)))
     if args.route in ("en", "all"):
-        steps.append((_label(PARAKEET_ENGLISH), load_onnx(PARAKEET_ENGLISH)))
+        steps.append((_label(PARAKEET_ENGLISH), pinned(PARAKEET_ENGLISH)))
     if args.diarize:
         if _apple():
-            from huggingface_hub import snapshot_download
-
-            steps.append((_label(SORTFORMER), lambda: snapshot_download(SORTFORMER.repo)))
+            steps.append((_label(SORTFORMER), pinned(SORTFORMER)))
         else:
             print("Диаризация доступна только на macOS Apple Silicon: Sortformer пропущен", file=sys.stderr)
 

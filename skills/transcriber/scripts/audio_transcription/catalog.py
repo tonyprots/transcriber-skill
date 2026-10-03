@@ -61,6 +61,10 @@ class ModelEntry:
     quantization: str | None = None
     apple_only: bool = False
     in_hf_cache: bool = True
+    # Коммит репозитория, на котором сделан замер. Имя модели веса не
+    # определяет: репозиторий на хабе могут перезалить. Меняется только вместе
+    # с новым замером — процедура в references/maintenance.md.
+    revision: str | None = None
 
     @property
     def spec(self) -> BackendSpec:
@@ -130,6 +134,7 @@ SILERO_VAD = ModelEntry(
     family="vad",
     model="silero",
     repo="istupakov/silero-vad-onnx",
+    revision="b3e3ee3cce4c11ceb63b1a0b229d916069c1ddf6",
     download_gb=0.01,
     upstream="Silero Team; ONNX-сборка Ильи Ступакова (istupakov), автора onnx-asr",
     calibration_note="границы окон общие для всех маршрутов, отдельного WER у VAD нет",
@@ -142,6 +147,7 @@ GIGAAM_RUSSIAN = ModelEntry(
     family="gigaam",
     model="gigaam-v3-e2e-rnnt",
     repo="istupakov/gigaam-v3-onnx",
+    revision="322c3b29492673eb7d0b434bfa9dfb8653e34d02",
     download_gb=0.9,
     upstream="GigaAM v3 — Сбер (SberDevices); ONNX-конвертация Ильи Ступакова (istupakov)",
     calibrated=LAST_CALIBRATION,
@@ -156,6 +162,7 @@ GIGAAM_MULTILINGUAL_FAST = ModelEntry(
     model="gigaam-multilingual-ctc",
     quantization="int8",
     repo="istupakov/gigaam-multilingual-ctc-onnx",
+    revision="458860e1983aef670dd9795fb6af603c82767d5d",
     download_gb=0.2,
     upstream="GigaAM Multilingual — Сбер (SberDevices); ONNX-конвертация Ильи Ступакова",
     calibrated=date(2026, 9, 20),
@@ -173,6 +180,7 @@ PARAKEET_ENGLISH = ModelEntry(
     family="onnx",
     model="nemo-parakeet-tdt-0.6b-v3",
     repo="istupakov/parakeet-tdt-0.6b-v3-onnx",
+    revision="8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce",
     download_gb=2.4,
     upstream="Parakeet TDT 0.6B v3 — NVIDIA NeMo; ONNX-конвертация Ильи Ступакова (istupakov)",
     calibrated=date(2026, 9, 20),
@@ -190,6 +198,7 @@ CANARY_ENGLISH = ModelEntry(
     family="onnx",
     model="nemo-canary-1b-v2",
     repo="istupakov/canary-1b-v2-onnx",
+    revision="5ebc1520cef7b6b318b3526ad17adbfe00bc1bfc",
     download_gb=3.7,
     upstream="Canary 1B v2 — NVIDIA NeMo; ONNX-конвертация Ильи Ступакова (istupakov)",
     calibrated=date(2026, 9, 20),
@@ -208,6 +217,7 @@ WHISPER_TURBO = ModelEntry(
     family="whisper",
     model="mlx-community/whisper-large-v3-turbo-asr-fp16",
     repo="mlx-community/whisper-large-v3-turbo-asr-fp16",
+    revision="624c19c9af5603fa73b83bce14d4aeea96156d18",
     download_gb=1.5,
     upstream="Whisper large-v3-turbo — OpenAI; сборка под MLX — mlx-community",
     calibrated=LAST_CALIBRATION,
@@ -225,6 +235,7 @@ VOSK_RUSSIAN = ModelEntry(
     family="onnx",
     model="alphacep/vosk-model-ru",
     repo="alphacep/vosk-model-ru",
+    revision="df6a54a4d8e5d43e82675e4f5dba2d507731a0d1",
     download_gb=0.25,
     upstream="Alpha Cephei; запускается через onnx-asr",
     calibrated=date(2026, 9, 12),
@@ -241,6 +252,7 @@ FASTER_WHISPER_FALLBACK = ModelEntry(
     family="whisper-cpu",
     model="medium",
     repo="Systran/faster-whisper-medium",
+    revision="08e178d48790749d25932bbc082711ddcfdfbc4f",
     download_gb=1.5,
     upstream="Whisper medium — OpenAI; сборка CTranslate2 — Systran",
     calibrated=LAST_CALIBRATION,
@@ -254,6 +266,7 @@ SORTFORMER = ModelEntry(
     family="diarization",
     model="mlx-community/diar_sortformer_4spk-v1-fp16",
     repo="mlx-community/diar_sortformer_4spk-v1-fp16",
+    revision="5233f9c657bf5e5535b7b79de040dab3ff9b905f",
     download_gb=0.2,
     upstream="Sortformer — NVIDIA NeMo; сборка под MLX — mlx-community",
     calibrated=LAST_CALIBRATION,
@@ -268,6 +281,7 @@ FLUIDAUDIO = ModelEntry(
     family="diarization",
     model="community-1",
     repo="FluidInference/speaker-diarization-coreml",
+    revision="1ed7a662fdc7109e36d822db793ee6eebdaf8594",
     download_gb=0.034,
     upstream="FluidInference; CoreML-модели ставятся scripts/setup_fluidaudio_models.py",
     calibrated=LAST_CALIBRATION,
@@ -370,12 +384,24 @@ def fluidaudio_binary_path(
     return None
 
 
-def local_revision(entry: ModelEntry, cache: Path | None = None) -> str | None:
-    """Ревизия скачанных весов — то, чем расшифровка воспроизводима.
+UNPIN_ENV = "TRANSCRIBER_UNPIN"
 
-    Идентификатор модели не определяет веса: репозиторий на хабе могут
-    перезалить, и WER из references/quality.md перестанет описывать результат
-    молча. Поэтому в манифест идёт коммит из `refs/main` локального кэша.
+
+def unpinned() -> bool:
+    """`TRANSCRIBER_UNPIN=1` — грузить свежий `main` вместо закреплённых весов.
+
+    Выход для экспериментов: попробовать перезалитую модель без релиза. Манифест
+    такого прогона помечает веса `pinned: false`, а цифры из quality.md к нему
+    уже не относятся.
+    """
+    return os.environ.get(UNPIN_ENV, "").strip() not in ("", "0")
+
+
+def local_revision(entry: ModelEntry, cache: Path | None = None) -> str | None:
+    """Последняя скачанная ревизия: коммит из `refs/main` локального кэша.
+
+    С закреплением это уже не «веса прогона»: снапшот по коммиту `refs/main`
+    не двигает. Нужна для doctor и для режима `TRANSCRIBER_UNPIN`.
     """
     cache_dir = entry.cache_dir
     if not cache_dir:
@@ -387,13 +413,30 @@ def local_revision(entry: ModelEntry, cache: Path | None = None) -> str | None:
         return None
 
 
+def expected_revision(entry: ModelEntry, cache: Path | None = None) -> str | None:
+    """Ревизия, которой будет посчитан прогон. Она же идёт в ключ кэша.
+
+    Закреплённая — всегда, кроме `TRANSCRIBER_UNPIN`: тогда то, что лежит в
+    кэше как `main`, иначе гипотеза старых весов вернулась бы из кэша под
+    видом новых.
+    """
+    if entry.revision and not unpinned():
+        return entry.revision
+    return local_revision(entry, cache)
+
+
+def revision_for_model(model: str, quantization: str | None = None) -> str | None:
+    entry = entry_for_model(model, quantization)
+    return expected_revision(entry) if entry is not None else None
+
+
 def revisions_for_models(models: Iterable[str], cache: Path | None = None) -> dict[str, str | None]:
     """{идентификатор модели: ревизия} для моделей, занятых в прогоне."""
     found: dict[str, str | None] = {}
     for model in models:
         entry = entry_for_model(model)
         if entry is not None:
-            found[model] = local_revision(entry, cache)
+            found[model] = expected_revision(entry, cache)
     return found
 
 

@@ -32,9 +32,11 @@ from .machine_lock import machine_slot
 from .backends import BackendMissing, BackendUnavailable
 from .catalog import (
     FASTER_WHISPER_FALLBACK,
+    FLUIDAUDIO,
     SILERO_VAD,
     SORTFORMER,
     WHISPER_TURBO,
+    revision_for_model,
     revisions_for_models,
     staleness_warnings,
 )
@@ -461,6 +463,65 @@ def run_whisper(
     )
 
 
+def weights_signature(
+    args: argparse.Namespace, spec: BackendSpec | None = None
+) -> dict[str, str | None]:
+    """Ревизии весов, от которых зависит гипотеза, — для ключа кэша.
+
+    Без них перезалитая модель возвращала из кэша гипотезу старых весов, а
+    манифест при этом называл новые. VAD входит всегда: от него зависят окна.
+    Для Whisper заранее неизвестно, поднимется MLX или CPU-fallback, поэтому
+    в подпись идут обе модели.
+    """
+    signature = {SILERO_VAD.model: revision_for_model(SILERO_VAD.model)}
+    if spec is None or spec.family == "whisper":
+        models = [args.whisper_model or (spec.model if spec else WHISPER_TURBO.model)]
+        models.append(FASTER_WHISPER_FALLBACK.model)
+        signature.update({model: revision_for_model(model) for model in models})
+    else:
+        signature[spec.model] = revision_for_model(spec.model, spec.quantization)
+    return signature
+
+
+def weights_as_keyed(metadata: dict[str, Any], signature: dict[str, str | None]) -> bool:
+    """Посчитано ли теми весами, что записаны в ключ. Нет — в кэш не кладём.
+
+    Расходятся они, когда закреплённый коммит пропал с Hub и `weights.fetch`
+    взял `main`: такая гипотеза под ключом закреплённых весов вернулась бы
+    потом под чужим именем.
+    """
+    weights = metadata.get("weights")
+    return not weights or weights.get("revision") in signature.values()
+
+
+def loaded_revisions(
+    expected: dict[str, str | None],
+    results: list[Any],
+    warnings: list[str],
+) -> dict[str, str | None]:
+    """Ревизии для манифеста: какими весами посчитано на самом деле.
+
+    Ожидаемые берутся из каталога, но воркер сообщает фактические — они
+    расходятся при `TRANSCRIBER_UNPIN` и при пропавшем с Hub коммите. Такой
+    прогон в манифесте помечается предупреждением: цифры quality.md к нему не
+    относятся.
+    """
+    found = dict(expected)
+    for result in results:
+        weights = (getattr(result, "metadata", None) or {}).get("weights")
+        if not weights or not weights.get("revision"):
+            continue
+        found[result.model] = weights["revision"]
+        if not weights.get("pinned"):
+            text = (
+                f"{result.model}: веса не закреплённые ({str(weights['revision'])[:12]}); "
+                "замеры качества из references/quality.md к этому прогону не относятся"
+            )
+            if text not in warnings:
+                warnings.append(text)
+    return found
+
+
 def run_route_backend(
     args: argparse.Namespace,
     spec: BackendSpec,
@@ -650,6 +711,7 @@ def resolve_language(
             "pipeline": "1",
             "source_sha256": source_identity,
             "whisper_backend": args.whisper_backend,
+            "weights": weights_signature(args),
             "sample": [[chunk.sequence, round(chunk.start, 6), round(chunk.end, 6)] for chunk in sample],
         },
     )
@@ -667,7 +729,7 @@ def resolve_language(
                     "Если запись на другом языке, повторите с --language"
                 ),
             }
-        if not args.no_cache:
+        if not args.no_cache and weights_as_keyed(found.metadata, weights_signature(args)):
             save_hypothesis(args.cache_dir, key, found)
     language = normalize_language(found.language)
     if language in {AUTO_LANGUAGE, "und"}:
@@ -1130,6 +1192,11 @@ def _transcribe(
                     "source_sha256": source_identity,
                     "backend": diarization_kind,
                     "model": diarization_model,
+                    "revision": (
+                        FLUIDAUDIO.revision
+                        if diarization_kind == "fluidaudio"
+                        else revision_for_model(args.diarization_model)
+                    ),
                     "threshold": diarization_threshold,
                     "chunk_seconds": args.diarization_chunk_seconds,
                     "expected_speakers": args.expected_speakers,
@@ -1160,7 +1227,10 @@ def _transcribe(
                     stall_timeout_seconds=args.backend_stall_timeout,
                     on_progress=report.windows("Диаризация"),
                 )
-                if not args.no_cache:
+                if not args.no_cache and weights_as_keyed(
+                    diarization.metadata,
+                    {args.diarization_model: revision_for_model(args.diarization_model)},
+                ):
                     save_diarization(args.cache_dir, diarization_key, diarization)
             # Нарезка режет каждое окно по границам реплик и пишет их на диск:
             # на 42-минутной встрече это 7–8 минут без единой строки в логе.
@@ -1221,6 +1291,7 @@ def _transcribe(
                 "spec": route.primary.to_dict(),
                 "whisper_backend": args.whisper_backend,
                 "whisper_model_override": args.whisper_model,
+                "weights": weights_signature(args, route.primary),
                 # GigaAM словарь не принимает, Whisper — принимает: для него
                 # смена словаря должна менять ключ.
                 "hotwords": hotwords if route.primary.family == "whisper" else None,
@@ -1240,7 +1311,9 @@ def _transcribe(
                 language=route.language,
                 report=report,
             )
-            if not args.no_cache:
+            if not args.no_cache and weights_as_keyed(
+                readable.metadata, weights_signature(args, route.primary)
+            ):
                 save_hypothesis(args.cache_dir, primary_key, readable)
         else:
             report.stage(f"Основная модель {route.primary.model}: результат из кэша")
@@ -1305,6 +1378,7 @@ def _transcribe(
                             "spec": verifier_spec.to_dict(),
                             "whisper_backend": args.whisper_backend,
                             "whisper_model_override": args.whisper_model,
+                            "weights": weights_signature(args, verifier_spec),
                             # Словаря в ключе нет намеренно: проверяющая его не
                             # получает, поэтому пополнение словаря больше не
                             # обесценивает кэш. Раньше один новый термин
@@ -1355,7 +1429,10 @@ def _transcribe(
                             language=route.language,
                             report=report,
                         )
-                        if not args.no_cache:
+                        if not args.no_cache and weights_as_keyed(
+                            packed_hypothesis.metadata,
+                            weights_signature(args, verifier_spec),
+                        ):
                             save_hypothesis(
                                 args.cache_dir, verifier_key, packed_hypothesis
                             )
@@ -1493,7 +1570,11 @@ def _transcribe(
             timings=timings,
             generator=f"transcriber {__version__}",
             fillers_removed=fillers_removed,
-            model_revisions=revisions_for_models([SILERO_VAD.model, *used_models]),
+            model_revisions=loaded_revisions(
+                revisions_for_models([SILERO_VAD.model, *used_models]),
+                [*hypotheses, *([diarization] if diarization is not None else [])],
+                warnings,
+            ),
             speaker_names=args.speaker_names,
         )
         # Результат уже на диске. Уборка временных WAV идёт отдельной стадией,

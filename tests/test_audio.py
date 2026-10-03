@@ -64,11 +64,20 @@ def test_vad_load_respects_offline(monkeypatch, tmp_path: Path) -> None:
     import sys
     from types import SimpleNamespace
 
+    from audio_transcription import weights
+
     seen: dict[str, str | None] = {}
 
-    def load_vad(name: str, **kwargs):
+    def fetch(entry):
+        # Сеть теперь трогает скачивание весов, а не сам onnx-asr.
         seen["offline"] = audio.os.environ.get("HF_HUB_OFFLINE")
+        return weights.Weights(tmp_path, "0" * 40, True)
+
+    def load_vad(name: str, path=None, **kwargs):
+        seen["path"] = path
         raise RuntimeError("дальше загрузки тест не идёт")
+
+    monkeypatch.setattr(weights, "fetch", fetch)
 
     monkeypatch.setitem(sys.modules, "onnx_asr", SimpleNamespace(load_vad=load_vad))
     monkeypatch.setitem(
@@ -83,3 +92,4 @@ def test_vad_load_respects_offline(monkeypatch, tmp_path: Path) -> None:
     with pytest.raises(Exception):
         audio.split_speech_windows(tmp_path / "prepared.wav", tmp_path, offline=True)
     assert seen["offline"] == "1"
+    assert seen["path"] == tmp_path

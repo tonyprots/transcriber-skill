@@ -4,10 +4,14 @@ from __future__ import annotations
 import argparse
 import json
 import platform
+import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-REPO_ID = "FluidInference/speaker-diarization-coreml"
+from audio_transcription.catalog import FLUIDAUDIO  # noqa: E402
+
+REPO_ID = FLUIDAUDIO.repo
 REQUIRED = (
     "pyannote_segmentation.mlmodelc/model.mil",
     "wespeaker_v2.mlmodelc/model.mil",
@@ -54,6 +58,8 @@ def main() -> int:
     target.mkdir(parents=True, exist_ok=True)
     snapshot_download(
         repo_id=REPO_ID,
+        # Коммит, на котором мерили диаризацию 5+ голосов; см. catalog.FLUIDAUDIO.
+        revision=FLUIDAUDIO.revision,
         local_dir=target,
         allow_patterns=["*.json", "*.mlmodelc/**"],
     )

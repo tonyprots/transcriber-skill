@@ -32,9 +32,10 @@ from audio_transcription.catalog import (  # noqa: E402
     format_gb,
     hf_cache_dir,
     known_asr_names,
-    local_revision,
+    expected_revision,
     route_download_gb,
     search_term,
+    unpinned,
 )
 from audio_transcription.audio import find_command  # noqa: E402
 from audio_transcription.fetching import (  # noqa: E402
@@ -83,7 +84,11 @@ def check_catalog(today: date | None = None) -> list[dict]:
     rows = []
     for entry in CATALOG:
         cache_dir = entry.cache_dir
-        if cache_dir:
+        if cache_dir and entry.revision:
+            # Скачанным считается закреплённый снапшот: свежий main рядом с ним
+            # прогон не возьмёт, он докачает свою ревизию.
+            cached = (hub / cache_dir / "snapshots" / entry.revision).is_dir()
+        elif cache_dir:
             cached = (hub / cache_dir).is_dir()
         else:
             cached = fluid_ready if entry.key == "fluidaudio" else False
@@ -97,9 +102,10 @@ def check_catalog(today: date | None = None) -> list[dict]:
                 "upstream": entry.upstream,
                 "cached": cached,
                 "download_gb": entry.download_gb,
-                # Та же ревизия уходит в manifest.json каждого прогона: по ней
-                # потом видно, на тех ли весах получен старый результат.
-                "revision": local_revision(entry, hub),
+                # Та же ревизия уходит в manifest.json каждого прогона и в ключ
+                # кэша: закреплённая, а с TRANSCRIBER_UNPIN — последняя скачанная.
+                "revision": expected_revision(entry, hub),
+                "pinned": bool(entry.revision) and not unpinned(),
                 "apple_only": entry.apple_only,
                 "calibrated": entry.calibrated.isoformat() if entry.calibrated else None,
                 "calibration_note": entry.calibration_note,
@@ -150,7 +156,21 @@ def check_hub_updates(today: date | None = None) -> dict:
             errors.append(f"{entry.repo}: {error}")
             continue
         modified = getattr(info, "last_modified", None)
-        if modified and entry.calibrated and modified.date() > entry.calibrated:
+        head = getattr(info, "sha", None)
+        if entry.revision and head and head != entry.revision:
+            # Прогон этого не заметит: он грузит закреплённый коммит. Новый
+            # берут осознанно, вместе с замером (references/maintenance.md).
+            when = f" от {modified.date().isoformat()}" if modified else ""
+            findings.append(
+                {
+                    "key": entry.key,
+                    "text": (
+                        f"{entry.repo}: на хабе ревизия {head[:12]}{when}, "
+                        f"закреплена {entry.revision[:12]} — обновлять только с новым замером"
+                    ),
+                }
+            )
+        elif not entry.revision and modified and entry.calibrated and modified.date() > entry.calibrated:
             findings.append(
                 {
                     "key": entry.key,
@@ -312,6 +332,8 @@ def render(report: dict) -> str:
         else:
             calibration = f"замер {row['calibrated']}, {age} дн. назад"
         revision = f" · веса {row['revision'][:12]}" if row["revision"] else ""
+        if row["revision"] and not row["pinned"]:
+            revision += " (не закреплены)"
         lines.append(
             f"  {mark(row['cached'])} {row['label']} ({format_gb(row['download_gb'])}) — {row['role']}"
         )

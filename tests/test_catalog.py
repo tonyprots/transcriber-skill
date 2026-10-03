@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import re
 from datetime import date
 from pathlib import Path
 
@@ -175,7 +176,23 @@ def test_revisions_for_models_skips_unknown(tmp_path: Path) -> None:
     ref.parent.mkdir(parents=True)
     ref.write_text("deadbeef", encoding="utf-8")
     found = revisions_for_models([GIGAAM_RUSSIAN.model, "модель-которой-нет"], tmp_path)
-    assert found == {GIGAAM_RUSSIAN.model: "deadbeef"}
+    # Закреплённая ревизия, а не та, что последней оказалась в кэше.
+    assert found == {GIGAAM_RUSSIAN.model: GIGAAM_RUSSIAN.revision}
+
+
+def test_unpin_reports_what_lies_in_cache(monkeypatch, tmp_path: Path) -> None:
+    ref = tmp_path / GIGAAM_RUSSIAN.cache_dir / "refs" / "main"
+    ref.parent.mkdir(parents=True)
+    ref.write_text("deadbeef", encoding="utf-8")
+    monkeypatch.setenv("TRANSCRIBER_UNPIN", "1")
+    assert revisions_for_models([GIGAAM_RUSSIAN.model], tmp_path) == {GIGAAM_RUSSIAN.model: "deadbeef"}
+
+
+def test_every_downloadable_entry_is_pinned_to_a_commit() -> None:
+    """Имя модели весов не определяет: без коммита замеры описывают неизвестно что."""
+    for entry in CATALOG:
+        if entry.repo:
+            assert entry.revision and re.fullmatch(r"[0-9a-f]{40}", entry.revision), entry.key
 
 
 def test_every_entry_documents_its_origin() -> None:

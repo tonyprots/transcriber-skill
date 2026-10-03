@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .catalog import FASTER_WHISPER_FALLBACK, WHISPER_TURBO
+from .weights import Weights, weights_for
 from .models import AudioChunk, Hypothesis, Segment
 from .retry import recognize_with_retry
 
@@ -118,6 +119,26 @@ def load_with_hub_fallback(
         ) from offline_error
 
 
+class _PinnedLoad:
+    """Загрузка модели из закреплённых весов; запоминает, какие веса взяты.
+
+    Модели вне каталога (`--whisper-model large-v3`) библиотека грузит сама по
+    имени, как раньше: закреплять там нечего, в метаданных будет None.
+    """
+
+    def __init__(self, model: str, quantization: str | None = None) -> None:
+        self.model = model
+        self.quantization = quantization
+        self.weights: Weights | None = None
+
+    def path(self) -> Path | None:
+        self.weights = weights_for(self.model, self.quantization)
+        return self.weights.path if self.weights else None
+
+    def metadata(self) -> dict[str, Any] | None:
+        return self.weights.to_dict() if self.weights else None
+
+
 def _value(item: Any, name: str, default: Any = None) -> Any:
     if isinstance(item, dict):
         return item.get(name, default)
@@ -193,9 +214,11 @@ class GigaAMBackend:
             raise BackendMissing("Не установлен onnx-asr. Установите зависимости скилла.") from exc
 
         started = time.monotonic()
+        pinned = _PinnedLoad(self.model_name, self.quantization)
         model = load_with_hub_fallback(
             lambda: onnx_asr.load_model(
                 self.model_name,
+                pinned.path(),
                 quantization=self.quantization,
                 providers=self.providers,
             ),
@@ -232,6 +255,7 @@ class GigaAMBackend:
             metadata={
                 "vad": "shared-silero",
                 "quantization": self.quantization,
+                "weights": pinned.metadata(),
                 "chunks": chunk_results,
             },
         )
@@ -279,9 +303,10 @@ class WhisperBackend:
         except (ImportError, AttributeError) as exc:
             raise BackendMissing("Не установлен faster-whisper для CPU-fallback.") from exc
         started = time.monotonic()
+        pinned = _PinnedLoad(self.model_name)
         model = load_with_hub_fallback(
             lambda: model_class(
-                self.model_name,
+                str(pinned.path() or self.model_name),
                 device="cpu",
                 compute_type="int8",
                 local_files_only=self.offline or os.environ.get("HF_HUB_OFFLINE") == "1",
@@ -376,6 +401,7 @@ class WhisperBackend:
                 "word_timestamps": True,
                 "role": "independent_verifier_cpu_fallback",
                 "hotwords": hotwords or [],
+                "weights": pinned.metadata(),
                 "chunks": chunk_results,
             },
         )
@@ -395,9 +421,10 @@ class WhisperBackend:
             decode_audio = import_module("faster_whisper.audio").decode_audio
         except (ImportError, AttributeError) as exc:
             raise BackendMissing("Не установлен faster-whisper для CPU-fallback.") from exc
+        pinned = _PinnedLoad(self.model_name)
         model = load_with_hub_fallback(
             lambda: module.WhisperModel(
-                self.model_name,
+                str(pinned.path() or self.model_name),
                 device="cpu",
                 compute_type="int8",
                 local_files_only=self.offline or os.environ.get("HF_HUB_OFFLINE") == "1",
@@ -417,7 +444,9 @@ class WhisperBackend:
             raise BackendUnavailable(
                 f"Не удалось определить язык через {self.model_name}: {exc}"
             ) from exc
-        return language_hypothesis(model_name, windows, time.monotonic() - started)
+        return language_hypothesis(
+            model_name, windows, time.monotonic() - started, pinned.metadata()
+        )
 
 
 class MLXWhisperBackend:
@@ -457,8 +486,11 @@ class MLXWhisperBackend:
             raise BackendMissing(
                 f"Whisper Turbo MLX недоступен на этой машине: {exc}"
             ) from exc
+        pinned = _PinnedLoad(self.model_name)
+        # Path, а не str: по строке MLX узнаёт семейство модели из последнего
+        # сегмента, а у снапшота это коммит. Из Path он берёт имя репозитория.
         model = load_with_hub_fallback(
-            lambda: utils.load_model(self.model_name),
+            lambda: utils.load_model(pinned.path() or self.model_name),
             offline=self.offline,
             label="Whisper Turbo MLX",
         )
@@ -559,6 +591,7 @@ class MLXWhisperBackend:
                 "word_timestamps": True,
                 "role": "independent_verifier",
                 "hotwords": hotwords or [],
+                "weights": pinned.metadata(),
                 "chunks": chunk_results,
             },
         )
@@ -587,8 +620,11 @@ class MLXWhisperBackend:
             raise BackendMissing(
                 f"Whisper Turbo MLX недоступен на этой машине: {exc}"
             ) from exc
+        pinned = _PinnedLoad(self.model_name)
+        # Path, а не str: по строке MLX узнаёт семейство модели из последнего
+        # сегмента, а у снапшота это коммит. Из Path он берёт имя репозитория.
         model = load_with_hub_fallback(
-            lambda: utils.load_model(self.model_name),
+            lambda: utils.load_model(pinned.path() or self.model_name),
             offline=self.offline,
             label="Whisper Turbo MLX",
         )
@@ -619,7 +655,9 @@ class MLXWhisperBackend:
             raise BackendUnavailable(
                 f"Не удалось определить язык через Whisper Turbo MLX: {exc}"
             ) from exc
-        return language_hypothesis(self.model_name, windows, time.monotonic() - started)
+        return language_hypothesis(
+            self.model_name, windows, time.monotonic() - started, pinned.metadata()
+        )
 
 
 # Одинаков у всех многоязычных Whisper, от tiny до large-v3-turbo.
@@ -627,7 +665,10 @@ WHISPER_START_OF_TRANSCRIPT = 50258
 
 
 def language_hypothesis(
-    model: str, windows: list[dict[str, float]], elapsed_seconds: float
+    model: str,
+    windows: list[dict[str, float]],
+    elapsed_seconds: float,
+    weights: dict[str, Any] | None = None,
 ) -> Hypothesis:
     """Итог определения языка в форме гипотезы: так его везёт тот же воркер
     и хранит тот же кэш. Доли по окнам усредняются — одно окно с музыкой или
@@ -647,5 +688,6 @@ def language_hypothesis(
             "language_probability": round(ranked[0][1], 4) if ranked else 0.0,
             "top_languages": [[code, round(share, 4)] for code, share in ranked],
             "windows": len(windows),
+            "weights": weights,
         },
     )
