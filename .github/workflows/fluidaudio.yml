@@ -20,7 +20,7 @@ env:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: исходники FluidAudio
         run: |
@@ -50,4 +50,4 @@ jobs:
           gh release create "$GITHUB_REF_NAME" dist/fluidaudiocli dist/fluidaudiocli.sha256 \
             --repo "$GITHUB_REPOSITORY" --prerelease \
             --title "fluidaudiocli ${FLUIDAUDIO_COMMIT:0:7}" \
-            --notes "fluidaudiocli для диаризации 5+ голосов, собран этой сборкой из FluidInference/FluidAudio@${FLUIDAUDIO_COMMIT} на macos-14 (arm64), подпись ad-hoc. Происхождение: gh attestation verify fluidaudiocli --repo ${GITHUB_REPOSITORY}. Лицензия Apache-2.0."
+            --notes "fluidaudiocli для диаризации 5+ голосов, собран этой сборкой из FluidInference/FluidAudio@${FLUIDAUDIO_COMMIT} на macos-15 (arm64), подпись ad-hoc. Происхождение: gh attestation verify fluidaudiocli --repo ${GITHUB_REPOSITORY}. Лицензия Apache-2.0."

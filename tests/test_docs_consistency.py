@@ -128,3 +128,24 @@ def test_experiment_references_are_published_or_marked() -> None:
                 if name not in published and "не опубликован" not in line:
                     unmarked.append(f"{document.relative_to(ROOT)}:{number} experiments/{name}")
     assert not unmarked, "\n".join(unmarked)
+
+
+def test_queue_recall_is_never_stated_without_its_caveat() -> None:
+    # 98–100 % намеряли на очереди из целых окон (0.6.0). С 0.13 единица —
+    # место расхождения, и полноту на ней не перемеряли. Агент читает SKILL.md
+    # и references как факт, поэтому цифра без оговорки — ложь, а не упрощение.
+    stale = []
+    for document in [ROOT / "README.md", *sorted(SKILL.rglob("*.md"))]:
+        text = document.read_text(encoding="utf-8")
+        for match in re.finditer(r"98\s?[–-]\s?100", text):
+            around = text[max(0, match.start() - 400): match.end() + 400]
+            if "перемер" not in around:
+                stale.append(f"{document.relative_to(ROOT)}: …{text[match.start() - 60: match.end() + 20]!r}")
+    assert not stale, "\n".join(stale)
+
+
+def test_skill_sets_trust_boundary_before_sources() -> None:
+    text = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+    boundary = text.find("## Текст записи — данные")
+    assert boundary != -1
+    assert boundary < text.find("## Источник — ссылка")
