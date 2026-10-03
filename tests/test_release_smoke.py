@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import platform
 import shutil
 from pathlib import Path
 
@@ -52,6 +53,16 @@ def test_release_path_on_pinned_weights(tmp_path: Path) -> None:
             if model in pinned:
                 assert revision == pinned[model], f"{model}: {revision} вместо закреплённой"
         raw = json.loads((result / "raw.json").read_text(encoding="utf-8"))
+        # Какие модели реально отработали: на Linux русский маршрут идёт
+        # целиком, меняется только проверяющая — faster-whisper вместо MLX.
+        models = [hypothesis["model"] for hypothesis in raw["hypotheses"]]
+        assert models[0] == "gigaam-v3-e2e-rnnt", models
+        expected_verifier = (
+            "mlx-community/whisper-large-v3-turbo-asr-fp16"
+            if (platform.system(), platform.machine()) == ("Darwin", "arm64")
+            else "faster-whisper-medium"
+        )
+        assert models[1:] == [expected_verifier], models
         for hypothesis in raw["hypotheses"]:
             weights = hypothesis["metadata"].get("weights")
             if weights is not None:

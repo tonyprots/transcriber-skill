@@ -66,3 +66,19 @@ def test_large_meeting_selects_clustering_backend() -> None:
 def test_sortformer_rejects_known_large_meeting() -> None:
     with pytest.raises(ValueError, match="не более четырёх"):
         diarization_backend("sortformer", 6)
+
+
+def test_primary_whisper_on_cpu_is_named_in_warnings() -> None:
+    """На Linux английский маршрут получал medium вместо Turbo молча."""
+    from audio_transcription.catalog import BackendSpec
+    from audio_transcription.cli import cpu_fallback_warning
+    from audio_transcription.models import Hypothesis
+
+    whisper = BackendSpec("whisper", "mlx-community/whisper-large-v3-turbo-asr-fp16")
+    gigaam = BackendSpec("gigaam", "gigaam-v3-e2e-rnnt")
+    cpu = Hypothesis("faster-whisper-medium", "en", 0.0, [], {})
+    mlx = Hypothesis(whisper.model, "en", 0.0, [], {})
+    warning = cpu_fallback_warning(whisper, cpu)
+    assert warning and "faster-whisper-medium" in warning
+    assert cpu_fallback_warning(whisper, mlx) is None
+    assert cpu_fallback_warning(gigaam, Hypothesis("gigaam-v3-e2e-rnnt", "ru", 0.0, [], {})) is None

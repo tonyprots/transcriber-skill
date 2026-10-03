@@ -664,6 +664,22 @@ def primary_retry_items(primary: Hypothesis) -> list[ReviewItem]:
 FAILED_SHARE_WARNING = 0.2
 
 
+def cpu_fallback_warning(spec: BackendSpec, primary: Hypothesis) -> str | None:
+    """Основная Whisper ушла на CPU: маршрут откалиброван не на этой модели.
+
+    На Linux и Intel MLX нет, и английский маршрут молча получал основной
+    faster-whisper medium вместо Whisper Turbo, а в результате об этом не
+    было ни слова. Проверяющая на CPU качество текста не меняет, поэтому
+    предупреждение — только про основную.
+    """
+    if spec.family != "whisper" or not primary.model.startswith("faster-whisper"):
+        return None
+    return (
+        f"Основная модель — {primary.model} на CPU вместо {spec.model}: "
+        "маршрут откалиброван на Whisper Turbo, качество такой замены не замерялось"
+    )
+
+
 def primary_failure_warning(primary: Hypothesis) -> str | None:
     """Предупреждение, если основная модель провалила заметную часть окон.
 
@@ -1363,6 +1379,9 @@ def _transcribe(
             # иначе пустой результат снова выглядит успешным.
             print(f"Внимание: {failure}", file=sys.stderr, flush=True)
             warnings.append(failure)
+        fallback = cpu_fallback_warning(route.primary, readable)
+        if fallback:
+            warnings.append(fallback)
         hypotheses = [readable]
         review_items: list[ReviewItem] = primary_retry_items(readable)
         if args.early_text is not None:

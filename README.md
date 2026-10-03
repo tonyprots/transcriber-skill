@@ -391,10 +391,15 @@ Apple M1, 16 ГБ, macOS 26.3, замеры сделаны на версии 0.
 
 - Диаризация Sortformer на длинных монологах склонна находить лишние
   голоса; для одного голоса `--diarize` не нужен.
-- Linux и Windows: только Whisper на CPU, без диаризации. FluidAudio
-  — бинарник macOS arm64, который собирает CI этого репозитория из закреплённого
-  коммита и `setup.sh` скачивает со сверкой суммы; происхождение и attestation — в
+- Linux: русский маршрут идёт целиком — GigaAM и Vosk через onnx-asr, —
+  но проверяющая в `max` — faster-whisper medium на CPU вместо Whisper Turbo.
+  У английского маршрута на CPU меняется основная модель, и качество такой
+  замены не замерялось; результат говорит об этом в предупреждениях.
+  Диаризации нет: Sortformer работает на MLX, а FluidAudio — бинарник macOS
+  arm64, который собирает CI этого репозитория из закреплённого коммита и
+  `setup.sh` скачивает со сверкой суммы; происхождение и attestation — в
   [third-party/fluidaudio/NOTICE.md](skills/transcriber/third-party/fluidaudio/NOTICE.md).
+  Состав моделей на Linux проверяет смоук релиза в CI. Windows не проверялся.
 - Ссылки требуют установленного `yt-dlp`; в зависимости скилла он не входит,
   потому что нужен не всем. Площадки меняют защиту чаще, чем выходят релизы,
   так что первое лекарство от отказа — обновить его. Видео за возрастным
@@ -442,6 +447,6 @@ queue, and a launchd watcher transcribes Handy dictations in the background.
 The default max mode runs at a quarter to a third of real time on an Apple M1. Install
 with `/plugin marketplace add tonyprots/transcriber-skill` or
 `npx skills add tonyprots/transcriber-skill`, then run
-`scripts/setup.sh`. Apple Silicon gets the full pipeline; Linux runs
-Whisper on CPU without diarization. MIT license, by
+`scripts/setup.sh`. Apple Silicon gets the full pipeline; on Linux the
+Russian route runs in full with a CPU Whisper verifier, without diarization. MIT license, by
 [Anton Protsenko](https://tonyprots.ru).
