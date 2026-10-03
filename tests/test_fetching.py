@@ -342,3 +342,22 @@ def test_yt_dlp_age_from_version(monkeypatch) -> None:
     assert status["version"] == "2026.08.19" and status["age_days"] == 39 and status["stale"]
     assert fetching.update_hint(status) == "brew upgrade yt-dlp"
     assert fetching.update_hint({"path": "/Users/x/.venv/bin/yt-dlp"}) == "pip install -U yt-dlp"
+
+
+@pytest.mark.parametrize(
+    ("raw", "public"),
+    [
+        ("https://www.youtube.com/watch?v=abc123&t=42&si=share-token", "https://www.youtube.com/watch?v=abc123"),
+        ("https://youtu.be/abc123?si=share-token", "https://youtu.be/abc123"),
+        ("https://vk.com/video?z=video-1_2&access_key=secret", "https://vk.com/video?z=video-1_2"),
+        (
+            "https://bucket.s3.amazonaws.com/a.mp3?X-Amz-Signature=deadbeef&X-Amz-Credential=AKIA",
+            "https://bucket.s3.amazonaws.com/a.mp3",
+        ),
+        ("https://files.example.com/a.m4a?sig=abc&se=2026-10-04&sv=2024", "https://files.example.com/a.m4a"),
+        ("https://user:password@intra.example.com/rec.mp4#t=10", "https://intra.example.com/rec.mp4"),
+        ("https://music.yandex.ru/album/1/track/2", "https://music.yandex.ru/album/1/track/2"),
+    ],
+)
+def test_public_url_strips_credentials(raw: str, public: str) -> None:
+    assert fetching.public_url(raw) == public

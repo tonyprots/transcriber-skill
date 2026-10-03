@@ -27,6 +27,7 @@ from audio_transcription.fetching import (
     fetch_audio,
     fetch_subtitles,
     probe_remote,
+    public_url,
     read_cues,
     render_captions,
 )
@@ -262,7 +263,7 @@ def main(argv: list[str] | None = None) -> int:
     for index, url in enumerate(args.url):
         if index:
             _sleep(BATCH_PAUSE_SECONDS)
-        print(f"Пакет {index + 1}/{len(args.url)}: {url}", file=sys.stderr)
+        print(f"Пакет {index + 1}/{len(args.url)}: {public_url(url)}", file=sys.stderr)
         try:
             results.append({"input": url, **run(args, url, destination)})
         except FetchError as error:

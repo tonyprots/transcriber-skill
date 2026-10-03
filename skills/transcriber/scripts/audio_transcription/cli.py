@@ -27,6 +27,7 @@ from .fetching import (
     fetch_audio,
     looks_like_url,
     probe_remote,
+    public_url,
 )
 from .machine_lock import machine_slot
 from .backends import BackendMissing, BackendUnavailable
@@ -1103,7 +1104,7 @@ def _transcribe(
         report.stage(f"Подготовка аудио: {source.name}{scope}")
         prepared, media = prepare_audio(source, work_dir, section)
         if remote is not None:
-            media = replace(media, origin=remote.url)
+            media = replace(media, origin=public_url(remote.url))
         # Кэш гипотез ключуется исходником. У фрагмента тот же SHA-256, что у
         # всей записи, и без границ в ключе два куска одного ролика получили
         # бы общий кэш.
@@ -1493,7 +1494,12 @@ def _transcribe(
                     },
                     # Отпечаток записи, а не запуска: перепрогон того же файла
                     # не должен считаться вторым доказательством.
-                    source=record_fingerprint(media.sha256, media.origin),
+                    # Отпечаток считается по исходному адресу: это хеш, токен из
+                    # него не прочесть, а очищенный адрес склеил бы разные
+                    # записи с идентификатором в query.
+                    source=record_fingerprint(
+                        media.sha256, remote.url if remote is not None else None
+                    ),
                 )
                 # Порядок важен: словарь пополняется до применения, поэтому
                 # термин, добравший порог на этой записи, правит уже её текст,

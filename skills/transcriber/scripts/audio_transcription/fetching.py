@@ -16,6 +16,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .audio import find_command
 
@@ -53,6 +54,47 @@ _sleep = time.sleep
 def looks_like_url(value: str) -> bool:
     """Ссылку от пути отличаем только по схеме: файл с именем `https` — редкость."""
     return bool(_URL_PREFIX.match(value.strip()))
+
+
+# Параметры, которые остаются в адресе для этих площадок: без них ссылка не
+# ведёт на ролик. Всё прочее отрезается — см. `public_url`.
+_IDENTITY_PARAMS = {
+    "youtube.com": {"v", "list"},
+    "youtu.be": set(),
+    "vk.com": {"z"},
+    "vkvideo.ru": {"z"},
+    "rutube.ru": set(),
+    "music.yandex.ru": set(),
+    "music.yandex.com": set(),
+}
+
+
+def _identity_params(host: str) -> set[str]:
+    host = host.lower().removeprefix("www.").removeprefix("m.")
+    for domain, params in _IDENTITY_PARAMS.items():
+        if host == domain or host.endswith("." + domain):
+            return params
+    return set()
+
+
+def public_url(url: str) -> str:
+    """Адрес, который можно записать в артефакт: без логина, токенов и подписей.
+
+    Пользователь может дать presigned-ссылку на S3, адрес с `?token=` или
+    временную корпоративную ссылку, и раньше она целиком попадала в manifest.
+    Чёрный список имён тут не работает: у Azure подпись лежит в `sig`, а срок
+    в `se`, у каждого облака свои имена. Поэтому белый список: у известных
+    площадок остаётся то, без чего ссылка не ведёт на ролик, у остальных query
+    отрезается целиком. Фрагмент и `user:pass@` не нужны никому.
+    """
+    parts = urlsplit(url.strip())
+    if not parts.scheme or not parts.netloc:
+        return url
+    host = parts.hostname or ""
+    netloc = host if parts.port is None else f"{host}:{parts.port}"
+    keep = _identity_params(host)
+    query = urlencode([(key, value) for key, value in parse_qsl(parts.query) if key in keep])
+    return urlunsplit((parts.scheme, netloc, parts.path, query, ""))
 
 
 def require_yt_dlp() -> str:
@@ -156,7 +198,7 @@ class RemoteMedia:
         unknown = [track.language for track in self.tracks if track.kind == "unknown"]
         automatic = [track.language for track in self.tracks if track.kind == "auto"]
         return {
-            "url": self.url,
+            "url": public_url(self.url),
             "title": self.title,
             "duration_seconds": self.duration_seconds,
             "extractor": self.extractor,
@@ -200,7 +242,7 @@ def probe_remote(url: str) -> RemoteMedia:
         return yandex_music.probe(url)
     payload = _run_yt_dlp(
         ["--skip-download", "--dump-single-json", url],
-        failure=f"yt-dlp не открыл ссылку: {url}",
+        failure=f"yt-dlp не открыл ссылку: {public_url(url)}",
     )
     try:
         data = json.loads(payload)
@@ -305,7 +347,7 @@ def expand_playlist(url: str, *, limit: int | None = None) -> list[str]:
     if limit:
         arguments += ["--playlist-end", str(limit)]
     payload = _run_yt_dlp(
-        [*arguments, url], failure=f"yt-dlp не открыл плейлист: {url}", playlist=True
+        [*arguments, url], failure=f"yt-dlp не открыл плейлист: {public_url(url)}", playlist=True
     )
     try:
         data = json.loads(payload)
@@ -321,7 +363,7 @@ def expand_playlist(url: str, *, limit: int | None = None) -> list[str]:
         and looks_like_url(str(link))
     ]
     if not links:
-        raise FetchError(f"В плейлисте нет доступных роликов: {url}")
+        raise FetchError(f"В плейлисте нет доступных роликов: {public_url(url)}")
     return links[:limit] if limit else links
 
 
@@ -342,7 +384,7 @@ def fetch_audio(url: str, dest_dir: Path) -> Path:
             str(dest_dir / "audio.%(ext)s"),
             url,
         ],
-        failure=f"yt-dlp не скачал аудио: {url}",
+        failure=f"yt-dlp не скачал аудио: {public_url(url)}",
     )
     files = sorted(path for path in dest_dir.glob("audio.*") if path.is_file())
     if not files:
@@ -394,7 +436,7 @@ def render_captions(
     header = [
         f"# {media.title}",
         "",
-        f"- **Источник:** {media.url}",
+        f"- **Источник:** {public_url(media.url)}",
         f"- **Дорожка:** {origin} субтитры, язык `{track.language}`",
         f"- **Длительность:** {duration}",
         "",
