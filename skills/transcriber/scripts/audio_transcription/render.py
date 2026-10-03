@@ -415,6 +415,7 @@ def write_bundle(
     fillers_removed: int = 0,
     model_revisions: dict[str, str | None] | None = None,
     speaker_names: SpeakerNames | None = None,
+    glossary_sources: dict[str, Any] | None = None,
 ) -> Path:
     output_dir = ensure_output_available(output_dir, overwrite=overwrite)
     staging = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}-", dir=output_dir.parent))
@@ -445,7 +446,7 @@ def write_bundle(
         if diarization is not None:
             files.append("speakers.json")
         manifest = {
-            "schema_version": 7,
+            "schema_version": 8,
             "generator": generator,
             "created_at": datetime.now().astimezone().isoformat(),
             "mode": mode,
@@ -453,10 +454,14 @@ def write_bundle(
             "source": media.to_dict(),
             "models": [hypothesis.model for hypothesis in hypotheses],
             # Имя модели не определяет веса: репозиторий на хабе могут
-            # перезалить, и тот же прогон даст другой текст. Ревизия из
-            # локального кэша — единственное, по чему потом видно, на чём
-            # именно получен этот результат.
+            # перезалить, и тот же прогон даст другой текст. Здесь коммиты,
+            # которыми посчитан результат: закреплённые в каталоге или, при
+            # TRANSCRIBER_UNPIN и пропавшем с Hub коммите, фактические.
             "model_revisions": model_revisions or {},
+            # Какие словари правили текст: свой словарь общий для всех
+            # прогонов пользователя, и без этой строки не понять, откуда
+            # взялась автозамена в чужой по теме записи.
+            "glossary": glossary_sources,
             "language_route": route,
             "review_count": sum(item.kind != "verifier_canonical" for item in review_items),
             "automatic_correction_count": len(corrections),

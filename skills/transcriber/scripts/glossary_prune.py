@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Уборка словаря, который скилл ведёт сам.
 
-Запуск: <python из .venv> scripts/glossary_prune.py [--store ПУТЬ] [--dry-run]
+Запуск: <python из .venv> scripts/glossary_prune.py [--store ПУТЬ | --profile ИМЯ] [--dry-run]
 
 Снимает выученные записи, которые никогда не станут термином («E ← и»,
 «Zon ← там»), мусорные варианты у живых записей и выученные дубли ручных
@@ -34,9 +34,10 @@ from audio_transcription.glossary_store import (  # noqa: E402
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Убрать мусор из словаря скилла")
     parser.add_argument("--store", type=Path, help="Путь к словарю (по умолчанию ~/.transcriber/glossary.yaml)")
+    parser.add_argument("--profile", help="Именованный словарь: ~/.transcriber/glossaries/ИМЯ.yaml")
     parser.add_argument("--dry-run", action="store_true", help="Показать, что будет снято, и ничего не менять")
     args = parser.parse_args(argv)
-    path = store_path(args.store)
+    path = store_path(args.store, args.profile)
     try:
         document = load_document(path)
     except (OSError, ValueError) as error:

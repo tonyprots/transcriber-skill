@@ -68,7 +68,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             print(json.dumps(stats, ensure_ascii=False, indent=2))
         else:
-            oldest = f", самой старой {stats['oldest_days']:g} дн." if stats["oldest_days"] is not None else ""
+            days = stats["oldest_days"]
+            oldest = f", самой старой {f'{days:g}'.replace('.', ',')} дн." if days is not None else ""
             print(f"{stats['path']}: записей {stats['files']}, {_megabytes(stats['bytes'])}{oldest}")
             if stats["older_than_max_age"]:
                 print(

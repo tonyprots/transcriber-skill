@@ -63,11 +63,12 @@ def render_yaml(candidates: list[dict]) -> str:
         )
         aliases = entry.get("aliases") or [entry["heard"]]
         rendered = ", ".join(json.dumps(alias, ensure_ascii=False) for alias in aliases)
+        context = f"кандидат: {why}, первое окно {entry['first_at']:.1f} с"
         lines.extend(
             [
                 f"  - canonical: {json.dumps(entry['canonical'], ensure_ascii=False)}",
                 f"    aliases: [{rendered}]",
-                f"    context: {json.dumps(f'кандидат: {why}, первое окно {entry['first_at']:.1f} с', ensure_ascii=False)}",
+                f"    context: {json.dumps(context, ensure_ascii=False)}",
                 "    auto_apply: false",
             ]
         )

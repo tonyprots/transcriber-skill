@@ -5,6 +5,7 @@
 """
 from pathlib import Path
 
+import pytest
 import yaml
 
 from audio_transcription.glossary import GlossaryEntry, merge_glossaries
@@ -328,3 +329,34 @@ def test_verifier_spelling_of_a_hand_term_reinforces_it(tmp_path: Path) -> None:
     assert [entry.canonical for entry in entries] == ["Битрикс24"]
     # Не завели и тут же убрали, а сразу засчитали ручной записи.
     assert report.added == [] and report.reinforced == ["Битрикс24"]
+
+
+def test_profile_keeps_dictionaries_apart(monkeypatch, tmp_path) -> None:
+    from audio_transcription import glossary_store
+
+    monkeypatch.setattr(glossary_store, "PROFILES_DIR", tmp_path / "glossaries")
+    monkeypatch.delenv("TRANSCRIBER_GLOSSARY_STORE", raising=False)
+    monkeypatch.delenv("TRANSCRIBER_GLOSSARY_PROFILE", raising=False)
+    assert glossary_store.store_path(profile="work") == tmp_path / "glossaries" / "work.yaml"
+    # Явный путь сильнее профиля, профиль сильнее переменных окружения.
+    assert glossary_store.store_path(tmp_path / "x.yaml", "work") == tmp_path / "x.yaml"
+    monkeypatch.setenv("TRANSCRIBER_GLOSSARY_STORE", str(tmp_path / "env.yaml"))
+    assert glossary_store.store_path(profile="home") == tmp_path / "glossaries" / "home.yaml"
+    monkeypatch.delenv("TRANSCRIBER_GLOSSARY_STORE")
+    monkeypatch.setenv("TRANSCRIBER_GLOSSARY_PROFILE", "home")
+    assert glossary_store.store_path() == tmp_path / "glossaries" / "home.yaml"
+    with pytest.raises(ValueError):
+        glossary_store.profile_path("../etc")
+
+
+def test_owner_can_switch_off_automatic_promotion(tmp_path: Path) -> None:
+    """Кто хочет решать сам, ставит auto_promote: false — доказательства копятся, текст не правится."""
+    store = tmp_path / "glossary.yaml"
+    save_document(store, {"version": 1, "auto_promote": False, "entries": []})
+    for source in ("rec1", "rec2", "rec3", "rec4"):
+        entries, report = update_from_run(store, _run("трэц", "Threads"), source=source)
+    assert entries[0].auto_apply is False
+    assert report.promoted == []
+    document = load_document(store)
+    assert document["auto_promote"] is False, "настройка не должна теряться при перезаписи"
+    assert "человек" in document["entries"][0]["learned"]["held_back"]

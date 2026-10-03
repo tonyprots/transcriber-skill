@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import tempfile
 from dataclasses import dataclass, field
 from datetime import date
@@ -58,6 +59,10 @@ from .phonetic import phonetic_similarity
 from .reconcile import normalize_text
 
 DEFAULT_STORE = Path.home() / ".transcriber" / "glossary.yaml"
+# Именованные словари: рабочие встречи и личные голосовые не должны учить друг
+# друга. `--glossary-profile work` ведёт ~/.transcriber/glossaries/work.yaml.
+PROFILES_DIR = Path.home() / ".transcriber" / "glossaries"
+_PROFILE_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 
 # Порог, заменяющий человеческое подтверждение. Смысл не в числах самих по
 # себе, а в том, что случайная ослышка до него не доживает: она приходит из
@@ -97,6 +102,9 @@ HEADER = """\
 # Правки здесь уважаются: если поменять auto_apply руками, скилл больше не
 # трогает это поле. Чтобы убрать термин навсегда, удалите запись и запустите
 # прогон с --no-learn, иначе он вернётся из следующего расхождения.
+#
+# auto_promote: false в корне файла — скилл копит кандидатов и доказательства,
+# но автозамену не включает никогда: только вы, полем auto_apply.
 """
 
 
@@ -145,13 +153,30 @@ class LearnReport:
         return f"Словарь: {'; '.join(parts)} (всего записей {self.total_entries})"
 
 
-def store_path(explicit: str | Path | None = None) -> Path:
-    """Где лежит авто-словарь: явный путь → TRANSCRIBER_GLOSSARY_STORE → домашний."""
+def profile_path(name: str) -> Path:
+    if not _PROFILE_NAME.fullmatch(name):
+        raise ValueError(
+            f"Имя профиля словаря «{name}»: только строчные латинские буквы, цифры, - и _"
+        )
+    return PROFILES_DIR / f"{name}.yaml"
+
+
+def store_path(explicit: str | Path | None = None, profile: str | None = None) -> Path:
+    """Где лежит авто-словарь.
+
+    Порядок: явный путь → профиль → TRANSCRIBER_GLOSSARY_STORE →
+    TRANSCRIBER_GLOSSARY_PROFILE → общий домашний.
+    """
     if explicit:
         return Path(explicit).expanduser()
+    if profile:
+        return profile_path(profile)
     from_env = os.environ.get("TRANSCRIBER_GLOSSARY_STORE")
     if from_env:
         return Path(from_env).expanduser()
+    profile_env = os.environ.get("TRANSCRIBER_GLOSSARY_PROFILE")
+    if profile_env:
+        return profile_path(profile_env.strip())
     return DEFAULT_STORE
 
 
@@ -431,6 +456,10 @@ def learn(
             _hold_unsafe_aliases(entry, blocked, report)
             continue
         ready, reason = _promotable(entry, blocked)
+        if ready and document.get("auto_promote") is False:
+            # Хозяин словаря включает замены сам: доказательства копятся, но
+            # текст не правится, пока он не поставит auto_apply руками.
+            ready, reason = False, "автозамену включает человек (auto_promote: false)"
         if ready:
             entry["auto_apply"] = True
             entry["learned"]["auto_apply_written"] = True

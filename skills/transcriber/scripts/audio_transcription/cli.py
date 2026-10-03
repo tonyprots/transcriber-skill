@@ -64,6 +64,7 @@ from .glossary import (
 from .glossary_store import (
     entries_of,
     load_document,
+    profile_path,
     record_fingerprint,
     store_path,
     update_from_run,
@@ -158,6 +159,14 @@ def build_parser() -> argparse.ArgumentParser:
             "Где лежит словарь, который скилл ведёт сам "
             "(по умолчанию ~/.transcriber/glossary.yaml, можно задать "
             "переменной TRANSCRIBER_GLOSSARY_STORE)"
+        ),
+    )
+    parser.add_argument(
+        "--glossary-profile",
+        help=(
+            "Именованный свой словарь: ~/.transcriber/glossaries/ИМЯ.yaml вместо общего. "
+            "Чтобы рабочие и личные записи не учили друг друга "
+            "(можно задать переменной TRANSCRIBER_GLOSSARY_PROFILE)"
         ),
     )
     parser.add_argument(
@@ -825,6 +834,8 @@ def _spoken_duration(remote: RemoteMedia) -> str:
 def _validate(args: argparse.Namespace) -> None:
     if args.early_text is not None and len(args.input) * len(_sections(args)) > 1:
         raise ValueError("--early-text пишет один файл и годится только для одной записи")
+    if args.glossary_profile:
+        profile_path(args.glossary_profile)  # плохое имя — до часа расшифровки, а не после
     if not 0 <= args.review_threshold <= 1:
         raise ValueError("--review-threshold должен быть в диапазоне [0, 1]")
     if args.verifier_window_seconds < 0:
@@ -1288,7 +1299,11 @@ def _transcribe(
         else:
             chunks = base_chunks
         curated = [] if args.no_glossary else load_glossary(args.glossary)
-        learned_path = None if args.no_glossary else store_path(args.glossary_store)
+        learned_path = (
+            None
+            if args.no_glossary
+            else store_path(args.glossary_store, args.glossary_profile)
+        )
         glossary = merge_glossaries(
             curated, [] if learned_path is None else entries_of(load_document(learned_path))
         )
@@ -1604,6 +1619,11 @@ def _transcribe(
             timings=timings,
             generator=f"transcriber {__version__}",
             fillers_removed=fillers_removed,
+            glossary_sources={
+                "curated": str(args.glossary) if args.glossary and not args.no_glossary else None,
+                "store": str(learned_path) if learned_path else None,
+                "learning": learned_path is not None and not args.no_learn,
+            },
             model_revisions=loaded_revisions(
                 revisions_for_models([SILERO_VAD.model, *used_models]),
                 [*hypotheses, *([diarization] if diarization is not None else [])],
