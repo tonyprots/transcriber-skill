@@ -88,3 +88,81 @@ def test_poisoned_entry_from_older_version_is_ignored(tmp_path: Path) -> None:
         json.dumps(poisoned.to_dict(), ensure_ascii=False), encoding="utf-8"
     )
     assert load_hypothesis(tmp_path, "key") is None
+
+
+def _hypothesis(text: str = "текст") -> "Hypothesis":
+    from audio_transcription.models import Hypothesis, Segment
+
+    return Hypothesis("m", "ru", 1.0, [Segment(0.0, 1.0, text)], {})
+
+
+def test_forget_removes_one_record_with_its_fragments(tmp_path) -> None:
+    from audio_transcription import cache
+
+    sha = "a" * 64
+    cache.save_hypothesis(tmp_path, "k1", _hypothesis(), sha)
+    cache.save_hypothesis(tmp_path, "k2", _hypothesis(), f"{sha}@0.000-60.000")
+    cache.save_hypothesis(tmp_path, "k3", _hypothesis(), "b" * 64)
+    cache.save_hypothesis(tmp_path, "k4", _hypothesis())  # запись до 0.19, без метки
+
+    swept = cache.forget(tmp_path, sha)
+    assert swept.files == 2
+    left = sorted(path.stem for path in (tmp_path / "hypotheses").glob("*.json"))
+    assert left == ["k3", "k4"]
+    # Метка не мешает чтению.
+    assert cache.load_hypothesis(tmp_path, "k3").text == "текст"
+
+
+def test_prune_counts_from_last_use(tmp_path) -> None:
+    import os
+    import time
+
+    from audio_transcription import cache
+
+    cache.save_hypothesis(tmp_path, "old", _hypothesis(), "a" * 64)
+    cache.save_hypothesis(tmp_path, "used", _hypothesis(), "b" * 64)
+    long_ago = time.time() - 100 * 86400
+    for name in ("old", "used"):
+        os.utime(tmp_path / "hypotheses" / f"{name}.json", (long_ago, long_ago))
+    # Обращение продлевает жизнь: перепрогоняемая запись не уходит по сроку.
+    assert cache.load_hypothesis(tmp_path, "used") is not None
+
+    assert cache.cache_stats(tmp_path)["older_than_max_age"] == 1
+    swept = cache.prune(tmp_path, 90)
+    assert swept.files == 1
+    assert not (tmp_path / "hypotheses" / "old.json").exists()
+    assert (tmp_path / "hypotheses" / "used.json").exists()
+
+
+def test_clear_leaves_files_being_written(tmp_path) -> None:
+    from audio_transcription import cache
+
+    cache.save_hypothesis(tmp_path, "k", _hypothesis(), "a" * 64)
+    (tmp_path / "hypotheses" / ".k2-tmp.json").write_text("{}", encoding="utf-8")
+    assert cache.clear(tmp_path).files == 1
+    assert (tmp_path / "hypotheses" / ".k2-tmp.json").exists()
+
+
+def test_manage_cache_script_reports_and_forgets(tmp_path, capsys) -> None:
+    import importlib.util
+    from pathlib import Path
+
+    from audio_transcription import cache
+
+    script = Path(__file__).resolve().parents[1] / "skills" / "transcriber" / "scripts" / "manage_cache.py"
+    spec = importlib.util.spec_from_file_location("manage_cache", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    recording = tmp_path / "rec.wav"
+    recording.write_bytes(b"RIFF")
+    import hashlib
+
+    sha = hashlib.sha256(b"RIFF").hexdigest()
+    cache_dir = tmp_path / "cache"
+    cache.save_hypothesis(cache_dir, "k", _hypothesis(), sha)
+    assert module.main(["--cache-dir", str(cache_dir), "stats"]) == 0
+    assert "записей 1" in capsys.readouterr().out
+    assert module.main(["--cache-dir", str(cache_dir), "forget", str(recording)]) == 0
+    assert "записей 1" in capsys.readouterr().out
+    assert cache.cache_stats(cache_dir)["files"] == 0

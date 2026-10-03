@@ -379,3 +379,44 @@ def test_crashed_primary_warns_and_is_recomputed_next_run(
     assert json.loads(captured.out)["warnings"] == []
     assert "не распознала" not in captured.err
     assert "PostgreSQL" in (tmp_path / "healed" / "readable.md").read_text(encoding="utf-8")
+
+
+@requires_speech
+def test_run_prunes_old_cache_and_tags_new_entries(tmp_path: Path, spoken_audio: Path, monkeypatch) -> None:
+    """Прогон убирает давно не нужное и помечает своё исходником — иначе `forget` слеп."""
+    import os
+    import time
+
+    from audio_transcription import cache
+
+    monkeypatch.setattr(cli, "run_isolated_backend", fake_backend)
+    cache_dir = tmp_path / "cache"
+    stale = cache_dir / "hypotheses" / "stale.json"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("{}", encoding="utf-8")
+    long_ago = time.time() - 200 * 86400
+    os.utime(stale, (long_ago, long_ago))
+
+    cli.run(
+        cli.build_parser().parse_args(
+            [
+                str(spoken_audio),
+                "--output",
+                str(tmp_path / "result"),
+                "--mode",
+                "fast",
+                "--language",
+                "ru",
+                "--no-learn",
+                "--cache-dir",
+                str(cache_dir),
+                "--quiet",
+            ]
+        )
+    )
+
+    assert not stale.exists()
+    manifest = json.loads((tmp_path / "result" / "manifest.json").read_text(encoding="utf-8"))
+    swept = cache.forget(cache_dir, manifest["source"]["sha256"])
+    assert swept.files >= 2  # основная и проверяющая
+    assert cache.cache_stats(cache_dir)["files"] == 0

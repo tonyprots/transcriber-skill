@@ -42,12 +42,14 @@ from .catalog import (
     staleness_warnings,
 )
 from .cache import (
+    CACHE_MAX_AGE_DAYS,
     crashed_windows,
     cache_key,
     load_diarization,
     load_hypothesis,
     save_diarization,
     save_hypothesis,
+    prune as prune_cache,
 )
 from .diarization import split_chunks_by_diarization
 from .glossary import (
@@ -248,9 +250,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Каталог кэша гипотез",
     )
     parser.add_argument(
+        "--cache-max-age-days",
+        type=float,
+        default=CACHE_MAX_AGE_DAYS,
+        help=(
+            "Перед прогоном убрать из кэша записи, к которым не обращались дольше "
+            f"стольких дней (по умолчанию {CACHE_MAX_AGE_DAYS}; 0 — не убирать)"
+        ),
+    )
+    parser.add_argument(
         "--no-cache",
         action="store_true",
-        help="Считать заново, не читая и не записывая кэш гипотез: для контрольного прогона",
+        help=(
+            "Считать заново, не читая и не записывая кэш гипотез: для контрольного "
+            "прогона и для записей, текст которых не должен оставаться на диске"
+        ),
     )
     parser.add_argument(
         "--diarize",
@@ -731,7 +745,7 @@ def resolve_language(
                 ),
             }
         if not args.no_cache and weights_as_keyed(found.metadata, weights_signature(args)):
-            save_hypothesis(args.cache_dir, key, found)
+            save_hypothesis(args.cache_dir, key, found, source_identity)
     language = normalize_language(found.language)
     if language in {AUTO_LANGUAGE, "und"}:
         return "ru", {
@@ -1088,6 +1102,17 @@ def _transcribe(
     if diarization_threshold is None:
         diarization_threshold = 0.8 if diarization_kind == "fluidaudio" else 0.4
 
+    if not args.no_cache and args.cache_max_age_days > 0:
+        # Уборка — побочное дело прогона: упасть из-за неё он не должен.
+        try:
+            swept = prune_cache(args.cache_dir, args.cache_max_age_days)
+        except OSError:
+            swept = None
+        if swept and swept.files:
+            report.stage(
+                f"Кэш: убрано записей старше {args.cache_max_age_days:g} дн.: {swept.files}"
+            )
+
     # Скачивание в total не входит: это сеть, а не расшифровка, и по total
     # сравнивают скорость прогонов между собой.
     timings: dict[str, float] = {}
@@ -1232,7 +1257,7 @@ def _transcribe(
                     diarization.metadata,
                     {args.diarization_model: revision_for_model(args.diarization_model)},
                 ):
-                    save_diarization(args.cache_dir, diarization_key, diarization)
+                    save_diarization(args.cache_dir, diarization_key, diarization, source_identity)
             # Нарезка режет каждое окно по границам реплик и пишет их на диск:
             # на 42-минутной встрече это 7–8 минут без единой строки в логе.
             report.stage(f"Нарезка окон по говорящим: {len(base_chunks)}")
@@ -1315,7 +1340,7 @@ def _transcribe(
             if not args.no_cache and weights_as_keyed(
                 readable.metadata, weights_signature(args, route.primary)
             ):
-                save_hypothesis(args.cache_dir, primary_key, readable)
+                save_hypothesis(args.cache_dir, primary_key, readable, source_identity)
         else:
             report.stage(f"Основная модель {route.primary.model}: результат из кэша")
         mark = timed("primary", mark)
@@ -1435,7 +1460,10 @@ def _transcribe(
                             weights_signature(args, verifier_spec),
                         ):
                             save_hypothesis(
-                                args.cache_dir, verifier_key, packed_hypothesis
+                                args.cache_dir,
+                                verifier_key,
+                                packed_hypothesis,
+                                source_identity,
                             )
                     # Кэшируем сырой ответ модели, а не разложенный по окнам
                     # результат: разбор дешёвый, и его правки не должны
