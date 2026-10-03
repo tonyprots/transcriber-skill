@@ -8,13 +8,13 @@ from typing import Any
 
 import yaml
 
-# libyaml разбирает словарь на 127 КБ за 0,04 с против 0,26 с у чистого Python,
-# а читается он дважды за прогон. Без libyaml остаётся безопасный загрузчик.
-_YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
-
 from .models import Correction, ReviewItem, Segment
 from .phonetic import phonetic_similarity
 from .reconcile import normalize_text
+
+# libyaml разбирает словарь на 127 КБ за 0,04 с против 0,26 с у чистого Python,
+# а читается он дважды за прогон. Без libyaml остаётся безопасный загрузчик.
+_YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
 
 @dataclass(frozen=True)

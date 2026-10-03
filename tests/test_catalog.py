@@ -250,3 +250,29 @@ def test_fluidaudio_binary_ignores_non_executable(tmp_path, monkeypatch) -> None
     plain.chmod(0o644)
     monkeypatch.setenv("TRANSCRIBER_FLUIDAUDIO_BIN", str(plain))
     assert catalog.fluidaudio_binary_path(skill_dir=tmp_path / "skill") is None
+
+
+def test_bundled_fluidaudio_is_checked_against_published_sum(tmp_path: Path) -> None:
+    binary = tmp_path / "bin" / "macos-arm64" / "fluidaudiocli"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"binary")
+    import hashlib
+
+    good = hashlib.sha256(b"binary").hexdigest()
+    (binary.parent / "fluidaudiocli.sha256").write_text(f"{good}  fluidaudiocli\n", encoding="utf-8")
+    assert catalog.bundled_binary_problem(binary, tmp_path) is None
+
+    binary.write_bytes(b"tampered")
+    assert "не совпал" in catalog.bundled_binary_problem(binary, tmp_path)
+    # Свой бинарник пользователя не сверяется: его он собрал сам.
+    own = tmp_path / "own-fluidaudiocli"
+    own.write_bytes(b"whatever")
+    assert catalog.bundled_binary_problem(own, tmp_path) is None
+
+
+def test_shipped_fluidaudio_matches_its_sum() -> None:
+    skill_dir = Path(catalog.__file__).resolve().parents[2]
+    binary = skill_dir / "bin" / "macos-arm64" / "fluidaudiocli"
+    if not binary.is_file():
+        pytest.skip("бинарника нет в этой поставке")
+    assert catalog.bundled_binary_problem(binary, skill_dir) is None

@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from audio_transcription.catalog import (  # noqa: E402
     CALIBRATION_SHELF_LIFE_DAYS,
     CATALOG,
+    bundled_binary_problem,
     fluidaudio_binary_path,
     format_gb,
     hf_cache_dir,
@@ -252,6 +253,9 @@ def collect(check_updates: bool = False) -> dict:
         "library_catalog": check_library_catalog(),
         "updates": check_hub_updates() if check_updates else {"checked": False, "findings": []},
         "fluidaudio_binary": str(fluid_binary) if fluid_binary else None,
+        "fluidaudio_binary_problem": (
+            bundled_binary_problem(fluid_binary, skill_dir) if fluid_binary else None
+        ),
         "fluidaudio_models": (_fluid_models_dir() / "plda-parameters.json").is_file(),
         "yt_dlp": check_yt_dlp(check_updates),
         "free_gb": round(shutil.disk_usage(Path.home()).free / 1024**3, 1),
@@ -271,6 +275,8 @@ def collect(check_updates: bool = False) -> dict:
         warnings.append("нет mlx-audio: Whisper пойдёт через медленный CPU fallback, диаризация недоступна")
     if not apple:
         warnings.append("не Apple Silicon: диаризация и Whisper Turbo MLX недоступны, Whisper работает на CPU")
+    if report["fluidaudio_binary_problem"]:
+        warnings.append(f"диаризация 5+ голосов недоступна: {report['fluidaudio_binary_problem']}")
     if report["free_gb"] < 8:
         warnings.append("меньше 8 ГБ свободно: модели занимают около 4 ГБ, временные WAV — ещё гигабайты")
 
@@ -340,7 +346,7 @@ def render(report: dict) -> str:
         lines.append(f"      {row['model']} · {calibration}{revision}")
 
     lines.append(
-        f"FluidAudio (5+ голосов): бинарник {mark(report['fluidaudio_binary'])}, "
+        f"FluidAudio (5+ голосов): бинарник {mark(report['fluidaudio_binary'] and not report['fluidaudio_binary_problem'])}, "
         f"CoreML-модели {mark(report['fluidaudio_models'])}"
     )
 

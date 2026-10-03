@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .backends import BackendMissing, _PinnedLoad, load_with_hub_fallback
-from .catalog import fluidaudio_binary_path
+from .catalog import bundled_binary_problem, fluidaudio_binary_path
 from .diarization import partition_turns
 from .models import Diarization, SpeakerTurn
 from .exiting import exit_after_flush
@@ -42,6 +42,9 @@ def _fluid_binary(config: dict[str, Any]) -> Path:
             "Не найден fluidaudiocli. Укажите --fluidaudio-bin или установите "
             "бинарник в bin/macos-arm64/fluidaudiocli внутри скилла"
         )
+    problem = bundled_binary_problem(path)
+    if problem:
+        raise RuntimeError(problem)
     return path
 
 

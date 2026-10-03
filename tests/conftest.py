@@ -13,7 +13,7 @@ SCRIPTS = (
 sys.path.insert(0, str(SCRIPTS))
 
 
-import pytest
+import pytest  # noqa: E402 — после sys.path: тестам нужен пакет из scripts/
 
 
 @pytest.fixture(autouse=True)

@@ -59,14 +59,32 @@ if [ ! -x "$VENV/bin/python" ]; then
 fi
 
 "$VENV/bin/python" -m pip install --quiet --upgrade pip
-"$VENV/bin/python" -m pip install --quiet -r "$SKILL_DIR/requirements.txt"
+# Точные версии с хешами — те, на которых проходят тесты релиза. mlx-audio в
+# lock-файле помечен маркером Apple Silicon и на других машинах не ставится.
+# Если под этот Python в lock нет колёс, ставим по диапазонам и говорим об этом.
+if ! "$VENV/bin/python" -m pip install --quiet --require-hashes -r "$SKILL_DIR/requirements.lock"; then
+  echo "Версии из requirements.lock не встали на $("$VENV/bin/python" --version): ставлю по диапазонам" >&2
+  echo "из requirements.txt. Работать будет, но окружение не совпадёт с проверенным." >&2
+  "$VENV/bin/python" -m pip install --quiet -r "$SKILL_DIR/requirements.txt"
+  if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
+    "$VENV/bin/python" -m pip install --quiet -r "$SKILL_DIR/requirements-apple.txt"
+  fi
+fi
 
 if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
-  echo "Apple Silicon: ставлю mlx-audio (Whisper Turbo MLX и диаризация)"
-  "$VENV/bin/python" -m pip install --quiet -r "$SKILL_DIR/requirements-apple.txt"
-  chmod +x "$SKILL_DIR/bin/macos-arm64/fluidaudiocli" 2>/dev/null || true
-  # Архив, скачанный браузером, получает карантин: снимаем его с бинарника.
-  xattr -d com.apple.quarantine "$SKILL_DIR/bin/macos-arm64/fluidaudiocli" 2>/dev/null || true
+  echo "Apple Silicon: Whisper Turbo MLX и диаризация доступны"
+  FLUID_DIR="$SKILL_DIR/bin/macos-arm64"
+  if [ -f "$FLUID_DIR/fluidaudiocli" ]; then
+    # Карантин с чужого неподписанного бинарника снимаем только после сверки
+    # с опубликованной суммой (она же в third-party/fluidaudio/NOTICE.md).
+    if (cd "$FLUID_DIR" && shasum -a 256 -c fluidaudiocli.sha256 >/dev/null 2>&1); then
+      chmod +x "$FLUID_DIR/fluidaudiocli" 2>/dev/null || true
+      xattr -d com.apple.quarantine "$FLUID_DIR/fluidaudiocli" 2>/dev/null || true
+    else
+      echo "fluidaudiocli не совпал с опубликованной суммой: карантин не снят, диаризация 5+ голосов" >&2
+      echo "недоступна. Соберите свой по third-party/fluidaudio/NOTICE.md и передайте --fluidaudio-bin" >&2
+    fi
+  fi
 fi
 
 if [ -n "$MODELS" ]; then

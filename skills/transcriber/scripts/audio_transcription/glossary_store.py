@@ -49,14 +49,14 @@ from typing import Any
 
 import yaml
 
-# libyaml разбирает словарь на 127 КБ за 0,04 с против 0,26 с у чистого Python,
-# а читается он дважды за прогон. Без libyaml остаётся безопасный загрузчик.
-_YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
-
 from .glossary import GlossaryEntry, parse_entries
 from .mining import collect_candidates
 from .phonetic import phonetic_similarity
 from .reconcile import normalize_text
+
+# libyaml разбирает словарь на 127 КБ за 0,04 с против 0,26 с у чистого Python,
+# а читается он дважды за прогон. Без libyaml остаётся безопасный загрузчик.
+_YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
 DEFAULT_STORE = Path.home() / ".transcriber" / "glossary.yaml"
 # Именованные словари: рабочие встречи и личные голосовые не должны учить друг

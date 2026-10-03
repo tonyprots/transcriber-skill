@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -381,6 +382,38 @@ def fluidaudio_binary_path(
         path = Path(candidate).expanduser().resolve()
         if path.is_file() and os.access(path, os.X_OK):
             return path
+    return None
+
+
+def bundled_binary_problem(path: Path, skill_dir: Path | None = None) -> str | None:
+    """Что не так с поставочным fluidaudiocli, или None.
+
+    Бинарник лежит в репозитории готовым, а setup.sh снимает с него карантин
+    macOS. Делать это вслепую нельзя: сначала сверяем SHA-256 с опубликованным
+    в `fluidaudiocli.sha256` (тот же хеш — в third-party/fluidaudio/NOTICE.md).
+    Сумма в том же репозитории защищает от порчи и подмены файла, но не от
+    подмены репозитория: от этого — только своя сборка (`--fluidaudio-bin`).
+    Свой путь не проверяется: его пользователь собрал или выбрал сам.
+    """
+    if skill_dir is None:
+        skill_dir = Path(__file__).resolve().parents[2]
+    bundled = skill_dir / "bin" / "macos-arm64" / "fluidaudiocli"
+    if not bundled.is_file() or Path(path).resolve() != bundled.resolve():
+        return None
+    try:
+        expected = bundled.with_name("fluidaudiocli.sha256").read_text(encoding="utf-8").split()[0]
+    except (OSError, IndexError):
+        return "нет опубликованной контрольной суммы fluidaudiocli.sha256 рядом с бинарником"
+    digest = hashlib.sha256()
+    with bundled.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    if digest.hexdigest() != expected.lower():
+        return (
+            f"поставочный fluidaudiocli не совпал с опубликованной суммой "
+            f"({digest.hexdigest()[:12]} вместо {expected[:12]}); соберите свой по "
+            "third-party/fluidaudio/NOTICE.md и передайте --fluidaudio-bin"
+        )
     return None
 
 
