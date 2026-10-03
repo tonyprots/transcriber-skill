@@ -6,13 +6,16 @@
 # создаёт окружение (около 1 ГБ) и скачивает модели русского маршрута (2,7 ГБ).
 # Точный размер маршрута печатает scripts/prefetch_models.py --print-size.
 # Переменные: TRANSCRIBER_HOME — куда клонировать; TRANSCRIBER_MODELS=ru|en|all|none —
-# какие модели скачать сразу (по умолчанию ru); TRANSCRIBER_DIARIZE=1 — плюс Sortformer.
+# какие модели скачать сразу (по умолчанию ru); TRANSCRIBER_DIARIZE=1 — плюс Sortformer;
+# TRANSCRIBER_REF — тег или ветка (по умолчанию последний тег релиза; main — свежий код
+# без гарантий: релиз получает тег только после прогона тестов на настоящих моделях).
 set -euo pipefail
 
 REPO="${TRANSCRIBER_REPO:-https://github.com/tonyprots/transcriber-skill}"
 TARGET="${TRANSCRIBER_HOME:-$HOME/.local/share/transcriber-skill}"
 MODELS="${TRANSCRIBER_MODELS:-ru}"
 DIARIZE="${TRANSCRIBER_DIARIZE:-}"
+REF="${TRANSCRIBER_REF:-}"
 
 for tool in git python3; do
   if ! command -v "$tool" >/dev/null 2>&1; then
@@ -21,13 +24,33 @@ for tool in git python3; do
   fi
 done
 
+# Последний релиз — по номеру версии, а не по дате тега.
+latest_tag() {
+  git ls-remote --tags --refs "$REPO" 'v*' 2>/dev/null \
+    | sed 's|.*refs/tags/||' | sort -t. -k1,1V -k2,2n -k3,3n | tail -n 1
+}
+if [ -z "$REF" ]; then
+  REF="$(latest_tag)"
+  if [ -z "$REF" ]; then
+    echo "Не удалось узнать последний релиз в $REPO: ставлю main" >&2
+    REF="main"
+  fi
+fi
+
 if [ -d "$TARGET/.git" ]; then
-  echo "Обновляю $TARGET"
-  git -C "$TARGET" pull --ff-only --quiet
+  echo "Обновляю $TARGET до $REF"
+  # Клон с тега однобранчевый: ветки запрашиваем явно, иначе main не найдётся.
+  git -C "$TARGET" fetch --quiet --tags --force origin "+refs/heads/*:refs/remotes/origin/*"
+  # Ветку обновляем до её состояния на сервере, тег берём как есть.
+  if git -C "$TARGET" rev-parse --verify --quiet "refs/remotes/origin/$REF" >/dev/null; then
+    git -C "$TARGET" checkout --quiet -B "$REF" "origin/$REF"
+  else
+    git -C "$TARGET" -c advice.detachedHead=false checkout --quiet "$REF"
+  fi
 else
-  echo "Клонирую $REPO в $TARGET"
+  echo "Клонирую $REPO ($REF) в $TARGET"
   mkdir -p "$(dirname "$TARGET")"
-  git clone --quiet --depth 1 "$REPO" "$TARGET"
+  git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$REF" "$REPO" "$TARGET"
 fi
 
 SKILL="$TARGET/skills/transcriber"

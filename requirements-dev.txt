@@ -1,1 +1,3 @@
 pytest>=8,<9
+ruff>=0.13,<0.14
+shellcheck-py>=0.10,<0.12
