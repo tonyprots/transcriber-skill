@@ -1,6 +1,6 @@
 {
   "name": "transcriber",
-  "version": "0.19.0",
+  "version": "0.20.0",
   "description": "Локальная расшифровка аудио и видео — файлов и ссылок на YouTube, ВК Видео, Рутуб, подкасты Яндекс Музыки: две независимые ASR (GigaAM v3 и Whisper Turbo), субтитры, диаризация до 4 и от 5 голосов, словарь терминов и очередь спорных мест. Русский и английский, распознавание без внешних сервисов.",
   "author": { "name": "Anton Protsenko", "url": "https://tonyprots.ru" },
   "homepage": "https://github.com/tonyprots/transcriber-skill",

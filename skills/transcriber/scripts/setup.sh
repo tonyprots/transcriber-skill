@@ -92,7 +92,7 @@ if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
   # файл карантин, так что снимать его не нужно.
   if [ -f "$FLUID_DIR/fluidaudiocli.sha256" ] && [ -f "$FLUID_DIR/fluidaudiocli.url" ] \
     && ! (cd "$FLUID_DIR" && shasum -a 256 -c fluidaudiocli.sha256 >/dev/null 2>&1); then
-    echo "Скачиваю fluidaudiocli для встреч с 5+ участниками (около 10 МБ)"
+    echo "Скачиваю fluidaudiocli для встреч с 5+ участниками (около 20 МБ)"
     PART="$FLUID_DIR/fluidaudiocli.part"
     if curl -fsSL --retry 2 -o "$PART" "$(cat "$FLUID_DIR/fluidaudiocli.url")" \
       && [ "$(shasum -a 256 "$PART" | cut -d' ' -f1)" = "$(cut -d' ' -f1 "$FLUID_DIR/fluidaudiocli.sha256")" ]; then

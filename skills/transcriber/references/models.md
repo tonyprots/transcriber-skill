@@ -73,7 +73,7 @@ GigaAM Multilingual Large и Qwen3-ASR исключены из рабочего 
 
 Для 1–4 ожидаемых голосов используется `mlx-community/diar_sortformer_4spk-v1-fp16`, threshold 0,4. На коротком двухголосом proxy DER составил 10,3% без подмены идентичности.
 
-Для 5+ ожидаемых голосов на macOS arm64 используется FluidAudio Offline Community-1 с VBx-clustering, threshold 0,8. На контролируемой записи A–B–C–D–E–F–A–B–C–D–E–F он нашёл шесть голосов с proxy DER 3,7%; Sortformer нашёл только три и получил 50,6%.
+Для 5+ ожидаемых голосов на macOS arm64 используется FluidAudio Offline Community-1 с VBx-clustering, threshold 0,7. На контролируемой записи A–B–C–D–E–F–A–B–C–D–E–F он нашёл шесть голосов с proxy DER 0,8%; Sortformer нашёл только три и получил 50,6%.
 
 FluidAudio не заменяет Sortformer на коротких записях: на двухголосом proxy он был существенно хуже. Его бинарник включён в скилл, а CoreML-модели хранятся в `~/Library/Application Support/FluidAudio/Models/` и загружаются отдельно.
 

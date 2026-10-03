@@ -34,3 +34,4 @@ experiments/youtube-benchmark/results*.json
 
 # Рабочие копии веток (git worktree)
 .worktrees/
+skills/transcriber/bin/macos-arm64/fluidaudiocli

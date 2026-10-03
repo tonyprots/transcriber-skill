@@ -104,6 +104,8 @@ def search_youtube(media: RemoteMedia, limit: int = 5) -> list[Candidate]:
                 f"ytsearch{limit}:{media.title}",
             ],
             failure="поиск на YouTube не ответил",
+            # Поиск — подсказка: ждать его дольше минуты незачем.
+            timeout=60,
         )
     except Exception:  # поиск — подсказка, а не условие работы
         return []

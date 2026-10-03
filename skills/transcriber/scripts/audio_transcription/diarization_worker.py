@@ -118,7 +118,7 @@ def _run_fluidaudio(
 ) -> Diarization:
     binary = _fluid_binary(config)
     output_path = result_path.with_name("fluidaudio-output.json")
-    threshold = float(config.get("threshold", 0.8))
+    threshold = float(config.get("threshold", 0.7))
     started = time.monotonic()
     _write_json(progress_path, {"stage": "loading", "completed": 0})
     process = subprocess.Popen(

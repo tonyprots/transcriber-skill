@@ -48,6 +48,15 @@ _CONCURRENT_FRAGMENTS = "8"
 # YouTube отвечает 429 на серию запросов субтитров подряд; через минуту
 # тот же запрос проходит. Паузы короткие: дольше ждать дешевле руками.
 _RETRY_PAUSES_SECONDS = (15.0, 45.0)
+# Сокетный таймаут yt-dlp ловит молчащее соединение, но не зависший экстрактор
+# (JS-задачу YouTube он решает через deno, и та может не вернуться). Без
+# общего срока агент ждал бы такой вызов вечно. Метаданные приходят за секунды,
+# плейлист канала — за минуту-другую.
+METADATA_TIMEOUT_SECONDS = 300.0
+# Скачивание общим сроком не ограничить: час с ВК идёт 30 секунд, с медленного
+# сайта — десятки минут. Убиваем, когда в каталоге ничего не прибывает.
+STALL_TIMEOUT_SECONDS = 300.0
+_WATCH_PERIOD_SECONDS = 2.0
 _sleep = time.sleep
 
 
@@ -324,6 +333,7 @@ def fetch_subtitles(
             media.url,
         ],
         failure=f"yt-dlp не отдал субтитры {track.language}",
+        watch=dest_dir,
     )
     files = sorted(path for path in dest_dir.glob("captions.*") if path.is_file())
     if not files:
@@ -385,6 +395,7 @@ def fetch_audio(url: str, dest_dir: Path) -> Path:
             url,
         ],
         failure=f"yt-dlp не скачал аудио: {public_url(url)}",
+        watch=dest_dir,
     )
     files = sorted(path for path in dest_dir.glob("audio.*") if path.is_file())
     if not files:
@@ -477,18 +488,76 @@ def _clean(line: str) -> str:
     return re.sub(r"\s+", " ", html.unescape(_TAG.sub("", line))).strip()
 
 
-def _run_yt_dlp(arguments: Sequence[str], failure: str, *, playlist: bool = False) -> str:
+def _run_yt_dlp(
+    arguments: Sequence[str],
+    failure: str,
+    *,
+    playlist: bool = False,
+    watch: Path | None = None,
+    timeout: float = METADATA_TIMEOUT_SECONDS,
+) -> str:
+    """Вызов yt-dlp с повтором на 429 и сроком.
+
+    `watch` — каталог скачивания: тогда срок не общий, а «ничего не прибыло за
+    STALL_TIMEOUT_SECONDS». Без него — общий `timeout`.
+    """
     # Ссылка на ролик внутри плейлиста (`watch?v=…&list=…`) без этого флага
     # тянет весь плейлист. Плейлист целиком разворачивает только `expand_playlist`.
     command = [require_yt_dlp(), *(() if playlist else ("--no-playlist",)), *arguments]
     for pause in (*_RETRY_PAUSES_SECONDS, None):
-        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        completed = _execute(command, timeout=timeout, watch=watch)
         if completed.returncode == 0:
             return completed.stdout
         if pause is None or "HTTP Error 429" not in completed.stderr:
             break
         _sleep(pause)
     raise FetchError(_with_version_hint(_tail(completed.stderr) or failure))
+
+
+def _directory_size(path: Path) -> int:
+    total = 0
+    for item in path.rglob("*"):
+        try:
+            if item.is_file():
+                total += item.stat().st_size
+        except OSError:  # фрагмент успели переименовать между обходом и stat
+            continue
+    return total
+
+
+def _execute(
+    command: list[str], *, timeout: float, watch: Path | None
+) -> subprocess.CompletedProcess[str]:
+    if watch is None:
+        try:
+            return subprocess.run(command, capture_output=True, text=True, check=False, timeout=timeout)
+        except subprocess.TimeoutExpired as error:
+            raise FetchError(
+                f"yt-dlp не ответил за {timeout / 60:g} мин и остановлен: площадка или "
+                "её экстрактор зависли. Повторите позже или обновите yt-dlp."
+            ) from error
+    # Вывод — во временные файлы: при PIPE длинный лог заполнил бы буфер, и
+    # процесс встал бы, пока мы ждём файл.
+    import tempfile
+
+    with tempfile.TemporaryFile("w+") as out, tempfile.TemporaryFile("w+") as err:
+        process = subprocess.Popen(command, stdout=out, stderr=err, text=True)
+        size, changed = -1, time.monotonic()
+        while process.poll() is None:
+            time.sleep(_WATCH_PERIOD_SECONDS)
+            current = _directory_size(watch)
+            if current != size:
+                size, changed = current, time.monotonic()
+            elif time.monotonic() - changed > STALL_TIMEOUT_SECONDS:
+                process.kill()
+                process.wait()
+                raise FetchError(
+                    f"Скачивание стоит {STALL_TIMEOUT_SECONDS / 60:g} мин без новых данных и "
+                    "остановлено. Повторите позже; если повторится — обновите yt-dlp."
+                )
+        out.seek(0)
+        err.seek(0)
+        return subprocess.CompletedProcess(command, process.returncode, out.read(), err.read())
 
 
 # yt-dlp обновляется раз в две-три недели, а сайты ломают его старые версии

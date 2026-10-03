@@ -40,7 +40,14 @@ fi
 if [ -d "$TARGET/.git" ]; then
   echo "Обновляю $TARGET до $REF"
   # Клон с тега однобранчевый: ветки запрашиваем явно, иначе main не найдётся.
-  git -C "$TARGET" fetch --quiet --tags --force origin "+refs/heads/*:refs/remotes/origin/*"
+  # Теги — без --force: тег релиза не двигается (релизы на GitHub неизменяемы),
+  # и если на сервере он вдруг указывает на другой коммит, это повод
+  # остановиться, а не молча поставить другой код под тем же номером.
+  if ! git -C "$TARGET" fetch --quiet --tags origin "+refs/heads/*:refs/remotes/origin/*"; then
+    echo "Не обновляю: тег релиза на сервере указывает не на тот коммит, что уже скачан," >&2
+    echo "или сервер недоступен. Подмена релиза — повод разобраться, а не ставить поверх." >&2
+    exit 1
+  fi
   # Ветку обновляем до её состояния на сервере, тег берём как есть.
   if git -C "$TARGET" rev-parse --verify --quiet "refs/remotes/origin/$REF" >/dev/null; then
     git -C "$TARGET" checkout --quiet -B "$REF" "origin/$REF"

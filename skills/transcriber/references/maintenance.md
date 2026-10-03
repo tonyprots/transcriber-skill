@@ -49,7 +49,12 @@
 ## Релиз (для мейнтейнера)
 
 Установщик ставит последний тег `v*`, поэтому каждая версия, попавшая в
-`main`, получает тег, а тег ставится только после:
+`main`, получает тег. Релизы в репозитории неизменяемы (immutable releases):
+тег опубликованного релиза нельзя передвинуть или удалить, а установщик без
+`--force` откажется обновляться, если тег на сервере вдруг указывает на другой
+коммит. Поэтому порядок такой: тег → зелёный `release-smoke.yml` (настоящие
+веса на Linux и macOS) → только потом Release на GitHub. Проверить ветку без
+релиза — тег `smoke-<что угодно>`. Перед тегом:
 
 - `pytest` и `ruff check skills tests` (то же делает CI на Linux и macOS);
 - `pytest -m slow` на Apple Silicon со скачанными весами — CI его не гоняет;
@@ -71,8 +76,12 @@ rm lock.in
 требует правка. Поднять всё до свежих версий — `--upgrade`, и это тот же
 перемер перед релизом, что и смена весов.
 
-Новый `fluidaudiocli` — это новая сумма в `bin/macos-arm64/fluidaudiocli.sha256`
-и новый коммит апстрима в `third-party/fluidaudio/NOTICE.md`, в том же коммите.
+Новый `fluidaudiocli` собирает CI: поменять `FLUIDAUDIO_COMMIT` в
+`.github/workflows/fluidaudio.yml`, запушить тег `fluidaudio-<7 знаков>`, скачать
+бинарник из Release, проверить `gh attestation verify`, перемерить схему из
+шести голосов (`experiments/diarization-bakeoff/run_large_meeting.py`, не опубликовано) и в одном
+коммите обновить `fluidaudiocli.url`, `fluidaudiocli.sha256`, `NOTICE.md` и
+`quality.md`. Самодельный бинарник в поставку не кладётся.
 
 ## yt-dlp
 

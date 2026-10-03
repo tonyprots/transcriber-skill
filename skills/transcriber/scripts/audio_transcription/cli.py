@@ -313,7 +313,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--diarization-threshold",
         type=float,
-        help="Порог backend: по умолчанию 0.4 для Sortformer и 0.8 для FluidAudio",
+        help="Порог backend: по умолчанию 0.4 для Sortformer и 0.7 для FluidAudio",
     )
     parser.add_argument(
         "--diarization-chunk-seconds",
@@ -1111,7 +1111,7 @@ def _transcribe(
     )
     diarization_threshold = args.diarization_threshold
     if diarization_threshold is None:
-        diarization_threshold = 0.8 if diarization_kind == "fluidaudio" else 0.4
+        diarization_threshold = 0.7 if diarization_kind == "fluidaudio" else 0.4
 
     if not args.no_cache and args.cache_max_age_days > 0:
         # Уборка — побочное дело прогона: упасть из-за неё он не должен.

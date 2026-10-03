@@ -21,11 +21,11 @@ def yt_dlp(monkeypatch):
         # здесь он свежий, чтобы счёт вызовов описывал саму операцию.
         monkeypatch.setattr(fetching, "yt_dlp_status", lambda today=None: {"stale": False})
 
-        def fake_run(command, **kwargs):
+        def fake_execute(command, **kwargs):
             calls.append(command)
             return CompletedProcess(command, returncode, stdout, stderr)
 
-        monkeypatch.setattr(fetching.subprocess, "run", fake_run)
+        monkeypatch.setattr(fetching, "_execute", fake_execute)
         return calls
 
     return install
@@ -361,3 +361,33 @@ def test_yt_dlp_age_from_version(monkeypatch) -> None:
 )
 def test_public_url_strips_credentials(raw: str, public: str) -> None:
     assert fetching.public_url(raw) == public
+
+
+def _script(tmp_path: Path, body: str) -> str:
+    script = tmp_path / "fake-yt-dlp"
+    script.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+    script.chmod(0o755)
+    return str(script)
+
+
+def test_hung_metadata_call_is_stopped(tmp_path: Path, monkeypatch) -> None:
+    """Зависший экстрактор не должен держать агента вечно."""
+    monkeypatch.setattr(fetching, "require_yt_dlp", lambda: _script(tmp_path, "sleep 30\n"))
+    monkeypatch.setattr(fetching, "METADATA_TIMEOUT_SECONDS", 0.5)
+    with pytest.raises(fetching.FetchError, match="не ответил"):
+        fetching._run_yt_dlp(["x"], failure="f", timeout=0.5)
+
+
+def test_stalled_download_is_stopped_but_slow_one_is_not(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(fetching, "STALL_TIMEOUT_SECONDS", 1.0)
+    monkeypatch.setattr(fetching, "_WATCH_PERIOD_SECONDS", 0.2)
+    target = tmp_path / "out"
+    target.mkdir()
+    # Медленно, но с данными: 3 с при сроке простоя в 1 с — живое скачивание.
+    slow = _script(tmp_path, f"for i in 1 2 3 4 5 6; do echo x >> '{target}/audio.part'; sleep 0.5; done\necho done\n")
+    monkeypatch.setattr(fetching, "require_yt_dlp", lambda: slow)
+    assert fetching._run_yt_dlp(["x"], failure="f", watch=target).strip() == "done"
+    stuck = _script(tmp_path, "sleep 30\n")
+    monkeypatch.setattr(fetching, "require_yt_dlp", lambda: stuck)
+    with pytest.raises(fetching.FetchError, match="без новых данных"):
+        fetching._run_yt_dlp(["x"], failure="f", watch=target)

@@ -1,0 +1,49 @@
+name: release-smoke
+
+# Путь целиком на настоящих закреплённых весах — то, что не проверяют тесты с
+# подменёнными бэкендами: веса скачиваются по коммиту, грузятся, пачка доходит
+# до манифеста с теми же ревизиями. Идёт на тег релиза (Release на GitHub
+# создаётся после зелёного прогона), раз в неделю — ловит пропавший с Hugging
+# Face коммит — и на тег smoke-* для проверки без релиза.
+on:
+  push:
+    tags: ["v*", "smoke-*"]
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux: GigaAM (onnx) + faster-whisper на CPU. macOS arm64: путь MLX.
+        os: [ubuntu-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: ffmpeg
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update -q && sudo apt-get install -yq ffmpeg
+          else
+            brew install ffmpeg
+          fi
+      - name: зависимости
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --require-hashes -r skills/transcriber/requirements.lock
+          python -m pip install -r requirements-dev.txt
+      # Ключ — каталог моделей: новая ревизия в нём = новый кэш.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ runner.os }}-${{ hashFiles('skills/transcriber/scripts/audio_transcription/catalog.py') }}
+      - name: прогон на настоящих весах
+        run: python -m pytest -m slow -v tests/test_release_smoke.py
