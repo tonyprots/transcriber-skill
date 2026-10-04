@@ -15,7 +15,7 @@ compatibility: >-
   диаризация недоступна.
 metadata:
   author: Anton Protsenko (tonyprots.ru)
-  version: "0.21.2"
+  version: "0.22.0"
   homepage: https://github.com/tonyprots/transcriber-skill
 ---
 
