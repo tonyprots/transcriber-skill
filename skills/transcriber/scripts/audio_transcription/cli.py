@@ -1544,7 +1544,14 @@ def _transcribe(
                 learned_entries, learned_report = update_from_run(
                     learned_path,
                     [item.to_dict() for item in review_items],
-                    blocked=undisputed_words(readable_input, review_items),
+                    # Тот же текст, что ушёл в сверку, — с автозаменами.
+                    # По сырому алиас, на котором модели сошлись только
+                    # благодаря словарю, считался бы обычным словом, и запись
+                    # теряла его со следующего прогона: «Атласиан» у
+                    # Atlassian, 2026-10-05.
+                    blocked=undisputed_words(
+                        apply_glossary(readable_input, glossary)[0], review_items
+                    ),
                     curated={
                         normalize_text(term)
                         for entry in curated

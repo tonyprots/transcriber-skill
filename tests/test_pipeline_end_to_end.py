@@ -534,3 +534,55 @@ def test_early_text_is_replaced_by_final_text(tmp_path: Path, spoken_audio: Path
     assert final and final == writes[-1].strip()
     for paragraph in final.split("\n\n"):
         assert paragraph in readable
+
+
+def fake_alias_backend(backend: str, chunks, language: str, work_dir: Path, **kwargs) -> Hypothesis:
+    """Основная пишет ослышку из словаря, проверяющая — канон."""
+    if backend.endswith("-lid"):
+        return language_hypothesis(backend, [{"ru": 0.97, "en": 0.03}] * len(chunks), 0.1)
+    text = VERIFIER_TEXT if backend == "gigaam" else PRIMARY_TEXT
+    chunks = list(chunks)
+    segments = [Segment(chunk.start, chunk.end, text) for chunk in chunks]
+    metadata = {
+        "chunks": [
+            {"sequence": chunk.sequence, "start": chunk.start, "end": chunk.end, "text": text}
+            for chunk in chunks
+        ]
+    }
+    return Hypothesis(f"{backend}-fake", language, len(chunks), segments, metadata=metadata)
+
+
+@requires_speech
+def test_working_alias_is_not_taken_for_an_ordinary_word(
+    tmp_path: Path, spoken_audio: Path, monkeypatch
+) -> None:
+    """2026-10-05: «Атласиан» у Atlassian ушёл в held_aliases.
+
+    Модели сошлись на этом месте только потому, что словарь заменил алиас в
+    обеих гипотезах перед сверкой. Бесспорные слова считались по сырому тексту,
+    и рабочий алиас выглядел обычным словом, о котором не спорили.
+    """
+    monkeypatch.setattr(cli, "run_isolated_backend", fake_alias_backend)
+    store = tmp_path / "glossary.yaml"
+    monkeypatch.setenv("TRANSCRIBER_GLOSSARY_STORE", str(store))
+    store.write_text(
+        "version: 1\nentries:\n"
+        "  - canonical: PostgreSQL\n    aliases: [постгрес]\n    auto_apply: true\n"
+        "    learned:\n      auto_apply_written: true\n      windows: 4\n      latin: true\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "result"
+
+    cli.run(
+        cli.build_parser().parse_args(
+            [
+                str(spoken_audio), "--output", str(output), "--mode", "max",
+                "--language", "ru", "--no-cache", "--quiet",
+                "--verifier-window-seconds", "0",
+            ]
+        )
+    )
+
+    assert "PostgreSQL" in (output / "readable.md").read_text(encoding="utf-8")
+    (entry,) = cli.entries_of(cli.load_document(store))
+    assert entry.aliases == ("постгрес",)
