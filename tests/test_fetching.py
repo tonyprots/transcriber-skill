@@ -427,11 +427,13 @@ def test_hung_metadata_call_is_stopped(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_stalled_download_is_stopped_but_slow_one_is_not(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(fetching, "STALL_TIMEOUT_SECONDS", 1.0)
+    # Запас вчетверо: при сроке 1 с тест падал на машине под нагрузкой (load
+    # average 60, 2026-10-04) — запуск оболочки съедал разницу.
+    monkeypatch.setattr(fetching, "STALL_TIMEOUT_SECONDS", 2.0)
     monkeypatch.setattr(fetching, "_WATCH_PERIOD_SECONDS", 0.2)
     target = tmp_path / "out"
     target.mkdir()
-    # Медленно, но с данными: 3 с при сроке простоя в 1 с — живое скачивание.
+    # Медленно, но с данными: 3 с при сроке простоя в 2 с — живое скачивание.
     slow = _script(tmp_path, f"for i in 1 2 3 4 5 6; do echo x >> '{target}/audio.part'; sleep 0.5; done\necho done\n")
     monkeypatch.setattr(fetching, "require_yt_dlp", lambda: slow)
     assert fetching._run_yt_dlp(["x"], failure="f", watch=target).strip() == "done"

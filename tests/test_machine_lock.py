@@ -19,11 +19,14 @@ def test_second_run_waits_and_names_the_holder(tmp_path: Path) -> None:
             order.append("второй")
             assert waited > 0
 
-    with machine_slot("первый", path=lock) as waited:
-        assert waited < 1
+    # Ждём события, а не времени: под нагрузкой (load average 60, 2026-10-04)
+    # 0,2 с не хватало, чтобы второй поток успел упереться в замок.
+    with machine_slot("первый", path=lock):
         worker = threading.Thread(target=second)
         worker.start()
-        time.sleep(0.2)
+        deadline = time.monotonic() + 10
+        while not seen and time.monotonic() < deadline:
+            time.sleep(0.01)
         order.append("первый")
     worker.join(timeout=5)
 
@@ -35,7 +38,10 @@ def test_second_run_waits_and_names_the_holder(tmp_path: Path) -> None:
 
 def test_free_machine_is_taken_without_waiting(tmp_path: Path) -> None:
     calls: list[str] = []
+    # Признак «не ждал» — что очередь ни разу не позвала on_wait. Порог по
+    # времени ложно падал: первое открытие файла под антивирусом и нагрузкой
+    # длилось дольше секунды.
     with machine_slot("один", path=tmp_path / "run.lock",
-                      on_wait=lambda *_: calls.append("wait")) as waited:
-        assert waited < 1
+                      on_wait=lambda *_: calls.append("wait")):
+        pass
     assert calls == []
