@@ -178,6 +178,24 @@ def run_job(wav: Path, out: Path, seconds: float, args: argparse.Namespace) -> s
     return f"done {out.name}"
 
 
+MAX_ATTEMPTS = 3
+
+
+def attempt(wav: Path, args: argparse.Namespace, state: dict) -> None:
+    seen: dict = state.setdefault("seen", {})
+    failures: dict = state.setdefault("failures", {})
+    try:
+        seen[wav.name] = process(wav, args)
+    except (OSError, wave.Error, EOFError) as error:
+        seen[wav.name] = f"error {error}"
+        log(f"{wav.name}: {error}")
+    if str(seen[wav.name]).startswith("failed"):
+        failures[wav.name] = failures.get(wav.name, 0) + 1
+    else:
+        failures.pop(wav.name, None)
+    save_state(args.state, state)
+
+
 def run(args: argparse.Namespace) -> int:
     state = load_state(args.state)
     seen: dict = state.setdefault("seen", {})
@@ -189,22 +207,34 @@ def run(args: argparse.Namespace) -> int:
         return 0
 
     # Пока шёл прогон, Handy мог записать новую диктовку: пересканировать до тишины.
+    tried: set[str] = set()
     while True:
         pending = [w for w in recordings(args.recordings) if w.name not in seen]
         if not pending:
             break
         for wav in pending:
-            try:
-                seen[wav.name] = process(wav, args)
-            except (OSError, wave.Error, EOFError) as error:
-                seen[wav.name] = f"error {error}"
-                log(f"{wav.name}: {error}")
-            save_state(args.state, state)
+            attempt(wav, args, state)
+            tried.add(wav.name)
+
+    # Упавшую запись повторяем при следующем запуске агента: 3 октября диктовка
+    # упала на нехватке места и так и осталась без текста. Не в том же запуске,
+    # где она упала, после новых записей и без буфера: старый текст не должен
+    # затереть свежий.
+    retry_args = argparse.Namespace(**{**vars(args), "clipboard": False})
+    failures: dict = state.setdefault("failures", {})
+    for wav in recordings(args.recordings):
+        done_before = failures.get(wav.name, 0)
+        if (wav.name not in tried and str(seen.get(wav.name, "")).startswith("failed")
+                and done_before < MAX_ATTEMPTS):
+            log(f"{wav.name}: повтор, попытка {done_before + 1} из {MAX_ATTEMPTS}")
+            attempt(wav, retry_args, state)
 
     # Handy сам удаляет старые записи; забывать их, чтобы состояние не росло.
     present = {w.name for w in recordings(args.recordings)}
     for name in [n for n in seen if n not in present]:
         del seen[name]
+    for name in [n for n in failures if n not in present]:
+        del failures[name]
     save_state(args.state, state)
     return 0
 

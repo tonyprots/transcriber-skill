@@ -59,6 +59,10 @@ integrations/handy/install.sh --output-root ~/transcripts/handy
 Лог: `~/Library/Logs/ru.tonyprots.handy-transcriber.log`. Состояние (какие
 записи уже виденные): `~/Library/Application Support/handy-transcriber/state.json`.
 
+Упавшую запись (например, на нехватке места) агент повторяет при следующем
+срабатывании, то есть на следующей диктовке: не больше трёх попыток, после
+новых записей и без буфера обмена, чтобы старый текст не затёр свежий.
+
 ## Почему не через `external_script`
 
 В Handy 0.9.6 есть способ вставки `external_script`: скрипт получает готовый

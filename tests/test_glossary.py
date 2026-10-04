@@ -27,6 +27,15 @@ def test_replacements_do_not_match_inside_words_or_cascade() -> None:
     assert len(corrections) == 1
 
 
+def test_term_already_canonical_is_not_logged_as_correction() -> None:
+    entries = [GlossaryEntry("MCP", ("эмсипи", "mcp"), auto_apply=True)]
+    segments, corrections = apply_glossary(
+        [Segment(0, 1, "MCP, mcp и эмсипи")], entries
+    )
+    assert segments[0].text == "MCP, MCP и MCP"
+    assert [c.before for c in corrections] == ["эмсипи", "mcp"]
+
+
 def test_canonical_term_is_not_suggested_again() -> None:
     entry = GlossaryEntry("GenAI Platform", ("Gen AI Platform",), auto_apply=True)
     assert not suggest_glossary_matches(

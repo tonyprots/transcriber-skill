@@ -139,6 +139,11 @@ def apply_glossary(
         for start, end, entry, before in sorted(
             selected, key=lambda item: (item[0], item[1]), reverse=True
         ):
+            # Канон обычно стоит и среди алиасов: «MCP» в тексте совпадает с
+            # алиасом «mcp», но править нечего. В журнале такие места были
+            # двумя третями «исправлений» (95 из 151 за 2026-09-24..10-04).
+            if before == entry.canonical:
+                continue
             text = text[:start] + entry.canonical + text[end:]
             audit.append(
                 Correction(

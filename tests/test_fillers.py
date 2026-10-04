@@ -1,4 +1,4 @@
-from audio_transcription.fillers import strip_filler_segments, strip_fillers
+from audio_transcription.fillers import fix_punctuation_spacing, strip_filler_segments, strip_fillers
 from audio_transcription.models import Segment
 
 
@@ -31,3 +31,24 @@ def test_segment_of_only_fillers_is_dropped_and_others_kept() -> None:
     assert [segment.text for segment in result] == ["Привет", "Чистое окно"]
     assert result[0].speakers == ("speaker_1",)
     assert result[1] is segments[2]
+
+
+def test_glued_dash_and_quotes_get_spaces() -> None:
+    assert fix_punctuation_spacing("Текущий тракет—2 млрд, где BT— это") == (
+        "Текущий тракет — 2 млрд, где BT — это"
+    )
+    assert fix_punctuation_spacing("верстка блока«Путешествия»слово") == (
+        "верстка блока «Путешествия» слово"
+    )
+    assert fix_punctuation_spacing("а—б—в") == "а — б — в"
+
+
+def test_numeric_range_and_spaced_dash_are_untouched() -> None:
+    for text in ("скидки 30—50%", "— Привет", "уже — есть", "«Цитата», — сказал"):
+        assert fix_punctuation_spacing(text) == text
+
+
+def test_segment_with_only_spacing_fix_is_rewritten() -> None:
+    segments, removed = strip_filler_segments([Segment(0, 1, "пункт— про")])
+    assert removed == 0
+    assert segments[0].text == "пункт — про"
