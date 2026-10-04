@@ -98,7 +98,15 @@ def test_waits_for_running_watcher_instead_of_second_run(env):
     marker = handy_watch.running_marker_path(env["out"])
     marker.write_text(json.dumps({"pid": os.getpid()}), encoding="utf-8")
     early = handy_watch.early_text_path(env["out"])
-    threading.Timer(2.0, lambda: early.write_text("от наблюдателя", encoding="utf-8")).start()
+    # Атомарно, как `write_plain_text`: иначе читатель застаёт файл созданным,
+    # но пустым (CI на теге v0.22.2).
+    temporary = early.with_name(f".{early.name}.tmp")
+
+    def publish() -> None:
+        temporary.write_text("от наблюдателя", encoding="utf-8")
+        temporary.replace(early)
+
+    threading.Timer(2.0, publish).start()
     result = run_result(env)
     assert result.returncode == 0
     assert "от наблюдателя" in result.stdout
