@@ -1,4 +1,26 @@
-# transcriber — расшифровка аудио и видео в текст для Claude Code и Codex
+<div align="center">
+
+# transcriber
+
+**Расшифровка аудио и видео в текст на вашей машине: скилл для Claude Code и Codex.**
+
+Русский и английский, две модели сверяют друг друга, спикеры по именам, субтитры SRT и VTT.
+Файлы и ссылки: YouTube, ВК Видео, Рутуб, подкасты Яндекс Музыки.
+
+[![Claude Code](https://img.shields.io/badge/Claude_Code-skill-17201B)](#установка)
+[![Codex](https://img.shields.io/badge/Codex-skill-17201B)](#установка)
+[![Release](https://img.shields.io/github/v/release/tonyprots/transcriber-skill?label=release&color=17201B)](https://github.com/tonyprots/transcriber-skill/releases/latest)
+[![test](https://github.com/tonyprots/transcriber-skill/actions/workflows/test.yml/badge.svg)](https://github.com/tonyprots/transcriber-skill/actions/workflows/test.yml)
+[![release-smoke](https://github.com/tonyprots/transcriber-skill/actions/workflows/release-smoke.yml/badge.svg)](https://github.com/tonyprots/transcriber-skill/actions/workflows/release-smoke.yml)
+[![MIT](https://img.shields.io/badge/license-MIT-17201B)](LICENSE)
+
+<img src="docs/media/preview.png" width="880" alt="transcriber: фраза «Голосом человек даёт агенту в разы больше контекста, чем успевает набрать руками» и над каждым словом его звук">
+
+<sub><a href="#установка">Установка</a> · <a href="#использование">Использование</a> · <a href="#замеры">Замеры</a> · <a href="#зачем-это-нужно-в-цифрах">Зачем это нужно, в цифрах</a> · <a href="#ограничения-и-что-дальше">Ограничения</a> · <a href="#english-summary">English summary</a></sub>
+
+</div>
+
+---
 
 Скилл, который превращает запись в текст прямо на вашем компьютере:
 голосовое, диктовку, интервью, созвон на шестерых, подкаст из Яндекс Музыки,
