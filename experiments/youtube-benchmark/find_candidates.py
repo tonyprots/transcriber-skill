@@ -72,7 +72,18 @@ def main() -> int:
     parser.add_argument("--per-query", type=int, default=8)
     parser.add_argument("--need", type=int, default=3, help="сколько видео на язык")
     parser.add_argument("--output", type=Path, default=Path(__file__).parent / "candidates.json")
+    parser.add_argument("--queries", type=Path, help="свои запросы, по строке; заменяют встроенные")
+    parser.add_argument("--exclude", type=Path, action="append", default=[],
+                        help="списки кандидатов, видео из которых уже взяты")
     args = parser.parse_args()
+    if args.queries:
+        lines = [q.strip() for q in args.queries.read_text(encoding="utf-8").splitlines() if q.strip()]
+        for language in QUERIES:
+            QUERIES[language] = lines
+    taken: set[str] = set()
+    for path in args.exclude:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        taken |= {item["id"] for items in data.values() for item in items}
 
     languages = args.language or ["en", "ru"]
     found: dict[str, list[dict]] = {language: [] for language in languages}
@@ -83,6 +94,9 @@ def main() -> int:
             print(f"[{language}] {query}", flush=True)
             for entry in search(query, args.per_query):
                 duration = entry.get("duration") or 0
+                if entry["id"] in taken:
+                    continue
+                taken.add(entry["id"])
                 if not MIN_SECONDS <= duration <= MAX_SECONDS:
                     continue
                 url = f"https://www.youtube.com/watch?v={entry['id']}"

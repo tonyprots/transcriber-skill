@@ -209,6 +209,38 @@ def split_audio_chunk(chunk: AudioChunk) -> tuple[AudioChunk, AudioChunk]:
     )
 
 
+VAD_TARGET_RMS = 0.1  # −20 dBFS: обычный уровень речи в записи
+VAD_MAX_GAIN = 1000.0  # +60 dB: дальний микрофон даёт −60…−76 dBFS
+VAD_ENVELOPE_SECONDS = 2.0
+
+
+def gain_for_vad(waveform):
+    """Поднимает тихие участки до уровня речи — только для Silero VAD.
+
+    Silero принимает речь на −60…−76 dBFS за тишину, и фраза не доходит до
+    моделей, хотя GigaAM её узнаёт: на Golos farfield 2026-10-04 пустыми
+    вышли 82 фразы из 500. Усиление скользящее, по огибающей ±2 с: общий
+    множитель на файл не поднимает тихого собеседника рядом с громким
+    (480 фраз из 500 против 492). Огибающая — максимум, а не среднее, чтобы
+    фраза поднималась целиком, а не по слогам. Цифровой ноль остаётся нулём,
+    громкое не ослабляется. Модели получают звук без изменений.
+    """
+    import numpy as np
+    from numpy.lib.stride_tricks import sliding_window_view
+
+    hop = SAMPLE_RATE * 30 // 1000
+    frames = len(waveform) // hop
+    if frames == 0:
+        return waveform
+    rms = np.sqrt((waveform[: frames * hop].reshape(frames, hop) ** 2).mean(axis=1))
+    reach = max(1, round(VAD_ENVELOPE_SECONDS * SAMPLE_RATE / hop))
+    envelope = sliding_window_view(np.pad(rms, reach, mode="edge"), 2 * reach + 1).max(axis=1)
+    gain = np.clip(VAD_TARGET_RMS / np.maximum(envelope, 1e-6), 1.0, VAD_MAX_GAIN)
+    gain = np.repeat(gain, hop)
+    gain = np.pad(gain, (0, len(waveform) - len(gain)), mode="edge")
+    return np.clip(waveform * gain, -1.0, 1.0).astype(waveform.dtype)
+
+
 def split_speech_windows(
     prepared: Path,
     *,
@@ -248,7 +280,7 @@ def split_speech_windows(
     raw_spans = list(
         next(
             vad.segment_batch(
-                waveforms,
+                gain_for_vad(waveforms[0])[None, :],
                 lengths,
                 SAMPLE_RATE,
                 threshold=0.5,

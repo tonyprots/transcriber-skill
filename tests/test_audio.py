@@ -126,3 +126,39 @@ def test_vad_load_respects_offline(monkeypatch, tmp_path: Path) -> None:
         audio.split_speech_windows(tmp_path / "prepared.wav", offline=True)
     assert seen["offline"] == "1"
     assert seen["path"] == tmp_path
+
+
+def test_gain_for_vad_lifts_quiet_speech_and_keeps_loud_and_silence() -> None:
+    """Тихая фраза рядом с громкой поднимается до уровня речи сама по себе.
+
+    Общий множитель на файл громкая фраза бы заблокировала; ноль и громкое
+    при этом не меняются, а модели получают исходный звук.
+    """
+    import numpy as np
+
+    rate = audio.SAMPLE_RATE
+    t = np.arange(rate) / rate
+    tone = np.sin(2 * np.pi * 220 * t).astype(np.float32)
+    silence = np.zeros(rate * 5, dtype=np.float32)
+    quiet, loud = tone * 10 ** (-70 / 20), tone * 0.5
+    waveform = np.concatenate([silence, quiet, silence, loud, silence])
+
+    lifted = audio.gain_for_vad(waveform)
+
+    def rms(part):
+        return float(np.sqrt(np.mean(part**2)))
+
+    quiet_part = lifted[rate * 5 : rate * 6]
+    loud_part = lifted[rate * 11 : rate * 12]
+    assert rms(quiet_part) > 0.05
+    assert np.allclose(loud_part, loud)
+    assert not lifted[: rate * 2].any()
+    assert lifted.dtype == waveform.dtype
+    assert rms(waveform[rate * 5 : rate * 6]) < 0.001
+
+
+def test_gain_for_vad_short_input_is_untouched() -> None:
+    import numpy as np
+
+    short = np.full(10, 1e-4, dtype=np.float32)
+    assert np.array_equal(audio.gain_for_vad(short), short)

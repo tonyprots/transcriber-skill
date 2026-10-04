@@ -176,8 +176,14 @@ def main() -> int:
                     continue
             # Скачиваем сжатый звук как есть и режем фрагмент прямо из него:
             # перегонять в WAV всё видео ради пяти минут — лишняя работа.
+            # Фрагмент уже вырезан — весь звук заново не нужен (после замера
+            # скачанные дорожки удаляются, а фрагменты остаются).
+            excerpt = output / "audio" / f"{identifier}.wav"
             downloads = list((work / "download").glob("audio.*"))
-            source_audio = downloads[0] if downloads else fetch_audio(entry["url"], work / "download")
+            if excerpt.exists():
+                source_audio = None
+            else:
+                source_audio = downloads[0] if downloads else fetch_audio(entry["url"], work / "download")
         except Exception as error:  # noqa: BLE001 — видео могло стать недоступным
             print(f"   пропуск: {type(error).__name__}: {error}", flush=True)
             continue
@@ -195,7 +201,6 @@ def main() -> int:
             print(f"   пропуск: «ручная» дорожка совпадает с машинной на {likeness:.0%}", flush=True)
             continue
 
-        excerpt = output / "audio" / f"{identifier}.wav"
         if not excerpt.exists():
             cut(source_audio, excerpt, start, end)
         (output / f"{identifier}.reference.txt").write_text(reference + "\n", encoding="utf-8")
