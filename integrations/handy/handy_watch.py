@@ -84,6 +84,24 @@ def to_clipboard(text: str) -> None:
     subprocess.run(["pbcopy"], input=text.encode("utf-8"), check=True)
 
 
+def from_clipboard() -> str:
+    result = subprocess.run(["pbpaste"], capture_output=True, check=False)
+    return result.stdout.decode("utf-8", "replace")
+
+
+def refresh_clipboard(pasted: str, final: str) -> bool:
+    """Меняет быструю версию в буфере на итог, если её ещё никто не сменил.
+
+    Быстрая версия — текст одной GigaAM с точными алиасами словаря; названия,
+    которые верно написала только проверяющая («Bitrik4» → Битрикс24), в неё
+    не попадают (2026-10-05). Скопированное поверх за время прогона не трогаем.
+    """
+    if not final or final == pasted or from_clipboard().strip() != pasted:
+        return False
+    to_clipboard(final)
+    return True
+
+
 def early_text_path(out: Path) -> Path:
     # Рядом с каталогом результата, а не внутри: каталог скилл создаёт сам и
     # отказывается писать в непустой.
@@ -153,12 +171,14 @@ def process(wav: Path, args: argparse.Namespace) -> str:
 def run_job(wav: Path, out: Path, seconds: float, args: argparse.Namespace) -> str:
     started = time.monotonic()
     early = early_text_path(out)
+    pasted = None
     with tempfile.TemporaryFile() as sink:
         job = transcribe(wav, out, early, args, sink)
         if wait_for_text(job, early):
             text_ready = time.monotonic() - started
             if args.clipboard:
-                to_clipboard(early.read_text(encoding="utf-8").strip())
+                pasted = early.read_text(encoding="utf-8").strip()
+                to_clipboard(pasted)
             # Число спорных мест в уведомлении не нужно: свою диктовку никто не
             # переслушивает, а спорное агент уточнит вопросом, если от него
             # что-то зависит.
@@ -175,6 +195,9 @@ def run_job(wav: Path, out: Path, seconds: float, args: argparse.Namespace) -> s
                 notify("Handy → transcriber", f"Не вышло расшифровать {wav.name}, подробности в логе")
             return f"failed rc={job.returncode}"
     log(f"{wav.name}: проверка и словарь готовы за {elapsed:.0f} с")
+    if pasted is not None and refresh_clipboard(pasted, early.read_text(encoding="utf-8").strip()):
+        notify("Расшифровка уточнена", "Названия сверены с проверяющей — итог в буфере")
+        log(f"{wav.name}: итог заменил быструю версию в буфере")
     return f"done {out.name}"
 
 
