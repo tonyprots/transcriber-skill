@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import plistlib
 import subprocess
 import sys
@@ -79,8 +78,8 @@ def report(wav: Path, out: Path, how: str, *, clipboard: bool = False) -> int:
     readable = out / "readable.md"
     if readable.exists():
         print(f"# полный набор: {out} (readable.md, review-needed.md)")
-        # Текст ниже — от основной модели, до проверяющей. Термины, которые
-        # она поправила по словарю, есть только в readable.md.
+        # С полным набором файл текста уже итоговый: transcriber перезаписал
+        # его текстом readable.md, со словарём и правками проверяющей.
         try:
             audit = json.loads((out / "glossary-audit.json").read_text(encoding="utf-8"))
         except (FileNotFoundError, ValueError):
@@ -91,7 +90,7 @@ def report(wav: Path, out: Path, how: str, *, clipboard: bool = False) -> int:
             if item.get("rule") == "verifier_canonical"
         ]
         if taken:
-            print(f"# в readable.md поправлено по проверяющей: {', '.join(taken)}")
+            print(f"# поправлено по проверяющей: {', '.join(taken)}")
         # Названия, которые основная модель уронила, а проверяющая услышала:
         # в текст они не вставлены, но без них фраза может потерять адресата.
         try:

@@ -245,7 +245,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help=(
             "Записать сюда читаемый текст сразу после основной модели, не дожидаясь "
-            "проверяющей: она текст не меняет и досчитывается ради очереди и словаря"
+            "проверяющей; в конце прогона файл перезаписывается итоговым текстом"
         ),
     )
     parser.add_argument(
@@ -1608,6 +1608,12 @@ def _transcribe(
                 diarization_output = replace(
                     diarization, turns=_shift_all(diarization.turns, offset)
                 )
+        if args.early_text is not None:
+            # Ранний текст уже в буфере; файл теперь отдаёт итог — со словарём
+            # и правками проверяющей. Иначе агент, пришедший к готовой записи,
+            # читал бы версию одной основной модели. До `write_bundle`: кто
+            # ждёт readable.md, находит и текст уже итоговым.
+            write_plain_text(args.early_text, readable_segments)
         result = write_bundle(
             output,
             media=media,

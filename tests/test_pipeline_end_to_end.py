@@ -493,3 +493,44 @@ def test_russian_store_does_not_touch_english_route(
     assert manifest["glossary"]["store"] == str(tmp_path / "glossary.en.yaml")
     assert manifest["glossary"]["learning"] is True
     assert russian_store.read_text(encoding="utf-8") == before
+
+
+@requires_speech
+def test_early_text_is_replaced_by_final_text(tmp_path: Path, spoken_audio: Path, monkeypatch) -> None:
+    """Ранний текст уходит в буфер, а файл к концу прогона отдаёт итог readable.md.
+
+    Агент, пришедший к готовой записи Handy, читает этот файл: без перезаписи он
+    получал бы версию одной основной модели, без словаря и правок проверяющей.
+    """
+    monkeypatch.setattr(cli, "run_isolated_backend", fake_backend)
+    writes: list[str] = []
+    original = cli.write_plain_text
+
+    def recording(path: Path, segments) -> None:
+        original(path, segments)
+        writes.append(path.read_text(encoding="utf-8"))
+
+    monkeypatch.setattr(cli, "write_plain_text", recording)
+    output = tmp_path / "result"
+    early = tmp_path / "result.txt"
+
+    cli.run(
+        cli.build_parser().parse_args(
+            [
+                str(spoken_audio),
+                "--output", str(output),
+                "--mode", "fast",
+                "--language", "ru",
+                "--early-text", str(early),
+                "--no-cache",
+                "--quiet",
+            ]
+        )
+    )
+
+    assert len(writes) == 2
+    readable = (output / "readable.md").read_text(encoding="utf-8")
+    final = early.read_text(encoding="utf-8").strip()
+    assert final and final == writes[-1].strip()
+    for paragraph in final.split("\n\n"):
+        assert paragraph in readable
