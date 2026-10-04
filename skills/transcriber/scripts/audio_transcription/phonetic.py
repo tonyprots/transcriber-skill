@@ -85,6 +85,16 @@ def _fold(spoken: str) -> str:
     return re.sub(r"(.)\1+", r"\1", folded)
 
 
+def _tokens(text: str) -> list[str]:
+    """Куски одной письменности: латиница, кириллица и цифры порознь.
+
+    Слитный токен «Bitrik4» не проходил проверку «только латиница» и
+    оставался латиницей, поэтому с «Битрикс24» сходство выходило 0,11
+    вместо 0,7: GigaAM пишет названия с цифрами именно так (2026-10-04).
+    """
+    return re.findall(r"[A-Za-z]+|[А-Яа-яЁё]+|[0-9]+", text)
+
+
 def phonetic_codes(text: str) -> tuple[str, ...]:
     """Все правдоподобные чтения строки.
 
@@ -94,7 +104,7 @@ def phonetic_codes(text: str) -> tuple[str, ...]:
     коды считаются для обоих чтений, а сравнение берёт лучшее совпадение.
     """
     text = unicodedata.normalize("NFKC", text)
-    tokens = re.findall(r"[A-Za-zА-Яа-яЁё0-9]+", text)
+    tokens = _tokens(text)
     as_word: list[str] = []
     as_letters: list[str] = []
     for token in tokens:
@@ -111,7 +121,7 @@ def phonetic_codes(text: str) -> tuple[str, ...]:
 def phonetic_code(text: str) -> str:
     """Основное чтение строки: латиница как слово, если это не аббревиатура."""
     text = unicodedata.normalize("NFKC", text)
-    tokens = re.findall(r"[A-Za-zА-Яа-яЁё0-9]+", text)
+    tokens = _tokens(text)
     pieces: list[str] = []
     for token in tokens:
         if re.fullmatch(r"[A-Za-z]+", token):

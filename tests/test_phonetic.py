@@ -81,6 +81,15 @@ def test_latin_abbreviation_is_read_by_letter_names() -> None:
     assert phonetic_similarity("тиджистат", "TGStat") >= 0.75
 
 
+def test_latin_word_with_digits_is_read_as_latin() -> None:
+    """«Bitrik4» у GigaAM — латиница с цифрой, а не нечитаемый токен.
+
+    Слитный токен оставался латиницей, и сходство с «Битрикс24» было 0,11:
+    правило «канон у проверяющей» молчало при верном «Битрикс24» у Whisper.
+    """
+    assert phonetic_similarity("Bitrik4", "Битрикс24") >= 0.6
+
+
 def test_voicing_and_unstressed_vowels_are_folded() -> None:
     """Оглушение и редукция — главные источники расхождений у русской ASR."""
     assert phonetic_code("код") == phonetic_code("кот")
