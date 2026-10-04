@@ -360,3 +360,24 @@ def test_owner_can_switch_off_automatic_promotion(tmp_path: Path) -> None:
     document = load_document(store)
     assert document["auto_promote"] is False, "настройка не должна теряться при перезаписи"
     assert "человек" in document["entries"][0]["learned"]["held_back"]
+
+
+def test_store_path_splits_by_language(monkeypatch, tmp_path: Path) -> None:
+    """Русский словарь остаётся на старом месте, остальные языки — рядом с суффиксом."""
+    from audio_transcription import glossary_store
+
+    monkeypatch.setattr(glossary_store, "DEFAULT_STORE", tmp_path / "glossary.yaml")
+    monkeypatch.setattr(glossary_store, "PROFILES_DIR", tmp_path / "glossaries")
+    monkeypatch.delenv("TRANSCRIBER_GLOSSARY_STORE", raising=False)
+    monkeypatch.delenv("TRANSCRIBER_GLOSSARY_PROFILE", raising=False)
+    assert glossary_store.store_path(language="ru") == tmp_path / "glossary.yaml"
+    assert glossary_store.store_path() == tmp_path / "glossary.yaml"
+    assert glossary_store.store_path(language="en") == tmp_path / "glossary.en.yaml"
+    assert (
+        glossary_store.store_path(profile="work", language="en")
+        == tmp_path / "glossaries" / "work.en.yaml"
+    )
+    monkeypatch.setenv("TRANSCRIBER_GLOSSARY_STORE", str(tmp_path / "custom.yaml"))
+    assert glossary_store.store_path(language="en") == tmp_path / "custom.en.yaml"
+    # Явный путь задан на один прогон и значит ровно этот файл.
+    assert glossary_store.store_path(tmp_path / "x.yaml", language="en") == tmp_path / "x.yaml"

@@ -422,3 +422,74 @@ def test_run_prunes_old_cache_and_tags_new_entries(tmp_path: Path, spoken_audio:
     swept = cache.forget(cache_dir, manifest["source"]["sha256"])
     assert swept.files >= 2  # основная и проверяющая
     assert cache.cache_stats(cache_dir)["files"] == 0
+
+
+ENGLISH_PRIMARY = "we launched Chachapiti with Astra today"
+ENGLISH_VERIFIER = "we launched GPT with Astra today"
+
+
+def fake_english_backend(backend: str, chunks, language: str, work_dir: Path, **kwargs) -> Hypothesis:
+    """Английский маршрут: Whisper основная, Parakeet через тот же onnx-воркер."""
+    text = ENGLISH_PRIMARY if "whisper" in backend else ENGLISH_VERIFIER
+    chunks = list(chunks)
+    segments = [Segment(chunk.start, chunk.end, text) for chunk in chunks]
+    metadata = {
+        "chunks": [
+            {"sequence": chunk.sequence, "start": chunk.start, "end": chunk.end, "text": text}
+            for chunk in chunks
+        ]
+    }
+    return Hypothesis(f"{backend}-fake", language, len(chunks), segments, metadata=metadata)
+
+
+@requires_speech
+def test_russian_store_does_not_touch_english_route(
+    tmp_path: Path, spoken_audio: Path, monkeypatch
+) -> None:
+    """Подкаст Lenny 2026-10-04: «Astra» → «Астра», «Chachapiti» → «GPT».
+
+    Авто-словарь копится на русской речи: канон в нём — русское написание,
+    алиасы — ослышки GigaAM. На английской записи он не читается вовсе, у неё
+    свой файл рядом.
+    """
+    monkeypatch.setattr(cli, "run_isolated_backend", fake_english_backend)
+    russian_store = tmp_path / "glossary.yaml"
+    monkeypatch.setenv("TRANSCRIBER_GLOSSARY_STORE", str(russian_store))
+    russian_store.write_text(
+        "version: 1\nentries:\n"
+        "  - canonical: Астра\n    aliases: [Astra, астра]\n    auto_apply: true\n"
+        "  - canonical: GPT\n    aliases: [джипити, gpt]\n    auto_apply: true\n",
+        encoding="utf-8",
+    )
+    before = russian_store.read_text(encoding="utf-8")
+    output = tmp_path / "result"
+
+    cli.run(
+        cli.build_parser().parse_args(
+            [
+                str(spoken_audio),
+                "--output",
+                str(output),
+                "--mode",
+                "max",
+                "--language",
+                "en",
+                "--no-cache",
+                "--quiet",
+                "--verifier-window-seconds",
+                "0",
+            ]
+        )
+    )
+
+    readable = (output / "readable.md").read_text(encoding="utf-8")
+    assert "Астра" not in readable and "Astra" in readable
+    assert "Chachapiti" in readable
+    review = (output / "review-needed.md").read_text(encoding="utf-8")
+    assert "Взято у проверяющей" not in review
+    audit = json.loads((output / "glossary-audit.json").read_text(encoding="utf-8"))
+    assert audit["corrections"] == []
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["glossary"]["store"] == str(tmp_path / "glossary.en.yaml")
+    assert manifest["glossary"]["learning"] is False
+    assert russian_store.read_text(encoding="utf-8") == before

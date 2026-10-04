@@ -161,23 +161,49 @@ def profile_path(name: str) -> Path:
     return PROFILES_DIR / f"{name}.yaml"
 
 
-def store_path(explicit: str | Path | None = None, profile: str | None = None) -> Path:
+# Язык, на котором словарь копился с самого начала: его файл остаётся без
+# суффикса, чтобы не переезжать.
+STORE_BASE_LANGUAGE = "ru"
+
+
+def for_language(path: Path, language: str | None) -> Path:
+    """Файл словаря для языка записи: `glossary.yaml` → `glossary.en.yaml`.
+
+    Словарь — свойство языка, а не владельца. Алиасы в нём — ослышки
+    конкретной модели в конкретной речи («джипити» у GigaAM), канон —
+    написание в тексте на этом языке («Астра»). На английской записи такой
+    словарь превращал «Astra» в «Астра» и «Chachapiti» в голое «GPT»
+    (2026-10-04). Фильтр по алфавиту канона второй случай не ловит: «GPT» —
+    латиница, но ошибка та же, поэтому разделены файлы, а не записи.
+    """
+    if not language or language == STORE_BASE_LANGUAGE:
+        return path
+    return path.with_name(f"{path.stem}.{language}{path.suffix}")
+
+
+def store_path(
+    explicit: str | Path | None = None,
+    profile: str | None = None,
+    language: str | None = None,
+) -> Path:
     """Где лежит авто-словарь.
 
     Порядок: явный путь → профиль → TRANSCRIBER_GLOSSARY_STORE →
-    TRANSCRIBER_GLOSSARY_PROFILE → общий домашний.
+    TRANSCRIBER_GLOSSARY_PROFILE → общий домашний. Всё, кроме явного пути,
+    разводится по языку записи (`for_language`): явный путь задаётся на один
+    прогон и значит ровно этот файл.
     """
     if explicit:
         return Path(explicit).expanduser()
     if profile:
-        return profile_path(profile)
+        return for_language(profile_path(profile), language)
     from_env = os.environ.get("TRANSCRIBER_GLOSSARY_STORE")
     if from_env:
-        return Path(from_env).expanduser()
+        return for_language(Path(from_env).expanduser(), language)
     profile_env = os.environ.get("TRANSCRIBER_GLOSSARY_PROFILE")
     if profile_env:
-        return profile_path(profile_env.strip())
-    return DEFAULT_STORE
+        return for_language(profile_path(profile_env.strip()), language)
+    return for_language(DEFAULT_STORE, language)
 
 
 def load_document(path: Path) -> dict[str, Any]:

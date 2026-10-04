@@ -157,8 +157,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help=(
             "Где лежит словарь, который скилл ведёт сам "
-            "(по умолчанию ~/.transcriber/glossary.yaml, можно задать "
-            "переменной TRANSCRIBER_GLOSSARY_STORE)"
+            "(по умолчанию ~/.transcriber/glossary.yaml для русского и "
+            "glossary.<язык>.yaml для остальных; можно задать переменной "
+            "TRANSCRIBER_GLOSSARY_STORE — она тоже разводится по языку, флаг нет)"
         ),
     )
     parser.add_argument(
@@ -1316,7 +1317,7 @@ def _transcribe(
         learned_path = (
             None
             if args.no_glossary
-            else store_path(args.glossary_store, args.glossary_profile)
+            else store_path(args.glossary_store, args.glossary_profile, route.language)
         )
         glossary = merge_glossaries(
             curated, [] if learned_path is None else entries_of(load_document(learned_path))
@@ -1532,8 +1533,8 @@ def _transcribe(
         learned_report = None
         # Отбор кандидатов ищет латиницу против кириллицы, то есть устроен под
         # русскую речь. На английской записи латиница с обеих сторон, и в
-        # словарь шли служебные слова («the / tha», «and / an»). Читать словарь
-        # чужой маршрут по-прежнему может, пополнять — нет.
+        # словарь шли служебные слова («the / tha», «and / an»). Свой словарь
+        # у другого языка отдельный (`store_path`), но пополнять его некому.
         learns_from_route = route.language == "ru"
         if learned_path is not None and not args.no_learn and not learns_from_route:
             report.stage(
@@ -1638,7 +1639,7 @@ def _transcribe(
             glossary_sources={
                 "curated": str(args.glossary) if args.glossary and not args.no_glossary else None,
                 "store": str(learned_path) if learned_path else None,
-                "learning": learned_path is not None and not args.no_learn,
+                "learning": learned_path is not None and not args.no_learn and learns_from_route,
             },
             model_revisions=loaded_revisions(
                 revisions_for_models([SILERO_VAD.model, *used_models]),
