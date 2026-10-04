@@ -112,3 +112,23 @@ def test_merged_aliases_reach_the_rendered_yaml() -> None:
     (entry,) = document["entries"]
     assert entry["canonical"] == "Threads"
     assert "treds" in entry["aliases"] and "трэц" in entry["aliases"]
+
+
+def test_cli_takes_language_from_manifest_and_refuses_mixed(tmp_path: Path) -> None:
+    def result(name: str, language: str, heard: str, verifier: str) -> Path:
+        directory = tmp_path / name
+        directory.mkdir()
+        item = {"start": 1.0, "end": 3.0, "comparison_text": verifier,
+                "differing_tokens": [f"{heard} / {verifier}"]}
+        (directory / "segments.json").write_text(json.dumps({"review_items": [item]}), encoding="utf-8")
+        (directory / "manifest.json").write_text(
+            json.dumps({"language_route": {"language": language}}), encoding="utf-8"
+        )
+        return directory
+
+    english = result("en", "en", "Chatsubiti", "ChatGPT")
+    output = tmp_path / "out.yaml"
+    assert main([str(english), "--output", str(output)]) == 0
+    assert yaml.safe_load(output.read_text(encoding="utf-8"))["entries"][0]["canonical"] == "ChatGPT"
+    russian = result("ru", "ru", "нотион", "Notion")
+    assert main([str(english), str(russian)]) == 2

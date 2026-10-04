@@ -491,5 +491,5 @@ def test_russian_store_does_not_touch_english_route(
     assert audit["corrections"] == []
     manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["glossary"]["store"] == str(tmp_path / "glossary.en.yaml")
-    assert manifest["glossary"]["learning"] is False
+    assert manifest["glossary"]["learning"] is True
     assert russian_store.read_text(encoding="utf-8") == before

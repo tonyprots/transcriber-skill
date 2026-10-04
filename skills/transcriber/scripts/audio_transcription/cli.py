@@ -70,7 +70,7 @@ from .glossary_store import (
     update_from_run,
 )
 from .fillers import strip_filler_segments
-from .mining import undisputed_words
+from .mining import LEARNING_LANGUAGES, undisputed_words
 from .models import AudioChunk, Diarization, Hypothesis, ReviewItem, Section
 from .packing import PackedWindow, build_packed_windows, unpack_hypothesis
 from .isolated import run_isolated_backend, run_isolated_diarization
@@ -1531,15 +1531,13 @@ def _transcribe(
         review_items.sort(key=lambda item: (item.start, item.end, item.reason))
         readable_input, fillers_removed = strip_filler_segments(readable.segments)
         learned_report = None
-        # Отбор кандидатов ищет латиницу против кириллицы, то есть устроен под
-        # русскую речь. На английской записи латиница с обеих сторон, и в
-        # словарь шли служебные слова («the / tha», «and / an»). Свой словарь
-        # у другого языка отдельный (`store_path`), но пополнять его некому.
-        learns_from_route = route.language == "ru"
+        # Отбор умеет отличать термин от ослышки на русском и английском
+        # (`mining.collect_candidates`); у каждого языка свой файл словаря.
+        learns_from_route = route.language in LEARNING_LANGUAGES
         if learned_path is not None and not args.no_learn and not learns_from_route:
             report.stage(
-                "Словарь не пополняется: отбор настроен на русский, "
-                f"а маршрут {route.language}"
+                f"Словарь не пополняется: для языка {route.language} нет "
+                "признака термина (есть для ru и en)"
             )
         if learned_path is not None and not args.no_learn and learns_from_route:
             try:
@@ -1560,6 +1558,7 @@ def _transcribe(
                     source=record_fingerprint(
                         media.sha256, remote.url if remote is not None else None
                     ),
+                    language=route.language,
                 )
                 # Порядок важен: словарь пополняется до применения, поэтому
                 # термин, добравший порог на этой записи, правит уже её текст,

@@ -1,9 +1,10 @@
 """Отбор кандидатов в словарь из очереди проверки.
 
 Кандидат — расхождение двух моделей, похожее на термин, а не на случайную
-ослышку. Признаков два: латиница с одной стороны и кириллица с другой (так
-выглядят названия продуктов и англицизмы) либо одно и то же кириллическое
-расхождение в нескольких окнах.
+ослышку. На русском признаков два: латиница с одной стороны и кириллица с
+другой (так выглядят названия продуктов и англицизмы) либо одно и то же
+кириллическое расхождение в нескольких окнах. На английском латиница с обеих
+сторон, и признак — форма слова у проверяющей (`latin_term_shape`).
 
 Модуль общий для двух потребителей: `scripts/glossary_candidates.py` (ручной
 цикл — показать человеку и дать решить) и `glossary_store` (автоматическое
@@ -80,15 +81,77 @@ def term_shaped(heard: str, verifier: str) -> bool:
     )
 
 
+# Языки, для которых отбор умеет отличать термин от ослышки. Русский ищет
+# латиницу против кириллицы; английский — форму термина (`latin_term_shape`).
+LEARNING_LANGUAGES = frozenset({"ru", "en"})
+
+# Насколько ослышка обязана звучать как термин, чтобы стать кандидатом на
+# английском маршруте. На русском такой отсечки нет: там пару делает
+# кандидатом уже разница алфавитов. Здесь латиница с обеих сторон, и без
+# звучания в словарь шли «that / Yeah» и «What / But» (0,33), а нужные пары
+# лежат от 0,60 («opening» → OpenAI, «Chatsubiti» → ChatGPT) до 1,0.
+# Та же граница, что у включения автозамены (`PROMOTE_MIN_PHONETIC`).
+LATIN_MIN_PHONETIC = 0.6
+
+_UPPER_INSIDE = re.compile(r"\w[A-Z]")
+_DIGIT = re.compile(r"\d")
+
+
+def latin_term_shape(word: str) -> bool:
+    """Записано ли слово как название, а не как обычное слово языка.
+
+    Признак на английском — форма: заглавная внутри слова или аббревиатура
+    (`ChatGPT`, `OpenAI`, `SaaS`, `SCIM`), буквы вперемешку с цифрами
+    (`GPT4`). Заглавная в начале не в счёт — так пишется любое слово в начале
+    фразы («What / But»). Модели пишут название в такой форме, только когда
+    узнали его; ослышка того же места выглядит обычным словом
+    («Chatsubiti», «opening»).
+    """
+    letters = sum(char.isalpha() for char in word)
+    if letters < 2:
+        return False
+    return bool(_UPPER_INSIDE.search(word) or _DIGIT.search(word))
+
+
+def _latin_candidate(heard: str, verifier: str) -> tuple[bool, bool]:
+    """Английская пара: (кандидат ли, есть ли у неё готовое написание).
+
+    Написание берётся только у проверяющей, как и на русском: основная и
+    есть текст, и если термин написала она, исправлять в этом месте нечего.
+    Обе стороны в форме термина («ChatGPT / ChatGBT») — спор о написании, где
+    правоту не установить; такая пара не берётся вовсе. Обе с заглавной, но
+    без формы термина («Debo / Deebo») — похоже на имя: кандидат без
+    написания, его назовёт человек, если место повторится.
+    """
+    if _CYRILLIC.search(heard) or _CYRILLIC.search(verifier):
+        return False, False
+    if phonetic_similarity(heard, verifier) < LATIN_MIN_PHONETIC:
+        return False, False
+    heard_term, verifier_term = latin_term_shape(heard), latin_term_shape(verifier)
+    if verifier_term and not heard_term:
+        return True, True
+    if heard_term or verifier_term:
+        return False, False
+    return heard[:1].isupper() and verifier[:1].isupper(), False
+
+
 def collect_candidates(
-    review_items: list[dict[str, Any]], known: set[str], min_count: int = 3
+    review_items: list[dict[str, Any]],
+    known: set[str],
+    min_count: int = 3,
+    language: str = "ru",
 ) -> list[dict]:
     """Кандидаты из очереди проверки одного или нескольких прогонов.
 
     `review_items` — элементы `review_items` из `segments.json` (или их же
     словари прямо из пайплайна), `known` — нормализованные канон и алиасы уже
-    известных записей: их незачем предлагать заново.
+    известных записей: их незачем предлагать заново. `language` выбирает
+    признак термина: латиница против кириллицы на русском, форма слова на
+    английском (`_latin_candidate`).
     """
+    if language not in LEARNING_LANGUAGES:
+        return []
+    latin_route = language != "ru"
     seen: "OrderedDict[tuple[str, str], dict]" = OrderedDict()
     for item in review_items:
         for pair in item.get("differing_tokens", []):
@@ -107,10 +170,18 @@ def collect_candidates(
                     continue
                 if re.sub(r"[\s-]", "", heard) == re.sub(r"[\s-]", "", verifier):
                     continue
-                term = term_shaped(heard, verifier)
-                verifier_latin = bool(_LATIN.search(verifier)) and not _CYRILLIC.search(
-                    verifier
-                )
+                if latin_route:
+                    if re.sub(r"\W", "", heard).casefold() == re.sub(r"\W", "", verifier).casefold():
+                        continue  # «U.S / US», «a.m / AM» — запись, а не слово
+                    candidate, term = _latin_candidate(heard, verifier)
+                    if not candidate:
+                        continue
+                    verifier_latin = term
+                else:
+                    term = term_shaped(heard, verifier)
+                    verifier_latin = bool(_LATIN.search(verifier)) and not _CYRILLIC.search(
+                        verifier
+                    )
                 key = (heard, verifier)
                 entry = seen.setdefault(
                     key,

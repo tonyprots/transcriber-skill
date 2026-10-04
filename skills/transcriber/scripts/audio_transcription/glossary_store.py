@@ -252,10 +252,21 @@ def _alias_letters(alias: str) -> int:
     return sum(1 for char in alias if char.isalpha())
 
 
-def _alias_problem(alias: str, canonical: str, blocked: set[str]) -> str | None:
-    """Почему этот вариант нельзя заменять молча. None — можно."""
+def _alias_problem(
+    alias: str, canonical: str, blocked: set[str], language: str = "ru"
+) -> str | None:
+    """Почему этот вариант нельзя заменять молча. None — можно.
+
+    На латинском маршруте вариант строчными модель записала как обычное
+    слово языка («opening» против OpenAI, «codecs» против Codex): литеральная
+    замена переписала бы и само слово там, где оно сказано. Такой вариант
+    подсвечивается, но не заменяется. На русском этого признака нет: ослышка
+    там всегда кириллицей и строчными.
+    """
     if _alias_letters(alias) < PROMOTE_MIN_ALIAS_LETTERS:
         return "слишком короткий вариант"
+    if language != STORE_BASE_LANGUAGE and alias == alias.lower():
+        return "модель записала вариант обычным словом"
     if normalize_text(alias) in blocked:
         return "встречается как обычное слово"
     score = phonetic_similarity(alias, canonical)
@@ -265,7 +276,7 @@ def _alias_problem(alias: str, canonical: str, blocked: set[str]) -> str | None:
 
 
 def _hold_unsafe_aliases(
-    entry: dict[str, Any], blocked: set[str], report: LearnReport
+    entry: dict[str, Any], blocked: set[str], report: LearnReport, language: str = "ru"
 ) -> None:
     """Держит автозамену записи на тех же тормозах, что и её включение.
 
@@ -280,7 +291,7 @@ def _hold_unsafe_aliases(
     canonical = str(entry["canonical"])
     safe, held = [], [str(item) for item in learned.get("held_aliases", [])]
     for alias in entry.get("aliases", []):
-        if _alias_problem(str(alias), canonical, blocked):
+        if _alias_problem(str(alias), canonical, blocked, language):
             if alias not in held:
                 held.append(alias)
         else:
@@ -296,7 +307,9 @@ def _hold_unsafe_aliases(
         report.demoted.append(canonical)
 
 
-def _promotable(entry: dict[str, Any], blocked: set[str]) -> tuple[bool, str | None]:
+def _promotable(
+    entry: dict[str, Any], blocked: set[str], language: str = "ru"
+) -> tuple[bool, str | None]:
     """Пора ли записи начать править текст. Вторым значением — что помешало."""
     learned = entry.get("learned", {})
     if not entry.get("canonical"):
@@ -312,6 +325,10 @@ def _promotable(entry: dict[str, Any], blocked: set[str]) -> tuple[bool, str | N
     short = [alias for alias in aliases if _alias_letters(alias) < PROMOTE_MIN_ALIAS_LETTERS]
     if short:
         return False, f"слишком короткий вариант: {', '.join(short)}"
+    if language != STORE_BASE_LANGUAGE:
+        plain = [alias for alias in aliases if alias == alias.lower()]
+        if plain:
+            return False, f"модель записала вариант обычным словом: {', '.join(plain)}"
     collisions = [alias for alias in aliases if normalize_text(alias) in blocked]
     if collisions or learned.get("seen_as_word"):
         # Слово встретилось там, где обе модели согласны, — значит это обычное
@@ -349,6 +366,7 @@ def learn(
     blocked: set[str] | None = None,
     source: str | None = None,
     today: date | None = None,
+    language: str = "ru",
 ) -> tuple[dict[str, Any], LearnReport]:
     """Вносит кандидатов прогона в документ словаря. Ввода-вывода не делает."""
     today = today or date.today()
@@ -479,9 +497,9 @@ def learn(
         if _edited_by_hand(entry):
             continue
         if entry.get("auto_apply"):
-            _hold_unsafe_aliases(entry, blocked, report)
+            _hold_unsafe_aliases(entry, blocked, report, language)
             continue
-        ready, reason = _promotable(entry, blocked)
+        ready, reason = _promotable(entry, blocked, language)
         if ready and document.get("auto_promote") is False:
             # Хозяин словаря включает замены сам: доказательства копятся, но
             # текст не правится, пока он не поставит auto_apply руками.
@@ -689,6 +707,7 @@ def update_from_run(
     curated: set[str] | None = None,
     source: str | None = None,
     today: date | None = None,
+    language: str = "ru",
 ) -> tuple[list[GlossaryEntry], LearnReport]:
     """Полный цикл после прогона: снять кандидатов, дополнить словарь, сохранить.
 
@@ -701,9 +720,9 @@ def update_from_run(
     когда-нибудь начнёт править текст.
     """
     document = load_document(path)
-    candidates = collect_candidates(review_items, curated or set())
+    candidates = collect_candidates(review_items, curated or set(), language=language)
     document, report = learn(
-        document, candidates, blocked=blocked, source=source, today=today
+        document, candidates, blocked=blocked, source=source, today=today, language=language
     )
     report.path = str(path)
     save_document(path, document)

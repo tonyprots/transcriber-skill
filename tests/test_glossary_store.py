@@ -381,3 +381,53 @@ def test_store_path_splits_by_language(monkeypatch, tmp_path: Path) -> None:
     assert glossary_store.store_path(language="en") == tmp_path / "custom.en.yaml"
     # Явный путь задан на один прогон и значит ровно этот файл.
     assert glossary_store.store_path(tmp_path / "x.yaml", language="en") == tmp_path / "x.yaml"
+
+
+def test_english_route_learns_term_shape_from_the_verifier(tmp_path: Path) -> None:
+    """Английский: латиница с обеих сторон, термин узнаётся по форме у проверяющей.
+
+    Пары взяты из подкастов Lenny и Every (2026-09-30, 2026-10-04). До
+    0.22 английский маршрут словарь не пополнял: русский признак «латиница
+    против кириллицы» давал там «the / tha» и «and / an».
+    """
+    store = tmp_path / "glossary.en.yaml"
+    junk = [
+        _item("that", "Yeah"),  # не звучит одинаково
+        _item("tha", "that"),  # обычные слова, формы термина нет
+        _item("ChatGPT", "ChatGBT"),  # обе в форме термина: спор о написании
+        _item("U.S", "US"),  # одна запись разными знаками
+    ]
+    for source in ("rec1", "rec2", "rec3"):
+        entries, _ = update_from_run(
+            store,
+            [*_run("Chatsubiti", "ChatGPT"), *_run("opening", "OpenAI"), *junk],
+            source=source,
+            language="en",
+        )
+    by_canonical = {entry.canonical: entry for entry in entries}
+    assert set(by_canonical) == {"ChatGPT", "OpenAI"}
+    # Три записи — порог пройден, вариант записан как название.
+    assert by_canonical["ChatGPT"].auto_apply
+    # «opening» модель записала обычным словом: замена переписала бы и его.
+    assert not by_canonical["OpenAI"].auto_apply
+    document = load_document(store)
+    held = next(item for item in document["entries"] if item["canonical"] == "OpenAI")
+    assert "обычным словом" in held["learned"]["held_back"]
+
+
+def test_english_names_wait_for_a_human(tmp_path: Path) -> None:
+    """Обе стороны с заглавной и звучат одинаково — похоже на имя, канон называет человек."""
+    store = tmp_path / "glossary.en.yaml"
+    items = [_item("Gonzales", "Gonzalez", start) for start in (1.0, 20.0, 40.0)]
+    entries, report = update_from_run(store, items, source="rec1", language="en")
+    assert entries == []
+    assert load_document(store)["pending"][0]["aliases"] == ["Gonzales", "Gonzalez"]
+    # Начало фразы — тоже заглавная, но такие пары не звучат одинаково.
+    update_from_run(store, [_item("What", "But", s) for s in (1.0, 2.0, 3.0)], source="rec2", language="en")
+    assert len(load_document(store)["pending"]) == 1
+
+
+def test_unknown_language_learns_nothing(tmp_path: Path) -> None:
+    store = tmp_path / "glossary.de.yaml"
+    entries, _ = update_from_run(store, _run("Chatsubiti", "ChatGPT"), source="rec1", language="de")
+    assert entries == []

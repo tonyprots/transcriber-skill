@@ -38,7 +38,7 @@ from audio_transcription.mining import collect_candidates  # noqa: E402
 from audio_transcription.reconcile import normalize_text  # noqa: E402
 
 
-def render_yaml(candidates: list[dict]) -> str:
+def render_yaml(candidates: list[dict], language: str = "ru") -> str:
     # Готовая запись получается, только когда каноническое написание кто-то
     # действительно произнёс правильно. Если обе модели перевирают термин,
     # запись собрать не из чего — такие места идут отдельным списком, и их
@@ -57,7 +57,7 @@ def render_yaml(candidates: list[dict]) -> str:
         lines.append("  []")
     for entry in ready:
         why = (
-            "латиница у проверяющей модели"
+            ("латиница у проверяющей модели" if language == "ru" else "форма термина у проверяющей модели")
             if entry["latin"]
             else f"повторилось в {entry['count']} окнах"
         )
@@ -100,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     review_items = []
+    languages: set[str] = set()
     for directory in args.output_dirs:
         path = directory / "segments.json"
         if not path.exists():
@@ -107,11 +108,30 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         payload = json.loads(path.read_text(encoding="utf-8"))
         review_items.extend(payload.get("review_items", []))
+        # Признак термина у каждого языка свой (`mining.collect_candidates`).
+        # Нет манифеста — результат старше маршрутов, тогда он русский.
+        manifest = directory / "manifest.json"
+        route = (
+            json.loads(manifest.read_text(encoding="utf-8")).get("language_route") or {}
+            if manifest.exists()
+            else {}
+        )
+        languages.add(str(route.get("language") or "ru"))
+    if len(languages) > 1:
+        print(
+            f"Ошибка: записи на разных языках ({', '.join(sorted(languages))}) — "
+            "у каждого языка свой словарь, запускайте по отдельности",
+            file=sys.stderr,
+        )
+        return 2
+    language = languages.pop()
     known: set[str] = set()
     for entry in load_glossary(args.glossary):
         known.add(normalize_text(entry.canonical))
         known.update(normalize_text(alias) for alias in entry.aliases)
-    text = render_yaml(collect_candidates(review_items, known, args.min_count))
+    text = render_yaml(
+        collect_candidates(review_items, known, args.min_count, language=language), language
+    )
     if args.output:
         args.output.write_text(text, encoding="utf-8")
         # Закомментированные места тоже содержат «- canonical:», но записями
