@@ -242,6 +242,54 @@ def test_rate_limit_is_retried_then_reported(yt_dlp, monkeypatch) -> None:
     assert len(calls) == 3 and pauses == list(fetching._RETRY_PAUSES_SECONDS)
 
 
+def _scripted_yt_dlp(monkeypatch, results: list[tuple[int, str]]) -> list[list[str]]:
+    """Каждый вызов берёт следующий (returncode, stderr) из списка."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(fetching, "require_yt_dlp", lambda: "yt-dlp")
+    monkeypatch.setattr(fetching, "yt_dlp_status", lambda today=None: {"stale": False})
+
+    def fake_execute(command, **kwargs):
+        returncode, stderr = results[len(calls)]
+        calls.append(command)
+        return CompletedProcess(command, returncode, "", stderr)
+
+    monkeypatch.setattr(fetching, "_execute", fake_execute)
+    return calls
+
+
+_STREAM_403 = "ERROR: unable to download video data: HTTP Error 403: Forbidden"
+
+
+def test_youtube_stream_403_falls_back_to_other_clients(monkeypatch, tmp_path: Path) -> None:
+    """2026-10-04: метаданные отдались, поток visionos ответил 403.
+
+    Повтор идёт свежим извлечением через android и mweb — они отдают ролик
+    360p целиком. Огрызок первой попытки файлом результата не считается.
+    """
+    calls = _scripted_yt_dlp(monkeypatch, [(1, _STREAM_403), (0, "")])
+    (tmp_path / "audio.webm.part").write_bytes(b"x")
+    (tmp_path / "audio.mp4").write_bytes(b"x")
+    path = fetching.fetch_audio("https://youtu.be/MM-C3JqCXBk", tmp_path)
+    assert path.name == "audio.mp4"
+    assert len(calls) == 2 and "--extractor-args" not in calls[0]
+    retry = calls[1]
+    assert retry[retry.index("--extractor-args") + 1] == fetching._YOUTUBE_FALLBACK_CLIENTS
+
+
+def test_stream_403_twice_names_the_network(monkeypatch, tmp_path: Path) -> None:
+    calls = _scripted_yt_dlp(monkeypatch, [(1, _STREAM_403), (1, _STREAM_403)])
+    with pytest.raises(fetching.FetchError, match="VPN"):
+        fetching.fetch_audio("https://www.youtube.com/watch?v=abc", tmp_path)
+    assert len(calls) == 2
+
+
+def test_stream_403_elsewhere_is_not_retried(monkeypatch, tmp_path: Path) -> None:
+    calls = _scripted_yt_dlp(monkeypatch, [(1, _STREAM_403)])
+    with pytest.raises(fetching.FetchError, match="403"):
+        fetching.fetch_audio("https://vkvideo.ru/video-1_2", tmp_path)
+    assert len(calls) == 1
+
+
 def test_other_failures_are_not_retried(yt_dlp, monkeypatch) -> None:
     monkeypatch.setattr(fetching, "_sleep", lambda _: pytest.fail("незачем ждать"))
     calls = yt_dlp(returncode=1, stderr="ERROR: Video unavailable")

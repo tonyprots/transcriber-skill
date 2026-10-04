@@ -45,6 +45,16 @@ _AUTO_NAME = re.compile(r"\bавто|\bauto", re.IGNORECASE)
 _AUDIO_FORMAT = "bestaudio[abr>=64][abr<=96]/bestaudio/best[height<=480]/best"
 _CONCURRENT_FRAGMENTS = "8"
 
+# Отдельную аудиодорожку YouTube отдаёт только клиенту visionos (yt-dlp
+# 2026.08.19, замер 2026-10-04): web, ios и tv не дают форматов, android и
+# mweb — только ролик 360p целиком, втрое тяжелее. Ссылка на поток привязана
+# к IP и к сессии, и изредка отвечает 403 при отданных метаданных: так упал
+# прогон 2026-10-04, а через час та же команда прошла семь раз подряд.
+# Повтор — свежее извлечение другими клиентами; лучше 360p, чем ничего.
+_YOUTUBE_FALLBACK_CLIENTS = "youtube:player_client=android,mweb"
+_STREAM_FORBIDDEN = "HTTP Error 403"
+_PARTIAL_SUFFIXES = {".part", ".ytdl"}
+
 # YouTube отвечает 429 на серию запросов субтитров подряд; через минуту
 # тот же запрос проходит. Паузы короткие: дольше ждать дешевле руками.
 _RETRY_PAUSES_SECONDS = (15.0, 45.0)
@@ -84,6 +94,11 @@ def _identity_params(host: str) -> set[str]:
         if host == domain or host.endswith("." + domain):
             return params
     return set()
+
+
+def _is_youtube(url: str) -> bool:
+    host = (urlsplit(url.strip()).hostname or "").lower()
+    return any(host == domain or host.endswith("." + domain) for domain in ("youtube.com", "youtu.be"))
 
 
 def public_url(url: str) -> str:
@@ -384,20 +399,39 @@ def fetch_audio(url: str, dest_dir: Path) -> Path:
     if yandex_music.track_id(url):
         return yandex_music.download(url, dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
-    _run_yt_dlp(
-        [
-            "-f",
-            _AUDIO_FORMAT,
-            "--concurrent-fragments",
-            _CONCURRENT_FRAGMENTS,
-            "-o",
-            str(dest_dir / "audio.%(ext)s"),
-            url,
-        ],
-        failure=f"yt-dlp не скачал аудио: {public_url(url)}",
-        watch=dest_dir,
+    arguments = [
+        "-f",
+        _AUDIO_FORMAT,
+        "--concurrent-fragments",
+        _CONCURRENT_FRAGMENTS,
+        "-o",
+        str(dest_dir / "audio.%(ext)s"),
+        url,
+    ]
+    failure = f"yt-dlp не скачал аудио: {public_url(url)}"
+    try:
+        _run_yt_dlp(arguments, failure=failure, watch=dest_dir)
+    except FetchError as error:
+        if _STREAM_FORBIDDEN not in str(error) or not _is_youtube(url):
+            raise
+        try:
+            _run_yt_dlp(
+                ["--extractor-args", _YOUTUBE_FALLBACK_CLIENTS, *arguments],
+                failure=failure,
+                watch=dest_dir,
+            )
+        except FetchError as retry_error:
+            raise FetchError(
+                f"{retry_error}\nYouTube дважды отказал в потоке (403), хотя ролик "
+                "нашёлся. Ссылка на поток привязана к IP: так бывает при VPN или "
+                "смене сети посреди загрузки. Повторите позже или в другой сети; "
+                "звук того же выпуска часто лежит и на странице подкаста."
+            ) from retry_error
+    files = sorted(
+        path
+        for path in dest_dir.glob("audio.*")
+        if path.is_file() and path.suffix not in _PARTIAL_SUFFIXES
     )
-    files = sorted(path for path in dest_dir.glob("audio.*") if path.is_file())
     if not files:
         raise FetchError(f"yt-dlp отчитался об успехе, но файла в {dest_dir} нет")
     return files[0]
