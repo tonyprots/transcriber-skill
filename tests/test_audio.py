@@ -41,6 +41,43 @@ def test_pack_speech_spans_keeps_context_and_respects_limit() -> None:
     assert packed == [(0, 83_200), (396_800, 433_200)]
 
 
+def test_add_quiet_onsets_moves_start_back_but_not_into_neighbour() -> None:
+    # Тихая фраза начинается через 0,6 с после первого окна, основной проход
+    # услышал её на 1,9 с позже — начало сдвигается к ней.
+    windows = [(16_000, 60_000), (100_000, 140_000)]
+    sensitive = [(16_000, 60_000), (70_000, 145_000)]
+    assert audio.add_quiet_onsets(windows, sensitive, 500_000, sample_rate=16_000) == [
+        (16_000, 60_000),
+        (66_800, 140_000),
+    ]
+
+
+def test_add_quiet_onsets_does_not_bridge_pause_inside_speech() -> None:
+    # Чувствительный интервал тянется из предыдущего окна через паузу —
+    # это сплошная речь, разрезанная по лимиту окна; окно не трогаем.
+    windows = [(16_000, 60_000), (70_000, 140_000)]
+    sensitive = [(16_000, 145_000)]
+    assert audio.add_quiet_onsets(windows, sensitive, 500_000, sample_rate=16_000) == windows
+
+
+def test_add_quiet_onsets_ignores_breath_and_adds_missed_speech() -> None:
+    # Начало на 0,3 с раньше — вдох, окно не трогаем; сдвиг не больше 4 с;
+    # речь вне окон — отдельным окном с запасом 0,2 с.
+    windows = [(100_000, 140_000), (300_000, 340_000)]
+    sensitive = [(98_400, 140_000), (16_000, 32_000), (200_000, 330_000)]
+    assert audio.add_quiet_onsets(windows, sensitive, 500_000, sample_rate=16_000) == [
+        (12_800, 35_200),
+        (100_000, 140_000),
+        (236_000, 340_000),
+    ]
+
+
+def test_add_quiet_onsets_keeps_loud_speech_as_is() -> None:
+    windows = [(16_000, 48_000), (64_000, 96_000)]
+    sensitive = [(19_200, 44_800), (67_200, 92_800)]
+    assert audio.add_quiet_onsets(windows, sensitive, 500_000, sample_rate=16_000) == windows
+
+
 def _write_ramp(path: Path, samples: int) -> None:
     """WAV, где значение сэмпла равно его номеру: по срезу видно, откуда он."""
     import numpy as np

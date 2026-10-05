@@ -159,6 +159,92 @@ def pack_speech_spans(
     return packed
 
 
+# Тихое начало фразы с дальнего микрофона Silero при пороге 0,5 ловит поздно
+# или не ловит вовсе. Снизить порог для всей записи нельзя: окна громкой речи
+# тоже сдвигаются, склейка в 20-секундные окна перестраивается каскадом, и на
+# диктовках WER вырос с 5,7 % до 6,7 %. Поэтому окна строятся по основному
+# проходу, как раньше, а чувствительный только удлиняет их назад и добавляет
+# пропущенную речь (`experiments/vad-onset/`, 2026-10-05).
+SENSITIVE_THRESHOLD = 0.2
+# Выход из речи как у основного прохода: с выходом 0,05 чувствительные
+# интервалы перекрывали паузы между фразами и тянули окна к соседям.
+SENSITIVE_EXIT_THRESHOLD = 0.35
+MIN_ONSET_GAIN_SECONDS = 0.5
+MAX_ONSET_SHIFT_SECONDS = 4.0
+
+
+def add_quiet_onsets(
+    windows: list[tuple[int, int]],
+    sensitive: list[tuple[int, int]],
+    waveform_samples: int,
+    *,
+    sample_rate: int = SAMPLE_RATE,
+    pad_seconds: float = 0.2,
+    min_gain_seconds: float = MIN_ONSET_GAIN_SECONDS,
+    max_shift_seconds: float = MAX_ONSET_SHIFT_SECONDS,
+) -> list[tuple[int, int]]:
+    """Достраивает готовые окна интервалами чувствительного прохода VAD.
+
+    Начало окна сдвигается назад, если чувствительный проход слышит речь
+    раньше хотя бы на `min_gain_seconds`: меньший сдвиг — вдох перед фразой,
+    и на громкой речи он только менял бы текст на стыках. Сдвиг не заходит в
+    предыдущее окно и не превышает `max_shift_seconds`. Речь, которой нет ни в
+    одном окне, добавляется отдельным окном с обычным запасом.
+    """
+    pad = round(pad_seconds * sample_rate)
+    shift = round(max_shift_seconds * sample_rate)
+    gain = round(min_gain_seconds * sample_rate)
+    result: list[tuple[int, int]] = []
+    previous_end = 0
+    for start, end in windows:
+        # Только интервал, начавшийся после предыдущего окна: тот, что тянется
+        # из него, — мост через паузу внутри сплошной речи, а не тихое начало.
+        onset = min(
+            (s - pad for s, e in sensitive if s - pad < start < e and s >= previous_end),
+            default=start,
+        )
+        if start - onset >= gain:
+            start = max(onset, start - shift, previous_end)
+        result.append((start, end))
+        previous_end = end
+    for start, end in sensitive:
+        if not any(s < end and start < e for s, e in result):
+            result.append((max(0, start - pad), min(waveform_samples, end + pad)))
+    return sorted(result)
+
+
+# Тихому окну модели нужен запас перед речью, даже когда VAD начало нашёл:
+# первое слово с дальнего микрофона часто ниже любого порога. На Golos
+# farfield запас 1 с вернул первое слово в 5 фразах из 500 сверх второго
+# прохода. Громкие окна (диктовки, YouTube: −20…−30 dBFS) не трогаются.
+QUIET_WINDOW_DBFS = -45.0
+QUIET_WINDOW_LEAD_SECONDS = 1.0
+
+
+def lead_quiet_windows(
+    windows: list[tuple[int, int]],
+    waveform,
+    *,
+    sample_rate: int = SAMPLE_RATE,
+    quiet_dbfs: float = QUIET_WINDOW_DBFS,
+    lead_seconds: float = QUIET_WINDOW_LEAD_SECONDS,
+) -> list[tuple[int, int]]:
+    """Отодвигает начало тихих окон на `lead_seconds`, не заходя в соседнее."""
+    import numpy as np
+
+    lead = round(lead_seconds * sample_rate)
+    result: list[tuple[int, int]] = []
+    previous_end = 0
+    for start, end in windows:
+        part = waveform[start:end]
+        rms = float(np.sqrt(np.mean(np.square(part, dtype=np.float64)))) if len(part) else 0.0
+        if 20 * np.log10(max(rms, 1e-12)) < quiet_dbfs:
+            start = max(previous_end, start - lead)
+        result.append((start, end))
+        previous_end = end
+    return result
+
+
 @lru_cache(maxsize=2)
 def _pcm16(path: Path) -> object:
     """Весь подготовленный WAV в памяти, один раз на процесс.
@@ -277,20 +363,26 @@ def split_speech_windows(
         offline=offline,
         label="Silero VAD",
     )
-    raw_spans = list(
-        next(
-            vad.segment_batch(
-                gain_for_vad(waveforms[0])[None, :],
-                lengths,
-                SAMPLE_RATE,
-                threshold=0.5,
-                min_speech_duration_ms=250,
-                max_speech_duration_s=max_seconds,
-                min_silence_duration_ms=300,
-                speech_pad_ms=0,
+    gained = gain_for_vad(waveforms[0])[None, :]
+
+    def speech(threshold: float, exit_threshold: float | None = None) -> list[tuple[int, int]]:
+        return list(
+            next(
+                vad.segment_batch(
+                    gained,
+                    lengths,
+                    SAMPLE_RATE,
+                    threshold=threshold,
+                    neg_threshold=exit_threshold,
+                    min_speech_duration_ms=250,
+                    max_speech_duration_s=max_seconds,
+                    min_silence_duration_ms=300,
+                    speech_pad_ms=0,
+                )
             )
         )
-    )
+
+    raw_spans = speech(0.5)
     spans = (
         pack_speech_spans(
             raw_spans,
@@ -301,6 +393,13 @@ def split_speech_windows(
         if pack
         else raw_spans
     )
+    spans = add_quiet_onsets(
+        spans,
+        speech(SENSITIVE_THRESHOLD, SENSITIVE_EXIT_THRESHOLD),
+        int(lengths[0]),
+        pad_seconds=pad_seconds if pack else 0.0,
+    )
+    spans = lead_quiet_windows(spans, waveforms[0])
     return [
         AudioChunk(
             sequence=sequence,
