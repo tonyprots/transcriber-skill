@@ -6,7 +6,7 @@
 манифесте — часть аудит-следа, и разойтись ей нельзя.
 """
 
-__version__ = "0.22.2"
+__version__ = "0.23.0"
 
 from .models import Correction, Diarization, Hypothesis, ReviewItem, Segment, SpeakerTurn
 
