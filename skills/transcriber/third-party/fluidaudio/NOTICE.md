@@ -2,9 +2,10 @@
 
 `fluidaudiocli` — CLI проекта
 [FluidInference/FluidAudio](https://github.com/FluidInference/FluidAudio),
-лицензия Apache-2.0 (текст — в `LICENSE` рядом). Скилл вызывает его только для
-диаризации 5+ голосов:
-`fluidaudiocli process <wav> --mode offline --threshold 0.7 --output <json>`.
+лицензия Apache-2.0 (текст — в `LICENSE` рядом). Скилл вызывает его для
+диаризации (с 0.24 — при любом числе голосов):
+`fluidaudiocli process <wav> --mode offline --threshold 0.7 --output <json>`,
+с известным числом голосов — ещё `--num-speakers N`.
 
 ## Откуда берётся бинарник
 

@@ -2,7 +2,7 @@
 # Создаёт .venv рядом со скиллом и ставит зависимости. Повторный запуск безопасен.
 # Использование: bash scripts/setup.sh [--models ru|en|all] [--diarize] [--python /путь/к/python3]
 #   --models  сразу скачать модели маршрута, чтобы первая расшифровка не ждала загрузки
-#   --diarize вместе с моделями скачать Sortformer для диаризации
+#   --diarize вместе с моделями скачать CoreML-модели диаризации FluidAudio
 #   --allow-unlocked  если проверенные версии не встают, ставить по диапазонам
 #                     (то же — TRANSCRIBER_ALLOW_UNLOCKED=1)
 set -euo pipefail
@@ -86,20 +86,20 @@ fi
 if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
   echo "Apple Silicon: Whisper Turbo MLX и диаризация доступны"
   FLUID_DIR="$SKILL_DIR/bin/macos-arm64"
-  # fluidaudiocli (диаризация 5+ голосов) собирается в CI репозитория из
+  # fluidaudiocli (диаризация) собирается в CI репозитория из
   # закреплённого коммита FluidAudio и лежит в его Release, а не в git. Ставим
   # только после сверки с суммой, опубликованной в скилле; curl не вешает на
   # файл карантин, так что снимать его не нужно.
   if [ -f "$FLUID_DIR/fluidaudiocli.sha256" ] && [ -f "$FLUID_DIR/fluidaudiocli.url" ] \
     && ! (cd "$FLUID_DIR" && shasum -a 256 -c fluidaudiocli.sha256 >/dev/null 2>&1); then
-    echo "Скачиваю fluidaudiocli для встреч с 5+ участниками (около 20 МБ)"
+    echo "Скачиваю fluidaudiocli для диаризации (около 20 МБ)"
     PART="$FLUID_DIR/fluidaudiocli.part"
     if curl -fsSL --retry 2 -o "$PART" "$(cat "$FLUID_DIR/fluidaudiocli.url")" \
       && [ "$(shasum -a 256 "$PART" | cut -d' ' -f1)" = "$(cut -d' ' -f1 "$FLUID_DIR/fluidaudiocli.sha256")" ]; then
       chmod +x "$PART" && mv "$PART" "$FLUID_DIR/fluidaudiocli"
     else
       rm -f "$PART"
-      echo "fluidaudiocli не скачался или не совпал с опубликованной суммой: диаризация 5+ голосов" >&2
+      echo "fluidaudiocli не скачался или не совпал с опубликованной суммой: диаризация" >&2
       echo "недоступна. Соберите свой по third-party/fluidaudio/NOTICE.md и передайте --fluidaudio-bin" >&2
     fi
   fi

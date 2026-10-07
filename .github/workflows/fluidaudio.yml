@@ -1,6 +1,6 @@
 name: fluidaudio
 
-# Сборка fluidaudiocli для диаризации 5+ голосов из закреплённого коммита
+# Сборка fluidaudiocli для диаризации из закреплённого коммита
 # FluidAudio. Бинарник не лежит в git: его кладёт в Release с тегом
 # fluidaudio-<коммит> эта сборка, рядом — attestation происхождения, а setup.sh
 # качает его и сверяет с суммой из bin/macos-arm64/fluidaudiocli.sha256.
@@ -50,4 +50,4 @@ jobs:
           gh release create "$GITHUB_REF_NAME" dist/fluidaudiocli dist/fluidaudiocli.sha256 \
             --repo "$GITHUB_REPOSITORY" --prerelease \
             --title "fluidaudiocli ${FLUIDAUDIO_COMMIT:0:7}" \
-            --notes "fluidaudiocli для диаризации 5+ голосов, собран этой сборкой из FluidInference/FluidAudio@${FLUIDAUDIO_COMMIT} на macos-15 (arm64), подпись ad-hoc. Происхождение: gh attestation verify fluidaudiocli --repo ${GITHUB_REPOSITORY}. Лицензия Apache-2.0."
+            --notes "fluidaudiocli для диаризации, собран этой сборкой из FluidInference/FluidAudio@${FLUIDAUDIO_COMMIT} на macos-15 (arm64), подпись ad-hoc. Происхождение: gh attestation verify fluidaudiocli --repo ${GITHUB_REPOSITORY}. Лицензия Apache-2.0."
