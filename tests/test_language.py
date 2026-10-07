@@ -51,19 +51,69 @@ def test_default_is_auto(tmp_path: Path) -> None:
     assert _args(tmp_path).language == "auto"
 
 
-def test_explicit_language_skips_detection(tmp_path: Path, monkeypatch) -> None:
+def _remote(language: str) -> RemoteMedia:
+    return RemoteMedia(url="https://x", title="t", duration_seconds=1.0, extractor="Youtube", tracks=(), language=language)
+
+
+def test_explicit_language_of_link_is_checked_against_audio(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(cli, "run_isolated_backend", _lid({"en": 0.97, "de": 0.03}))
+    language, detection = _resolve(_args(tmp_path, "--language", "en-US"), remote=_remote(""))
+    assert language == "en"
+    assert detection["method"] == "argument"
+    assert "warning" not in detection
+    assert "heard" in detection
+
+
+def test_explicit_language_of_local_file_costs_nothing(tmp_path: Path, monkeypatch) -> None:
+    """Проба стоит 10–22 с, а чужая дорожка бывает только у ссылок."""
     monkeypatch.setattr(cli, "run_isolated_backend", pytest.fail)
-    assert _resolve(_args(tmp_path, "--language", "en-US")) == (
+    assert _resolve(_args(tmp_path, "--language", "ru")) == (
+        "ru",
+        {"method": "argument", "language": "ru"},
+    )
+
+
+def test_link_metadata_wins_over_detection(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(cli, "run_isolated_backend", _lid({"en": 0.9, "ru": 0.1}))
+    language, detection = _resolve(_args(tmp_path), remote=_remote("en"))
+    assert language == "en" and detection["method"] == "source-metadata"
+
+
+def test_dubbed_track_stops_before_recognition(tmp_path: Path, monkeypatch) -> None:
+    """2026-10-06: тамильский автодубляж полтора часа распознавался как английский."""
+    monkeypatch.setattr(cli, "run_isolated_backend", _lid({"ta": 0.9, "en": 0.05, "ml": 0.05}))
+    with pytest.raises(cli.LanguageMismatch, match="ta.*--language ta"):
+        _resolve(_args(tmp_path, "--language", "en"), remote=_remote(""))
+    with pytest.raises(cli.LanguageMismatch, match="описании ссылки"):
+        _resolve(_args(tmp_path), remote=_remote("en-US"))
+
+
+def test_foreign_intro_is_not_a_mismatch(tmp_path: Path, monkeypatch) -> None:
+    """Заставка на другом языке в одном окне из трёх не останавливает прогон."""
+    windows = iter([{"en": 0.95}, {"ru": 0.9, "en": 0.1}, {"ru": 0.95}])
+
+    def run(backend, chunks, language, work_dir, **kwargs):
+        return language_hypothesis(backend, [next(windows) for _ in chunks], 0.1)
+
+    monkeypatch.setattr(cli, "run_isolated_backend", run)
+    assert _resolve(_args(tmp_path, "--language", "ru"), remote=_remote(""))[0] == "ru"
+
+
+def test_language_check_can_be_skipped(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(cli, "run_isolated_backend", pytest.fail)
+    assert _resolve(_args(tmp_path, "--language", "en", "--skip-language-check"), remote=_remote("")) == (
         "en",
         {"method": "argument", "language": "en"},
     )
 
 
-def test_link_metadata_wins_over_detection(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(cli, "run_isolated_backend", pytest.fail)
-    remote = RemoteMedia(url="https://x", title="t", duration_seconds=1.0, extractor="Youtube", tracks=(), language="en")
-    language, detection = _resolve(_args(tmp_path), remote=remote)
-    assert language == "en" and detection["method"] == "source-metadata"
+def test_unavailable_check_does_not_block(tmp_path: Path, monkeypatch) -> None:
+    def broken(*args, **kwargs):
+        raise BackendUnavailable("нет весов")
+
+    monkeypatch.setattr(cli, "run_isolated_backend", broken)
+    language, detection = _resolve(_args(tmp_path, "--language", "en"), remote=_remote(""))
+    assert language == "en" and "не сверен" in detection["warning"]
 
 
 def test_detection_samples_start_middle_end(tmp_path: Path, monkeypatch) -> None:

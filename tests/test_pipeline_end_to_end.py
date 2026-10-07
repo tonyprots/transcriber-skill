@@ -430,6 +430,8 @@ ENGLISH_VERIFIER = "we launched GPT with Astra today"
 
 def fake_english_backend(backend: str, chunks, language: str, work_dir: Path, **kwargs) -> Hypothesis:
     """Английский маршрут: Whisper основная, Parakeet через тот же onnx-воркер."""
+    if backend.endswith("-lid"):
+        return language_hypothesis(backend, [{"en": 0.97, "de": 0.03}] * len(chunks), 0.1)
     text = ENGLISH_PRIMARY if "whisper" in backend else ENGLISH_VERIFIER
     chunks = list(chunks)
     segments = [Segment(chunk.start, chunk.end, text) for chunk in chunks]

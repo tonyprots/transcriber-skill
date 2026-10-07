@@ -42,7 +42,15 @@ _AUTO_NAME = re.compile(r"\bавто|\bauto", re.IGNORECASE)
 # Нижняя граница 64 кбит/с держит YouTube на прежней дорожке opus 103k:
 # без неё выбиралась HE-AAC 49k, а её влияние на качество не мерили.
 # Форматы с неизвестным битрейтом фильтр отсекает — они уходят в `bestaudio`.
-_AUDIO_FORMAT = "bestaudio[abr>=64][abr<=96]/bestaudio/best[height<=480]/best"
+# При автодубляже YouTube отдаёт десятки дорожек на других языках, и битрейт
+# оригинала может выпасть из окна: на ролике с 20 дубляжами оригинал шёл на
+# 62k, и фильтр взял тамильский (2026-10-06). Поэтому сначала оригинал.
+_ORIGINAL = "[format_note*=original]"
+_AUDIO_FORMAT = (
+    f"bestaudio{_ORIGINAL}[abr>=64][abr<=96]/bestaudio{_ORIGINAL}[abr<=96]"
+    f"/bestaudio{_ORIGINAL}/bestaudio[abr>=64][abr<=96]/bestaudio"
+    "/best[height<=480]/best"
+)
 _CONCURRENT_FRAGMENTS = "8"
 
 # Отдельную аудиодорожку YouTube отдаёт только клиенту visionos (yt-dlp

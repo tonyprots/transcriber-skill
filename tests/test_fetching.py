@@ -228,8 +228,23 @@ def test_audio_prefers_light_track_in_parallel(yt_dlp, tmp_path: Path) -> None:
     (tmp_path / "audio.m4a").write_bytes(b"x")
     fetching.fetch_audio("https://vkvideo.ru/video-1_2", tmp_path)
     command = calls[0]
-    assert command[command.index("-f") + 1].startswith("bestaudio[abr>=64][abr<=96]/")
+    selector = command[command.index("-f") + 1].split("/")
+    assert "bestaudio[abr>=64][abr<=96]" in selector
     assert command[command.index("--concurrent-fragments") + 1] == "8"
+
+
+def test_audio_prefers_original_over_auto_dub(yt_dlp, tmp_path: Path) -> None:
+    """С автодубляжем оригинал шёл на 62k, фильтр 64–96 взял тамильский.
+
+    Полтора часа Whisper распознавал дубляж как английский (2026-10-06).
+    """
+    calls = yt_dlp()
+    (tmp_path / "audio.webm").write_bytes(b"x")
+    fetching.fetch_audio("https://youtu.be/PkoX6R5sn8Y", tmp_path)
+    selector = calls[0][calls[0].index("-f") + 1].split("/")
+    light = selector.index("bestaudio[abr>=64][abr<=96]")
+    assert all("original" in option for option in selector[:light])
+    assert "bestaudio[format_note*=original][abr<=96]" in selector[:light]
 
 
 def test_rate_limit_is_retried_then_reported(yt_dlp, monkeypatch) -> None:

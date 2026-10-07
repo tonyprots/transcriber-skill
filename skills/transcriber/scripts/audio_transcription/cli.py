@@ -148,6 +148,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--skip-language-check",
+        action="store_true",
+        help=(
+            "Не сверять язык ссылки со звуком. Без флага прогон по ссылке "
+            "останавливается, если в трёх окнах речи звучит другой язык; "
+            "локальные файлы с --language не сверяются"
+        ),
+    )
+    parser.add_argument(
         "--glossary",
         type=Path,
         help="Свой YAML-словарь терминов: читается дополнительно к тому, что скилл ведёт сам",
@@ -715,6 +724,14 @@ def primary_failure_warning(primary: Hypothesis) -> str | None:
 LANGUAGE_SAMPLE_WINDOWS = 3
 # Ниже этой доли у первого языка решение ненадёжно — о нём надо сказать.
 LANGUAGE_CONFIDENCE_WARNING = 0.6
+# Заявленный язык сверяется со звуком: ниже этой доли его в пробе нет. Запись
+# с иноязычной заставкой или цитатой порог не задевает — доли усреднены по
+# началу, середине и концу.
+LANGUAGE_MISMATCH_SHARE = 0.2
+
+
+class LanguageMismatch(ValueError):
+    """Звук не на том языке, который заявлен аргументом или ссылкой."""
 
 
 def language_sample(chunks: list[AudioChunk], count: int = LANGUAGE_SAMPLE_WINDOWS) -> list[AudioChunk]:
@@ -740,41 +757,31 @@ def resolve_language(
     """
     requested = normalize_language(args.language)
     if requested != AUTO_LANGUAGE:
-        return requested, {"method": "argument", "language": requested}
+        if remote is None:
+            # Свой файл с явным языком не сверяем: проба стоит 10–22 с на запись,
+            # а чужая дорожка бывает только у ссылок (замер 2026-10-08).
+            return requested, {"method": "argument", "language": requested}
+        return _checked(args, requested, "argument", chunks, work_dir, source_identity, report)
     if remote is not None and remote.language:
         language = normalize_language(remote.language)
         if language != AUTO_LANGUAGE:
             report.stage(f"Язык из описания ссылки: {language}")
-            return language, {"method": "source-metadata", "language": language}
+            return _checked(
+                args, language, "source-metadata", chunks, work_dir, source_identity, report
+            )
     if not chunks:
         return "ru", {"method": "default", "language": "ru"}
-    sample = language_sample(chunks)
-    key = cache_key(
-        "language",
-        {
-            "pipeline": "1",
-            "source_sha256": source_identity,
-            "whisper_backend": args.whisper_backend,
-            "weights": weights_signature(args),
-            "sample": [[chunk.sequence, round(chunk.start, 6), round(chunk.end, 6)] for chunk in sample],
-        },
-    )
-    found = None if args.no_cache else load_hypothesis(args.cache_dir, key)
-    if found is None:
-        report.stage(f"Определяю язык, окон речи для пробы: {len(sample)}")
-        try:
-            found = _run_language_id(args, sample, work_dir, report)
-        except BackendUnavailable as error:
-            return "ru", {
-                "method": "default",
-                "language": "ru",
-                "warning": (
-                    f"Язык определить не удалось ({error}); взят русский. "
-                    "Если запись на другом языке, повторите с --language"
-                ),
-            }
-        if not args.no_cache and weights_as_keyed(found.metadata, weights_signature(args)):
-            save_hypothesis(args.cache_dir, key, found, source_identity)
+    try:
+        found = _identify_language(args, chunks, work_dir, source_identity, report)
+    except BackendUnavailable as error:
+        return "ru", {
+            "method": "default",
+            "language": "ru",
+            "warning": (
+                f"Язык определить не удалось ({error}); взят русский. "
+                "Если запись на другом языке, повторите с --language"
+            ),
+        }
     language = normalize_language(found.language)
     if language in {AUTO_LANGUAGE, "und"}:
         return "ru", {
@@ -801,6 +808,76 @@ def resolve_language(
             "повторите с --language"
         )
     return language, detection
+
+
+def _checked(
+    args: argparse.Namespace,
+    language: str,
+    method: str,
+    chunks: list[AudioChunk],
+    work_dir: Path,
+    source_identity: str,
+    report: ProgressReporter,
+) -> tuple[str, dict[str, Any]]:
+    """Заявленный язык сверяется со звуком до распознавания.
+
+    2026-10-06 ролик с автодубляжем YouTube скачался тамильской дорожкой, а
+    язык из ссылки и аргумента был английский: полтора часа Whisper переводил
+    тамильский в бессмыслицу. Проба на трёх окнах стоит секунды.
+    """
+    detection: dict[str, Any] = {"method": method, "language": language}
+    if args.skip_language_check or not chunks:
+        return language, detection
+    try:
+        found = _identify_language(args, chunks, work_dir, source_identity, report)
+    except BackendUnavailable as error:
+        detection["warning"] = f"Язык со звуком не сверен ({error})"
+        return language, detection
+    shares: dict[str, float] = {}
+    for code, share in found.metadata.get("top_languages", []):
+        key = normalize_language(str(code))
+        shares[key] = shares.get(key, 0.0) + float(share)
+    heard = normalize_language(found.language)
+    detection["heard"] = {code: round(share, 4) for code, share in shares.items()}
+    if heard == language or shares.get(language, 0.0) >= LANGUAGE_MISMATCH_SHARE:
+        report.stage(f"Язык {language} подтверждён по звуку")
+        return language, detection
+    source = "в аргументе" if method == "argument" else "в описании ссылки"
+    raise LanguageMismatch(
+        f"Звук не на языке {language}, указанном {source}: в начале, середине и "
+        f"конце записи Whisper слышит {heard} ({shares.get(heard, 0.0):.0%}), "
+        f"{language} — {shares.get(language, 0.0):.0%}. Обычно это автодубляж или "
+        "чужая дорожка ролика, либо язык указан неверно. Проверьте источник; если "
+        f"запись и правда на {heard}, повторите с --language {heard}; если язык "
+        "смешанный и задан верно — с --skip-language-check"
+    )
+
+
+def _identify_language(
+    args: argparse.Namespace,
+    chunks: list[AudioChunk],
+    work_dir: Path,
+    source_identity: str,
+    report: ProgressReporter,
+) -> Hypothesis:
+    sample = language_sample(chunks)
+    key = cache_key(
+        "language",
+        {
+            "pipeline": "1",
+            "source_sha256": source_identity,
+            "whisper_backend": args.whisper_backend,
+            "weights": weights_signature(args),
+            "sample": [[chunk.sequence, round(chunk.start, 6), round(chunk.end, 6)] for chunk in sample],
+        },
+    )
+    found = None if args.no_cache else load_hypothesis(args.cache_dir, key)
+    if found is None:
+        report.stage(f"Определяю язык, окон речи для пробы: {len(sample)}")
+        found = _run_language_id(args, sample, work_dir, report)
+        if not args.no_cache and weights_as_keyed(found.metadata, weights_signature(args)):
+            save_hypothesis(args.cache_dir, key, found, source_identity)
+    return found
 
 
 def _run_language_id(
@@ -1217,7 +1294,7 @@ def _transcribe(
         if detection.get("warning"):
             report.stage(f"Внимание: {detection['warning']}")
             warnings.append(str(detection["warning"]))
-        if detection["method"] == "whisper-language-id":
+        if detection["method"] == "whisper-language-id" or "heard" in detection:
             mark = timed("language_id", mark)
         route = language_route(language)
         if route.warning:
