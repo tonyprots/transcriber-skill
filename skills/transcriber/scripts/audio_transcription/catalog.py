@@ -262,8 +262,8 @@ FASTER_WHISPER_FALLBACK = ModelEntry(
 
 SORTFORMER = ModelEntry(
     key="sortformer",
-    label="Sortformer 4spk (диаризация 1–4 голоса)",
-    role="диаризация до четырёх участников",
+    label="Sortformer 4spk (диаризация по явному флагу)",
+    role="диаризация до четырёх голосов, только --diarization-backend sortformer",
     family="diarization",
     model="mlx-community/diar_sortformer_4spk-v1-fp16",
     repo="mlx-community/diar_sortformer_4spk-v1-fp16",
@@ -271,22 +271,22 @@ SORTFORMER = ModelEntry(
     download_gb=0.2,
     upstream="Sortformer — NVIDIA NeMo; сборка под MLX — mlx-community",
     calibrated=LAST_CALIBRATION,
-    calibration_note="proxy DER 10,3% на двухголосой записи",
+    calibration_note="DER 21,4% на 44 записях VoxConverse вдвоём — путает голоса",
     apple_only=True,
 )
 
 FLUIDAUDIO = ModelEntry(
     key="fluidaudio",
-    label="FluidAudio Offline Community-1 (диаризация 5+ голосов)",
-    role="диаризация пяти и более участников",
+    label="FluidAudio Offline Community-1 (диаризация)",
+    role="диаризация по умолчанию, любое число голосов",
     family="diarization",
     model="community-1",
     repo="FluidInference/speaker-diarization-coreml",
     revision="1ed7a662fdc7109e36d822db793ee6eebdaf8594",
     download_gb=0.034,
-    upstream="FluidInference; CoreML-модели ставятся scripts/setup_fluidaudio_models.py",
+    upstream="FluidInference; CoreML-модели ставятся при первом --diarize",
     calibrated=LAST_CALIBRATION,
-    calibration_note="proxy DER 3,7% на шести голосах",
+    calibration_note="DER 4,6% на 44 записях VoxConverse вдвоём, 8,8% на русских интервью",
     apple_only=True,
     in_hf_cache=False,
 )
@@ -329,7 +329,7 @@ def route_entries(route: str, *, apple: bool = True, diarize: bool = False) -> t
     if route in ("en", "all"):
         entries.append(PARAKEET_ENGLISH)
     if diarize and apple:
-        entries.append(SORTFORMER)
+        entries.append(FLUIDAUDIO)
     return tuple(entries)
 
 

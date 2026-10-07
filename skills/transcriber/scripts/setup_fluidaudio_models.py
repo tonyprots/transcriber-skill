@@ -9,63 +9,26 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from audio_transcription.catalog import FLUIDAUDIO  # noqa: E402
-
-REPO_ID = FLUIDAUDIO.repo
-REQUIRED = (
-    "pyannote_segmentation.mlmodelc/model.mil",
-    "wespeaker_v2.mlmodelc/model.mil",
-    "plda-parameters.json",
-)
-
-
-def default_target() -> Path:
-    return (
-        Path.home()
-        / "Library"
-        / "Application Support"
-        / "FluidAudio"
-        / "Models"
-        / "speaker-diarization-coreml"
-    )
-
-
-def ready(target: Path) -> bool:
-    return all((target / relative).is_file() for relative in REQUIRED)
+from audio_transcription.fluid_models import ModelsUnavailable, default_target, ensure  # noqa: E402
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Загрузить локальные CoreML-модели для FluidAudio."
+        description=(
+            "Загрузить локальные CoreML-модели для FluidAudio. Обычно не нужно: "
+            "первый прогон с --diarize ставит их сам"
+        )
     )
     parser.add_argument("--target", type=Path, default=default_target())
     args = parser.parse_args()
     target = args.target.expanduser().resolve()
     if platform.system() != "Darwin" or platform.machine() != "arm64":
         raise SystemExit("FluidAudio в этом скилле поддерживается только на macOS arm64")
-    if ready(target):
-        print(json.dumps({"status": "ready", "target": str(target)}, ensure_ascii=False))
-        return 0
-    if target.exists() and any(target.iterdir()):
-        raise SystemExit(
-            f"Каталог содержит неполный набор моделей: {target}. "
-            "Переместите его в архив и повторите запуск."
-        )
     try:
-        from huggingface_hub import snapshot_download
-    except ImportError as error:
-        raise SystemExit("Не установлен huggingface_hub") from error
-    target.mkdir(parents=True, exist_ok=True)
-    snapshot_download(
-        repo_id=REPO_ID,
-        # Коммит, на котором мерили диаризацию 5+ голосов; см. catalog.FLUIDAUDIO.
-        revision=FLUIDAUDIO.revision,
-        local_dir=target,
-        allow_patterns=["*.json", "*.mlmodelc/**"],
-    )
-    if not ready(target):
-        raise SystemExit(f"После загрузки набор моделей неполон: {target}")
-    print(json.dumps({"status": "downloaded", "target": str(target)}, ensure_ascii=False))
+        status = ensure(target)
+    except ModelsUnavailable as error:
+        raise SystemExit(str(error)) from error
+    print(json.dumps({"status": status, "target": str(target)}, ensure_ascii=False))
     return 0
 
 

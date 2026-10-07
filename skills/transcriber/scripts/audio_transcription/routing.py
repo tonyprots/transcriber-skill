@@ -106,7 +106,10 @@ def diarization_backend(requested: str, expected_speakers: int | None) -> str:
     if expected_speakers is not None and expected_speakers < 1:
         raise ValueError("--expected-speakers должен быть положительным")
     if requested == "auto":
-        return "fluidaudio" if expected_speakers and expected_speakers > 4 else "sortformer"
+        # На живых записях Sortformer путает голоса: DER 21% против 5% у
+        # FluidAudio на записях вдвоём, 44% против 9% на русских интервью
+        # (experiments/diarization-natural, 2026-10-07). Остаётся по явному флагу.
+        return "fluidaudio"
     if requested == "sortformer" and expected_speakers and expected_speakers > 4:
         raise ValueError(
             "Sortformer поддерживает не более четырёх голосов; "

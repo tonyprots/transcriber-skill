@@ -276,7 +276,7 @@ def collect(check_updates: bool = False) -> dict:
     if not apple:
         warnings.append("не Apple Silicon: диаризация и Whisper Turbo MLX недоступны, Whisper работает на CPU")
     if report["fluidaudio_binary_problem"]:
-        warnings.append(f"диаризация 5+ голосов недоступна: {report['fluidaudio_binary_problem']}")
+        warnings.append(f"диаризация недоступна: {report['fluidaudio_binary_problem']}")
     if report["free_gb"] < 8:
         warnings.append("меньше 8 ГБ свободно: модели занимают около 4 ГБ, временные WAV — ещё гигабайты")
 
@@ -346,8 +346,9 @@ def render(report: dict) -> str:
         lines.append(f"      {row['model']} · {calibration}{revision}")
 
     lines.append(
-        f"FluidAudio (5+ голосов): бинарник {mark(report['fluidaudio_binary'] and not report['fluidaudio_binary_problem'])}, "
+        f"FluidAudio (диаризация): бинарник {mark(report['fluidaudio_binary'] and not report['fluidaudio_binary_problem'])}, "
         f"CoreML-модели {mark(report['fluidaudio_models'])}"
+        + ("" if report["fluidaudio_models"] else " — поставятся при первом --diarize")
     )
 
     yt_dlp = report["yt_dlp"]

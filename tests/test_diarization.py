@@ -81,3 +81,25 @@ def test_numeric_speaker_ids_are_ordered_numerically() -> None:
     result = partition_turns(turns)
     assert result[1].speakers == ("speaker_2",)
     assert result[10].speakers == ("speaker_11",)
+
+
+def test_window_inside_diarization_pause_takes_nearest_speaker(tmp_path: Path) -> None:
+    # FluidAudio не размечает реплики короче секунды: такое окно посреди
+    # монолога раньше становилось «unknown».
+    chunks = split_chunks_by_diarization(
+        tmp_path / "prepared.wav",
+        [
+            AudioChunk(0, tmp_path / "a.wav", 0.0, 10.0),
+            AudioChunk(1, tmp_path / "b.wav", 11.0, 11.6),
+            AudioChunk(2, tmp_path / "c.wav", 18.5, 19.0),
+            AudioChunk(3, tmp_path / "d.wav", 20.0, 30.0),
+        ],
+        [SpeakerTurn(0.0, 10.0, ("speaker_1",)), SpeakerTurn(20.0, 30.0, ("speaker_2",))],
+        merge_gap_seconds=0.0,
+    )
+    assert [item.speakers for item in chunks] == [
+        ("speaker_1",),
+        ("speaker_1",),
+        ("speaker_2",),
+        ("speaker_2",),
+    ]

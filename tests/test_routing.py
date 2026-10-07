@@ -58,9 +58,10 @@ def test_uncalibrated_language_is_whisper_only_with_warning() -> None:
 
 
 def test_large_meeting_selects_clustering_backend() -> None:
-    assert diarization_backend("auto", None) == "sortformer"
-    assert diarization_backend("auto", 4) == "sortformer"
+    assert diarization_backend("auto", None) == "fluidaudio"
+    assert diarization_backend("auto", 2) == "fluidaudio"
     assert diarization_backend("auto", 6) == "fluidaudio"
+    assert diarization_backend("sortformer", 4) == "sortformer"
 
 
 def test_sortformer_rejects_known_large_meeting() -> None:

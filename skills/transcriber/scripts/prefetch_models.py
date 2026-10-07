@@ -5,7 +5,7 @@
 
 ru  — Silero VAD, GigaAM v3 E2E, Vosk ru, Whisper Turbo;
 en  — Silero VAD, Whisper Turbo, Parakeet TDT 0.6B v3;
-all — всё вместе. --diarize добавляет Sortformer (только Apple Silicon).
+all — всё вместе. --diarize добавляет CoreML-модели FluidAudio (только Apple Silicon).
 На Linux и Intel вместо Whisper MLX скачивается faster-whisper medium.
 Повторный запуск ничего не качает: всё уже в ~/.cache/huggingface.
 Качается закреплённая ревизия каждой модели (`revision` в каталоге), а не `main`.
@@ -24,12 +24,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from audio_transcription.fluid_models import ensure as ensure_fluid_models  # noqa: E402
 from audio_transcription.catalog import (  # noqa: E402
     FASTER_WHISPER_FALLBACK,
     GIGAAM_RUSSIAN,
     PARAKEET_ENGLISH,
     SILERO_VAD,
-    SORTFORMER,
+    FLUIDAUDIO,
     VOSK_RUSSIAN,
     WHISPER_TURBO,
     format_gb,
@@ -62,7 +63,7 @@ def _step(label: str, action) -> bool:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("route", nargs="?", choices=("ru", "en", "all"), default="ru")
-    parser.add_argument("--diarize", action="store_true", help="добавить модель диаризации Sortformer")
+    parser.add_argument("--diarize", action="store_true", help="добавить модели диаризации FluidAudio")
     parser.add_argument(
         "--print-size",
         action="store_true",
@@ -93,9 +94,9 @@ def main(argv: list[str] | None = None) -> int:
         steps.append((_label(PARAKEET_ENGLISH), pinned(PARAKEET_ENGLISH)))
     if args.diarize:
         if _apple():
-            steps.append((_label(SORTFORMER), pinned(SORTFORMER)))
+            steps.append((_label(FLUIDAUDIO), ensure_fluid_models))
         else:
-            print("Диаризация доступна только на macOS Apple Silicon: Sortformer пропущен", file=sys.stderr)
+            print("Диаризация доступна только на macOS Apple Silicon: FluidAudio пропущен", file=sys.stderr)
 
     failed = [label for label, action in steps if not _step(label, action)]
     if failed:

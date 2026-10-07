@@ -129,9 +129,10 @@ def test_route_entries_match_what_prefetch_downloads() -> None:
     assert catalog.GIGAAM_MULTILINGUAL_FAST not in russian
     # Вне Apple Silicon Whisper MLX заменяется CPU-сборкой.
     assert catalog.FASTER_WHISPER_FALLBACK in route_entries("ru", apple=False)
-    assert catalog.SORTFORMER in route_entries("ru", diarize=True)
+    assert catalog.FLUIDAUDIO in route_entries("ru", diarize=True)
+    assert catalog.SORTFORMER not in route_entries("ru", diarize=True)
     # Диаризации вне Apple Silicon нет, и качать её незачем.
-    assert catalog.SORTFORMER not in route_entries("ru", apple=False, diarize=True)
+    assert catalog.FLUIDAUDIO not in route_entries("ru", apple=False, diarize=True)
 
 
 def test_route_download_size_is_sum_of_catalog() -> None:

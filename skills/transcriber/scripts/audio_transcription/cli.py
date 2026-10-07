@@ -51,7 +51,7 @@ from .cache import (
     save_hypothesis,
     prune as prune_cache,
 )
-from .diarization import split_chunks_by_diarization
+from .diarization import drop_ghost_speakers, split_chunks_by_diarization
 from .glossary import (
     GlossaryEntry,
     apply_glossary,
@@ -299,17 +299,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--diarization-backend",
         choices=("auto", "sortformer", "fluidaudio"),
         default="auto",
-        help="auto выбирает FluidAudio только для ожидаемых 5+ голосов",
+        help="auto — FluidAudio; Sortformer (до 4 голосов) только явно",
     )
     parser.add_argument(
         "--expected-speakers",
         type=int,
-        help="Ожидаемое число участников; включает безопасный выбор backend",
+        help=(
+            "Сколько участников в записи, если известно: передаётся модели и "
+            "заметно точнее угадывает, кто говорит"
+        ),
     )
     parser.add_argument(
         "--fluidaudio-bin",
         type=Path,
-        help="Путь к fluidaudiocli для диаризации больших встреч",
+        help="Путь к своей сборке fluidaudiocli вместо поставочной",
     )
     parser.add_argument(
         "--diarization-threshold",
@@ -1276,6 +1279,7 @@ def _transcribe(
                             else None
                         ),
                         "offline": args.offline,
+                        "num_speakers": args.expected_speakers,
                     },
                     stall_timeout_seconds=args.backend_stall_timeout,
                     on_progress=report.windows("Диаризация"),
@@ -1285,6 +1289,14 @@ def _transcribe(
                     {args.diarization_model: revision_for_model(args.diarization_model)},
                 ):
                     save_diarization(args.cache_dir, diarization_key, diarization, source_identity)
+            if args.expected_speakers is None:
+                found = len(diarization.speakers)
+                diarization = replace(diarization, turns=drop_ghost_speakers(diarization.turns))
+                if len(diarization.speakers) < found:
+                    report.stage(
+                        f"Диаризация: отброшено голосов с речью меньше 5 с: "
+                        f"{found - len(diarization.speakers)}"
+                    )
             # Нарезка режет каждое окно по границам реплик и пишет их на диск:
             # на 42-минутной встрече это 7–8 минут без единой строки в логе.
             report.stage(f"Нарезка окон по говорящим: {len(base_chunks)}")

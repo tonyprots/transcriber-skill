@@ -13,6 +13,7 @@ from typing import Any
 from .backends import BackendMissing, _PinnedLoad, load_with_hub_fallback
 from .catalog import bundled_binary_problem, fluidaudio_binary_path
 from .diarization import partition_turns
+from .fluid_models import ModelsUnavailable, ensure as ensure_fluid_models
 from .models import Diarization, SpeakerTurn
 from .exiting import exit_after_flush
 
@@ -121,18 +122,30 @@ def _run_fluidaudio(
     threshold = float(config.get("threshold", 0.7))
     started = time.monotonic()
     _write_json(progress_path, {"stage": "loading", "completed": 0})
+    # Модели ставим сами и с закреплённой ревизии: иначе бинарник скачал бы
+    # последний коммит репозитория, а мерили мы конкретный.
+    try:
+        ensure_fluid_models(offline=bool(config.get("offline", False)))
+    except ModelsUnavailable as error:
+        raise BackendMissing(str(error)) from error
+    command = [
+        str(binary),
+        "process",
+        str(audio_path),
+        "--mode",
+        "offline",
+        "--threshold",
+        str(threshold),
+        "--output",
+        str(output_path),
+    ]
+    # Известное число голосов — подсказка модели, а не только выбор backend:
+    # на записях вдвоём число угадано в 95% против 82% без неё
+    # (experiments/diarization-natural, 2026-10-07).
+    if config.get("num_speakers"):
+        command += ["--num-speakers", str(int(config["num_speakers"]))]
     process = subprocess.Popen(
-        [
-            str(binary),
-            "process",
-            str(audio_path),
-            "--mode",
-            "offline",
-            "--threshold",
-            str(threshold),
-            "--output",
-            str(output_path),
-        ],
+        command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -182,6 +195,7 @@ def _run_fluidaudio(
             "backend": "fluidaudio",
             "process_isolated": True,
             "threshold": threshold,
+            "num_speakers": config.get("num_speakers"),
             "max_speakers": None,
             "reported_speaker_count": int(payload.get("speakerCount", len({speaker for turn in raw_turns for speaker in turn.speakers}))),
             "processing_seconds": payload.get("processingTimeSeconds"),

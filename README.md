@@ -109,8 +109,7 @@
 | Основная модель | GigaAM v3 E2E RNNT (onnx-asr) | Whisper large-v3-turbo (MLX) |
 | Независимая проверка (`max`) | Whisper large-v3-turbo (MLX) | Parakeet TDT 0.6B v3 (onnx-asr) |
 | Лёгкая проверка (`fast`) | Vosk ru (alphacep) | нет |
-| Диаризация, 1–4 голоса | MLX Sortformer | то же |
-| Диаризация, 5+ голосов | FluidAudio Offline Community-1 | то же |
+| Диаризация | FluidAudio Offline Community-1 (CoreML) | то же |
 
 Остальные языки распознаются одним Whisper с явным предупреждением: для них
 нет локальной калибровки.
@@ -183,14 +182,12 @@ bash ~/.claude/skills/transcriber/scripts/setup.sh --models ru
 
 Модели живут в `~/.cache/huggingface`: для русского это GigaAM v3 (0,9 ГБ),
 Whisper Turbo (1,5 ГБ) и Vosk ru (0,25 ГБ) для проверки в режиме `fast`, для
-английского ещё Parakeet TDT v3 (2,4 ГБ) для проверки в режиме `max`, для
-диаризации Sortformer (0,2 ГБ). Размер маршрута считает
+английского ещё Parakeet TDT v3 (2,4 ГБ) для проверки в режиме `max`. Размер маршрута считает
 `scripts/prefetch_models.py ru --print-size`. Скилл берёт свои варианты,
 `istupakov/gigaam-v3-onnx` и `mlx-community/whisper-large-v3-turbo-asr-fp16`,
 поэтому кэш mlx-whisper или PyTorch-версии GigaAM не переиспользуется. Другую
-MLX-модель Whisper можно подставить флагом `--whisper-model`. Для встреч с
-пятью и более участниками отдельно скачиваются CoreML-модели FluidAudio
-(35 МБ): `scripts/setup_fluidaudio_models.py`. Если что-то не работает,
+MLX-модель Whisper можно подставить флагом `--whisper-model`. CoreML-модели
+диаризации FluidAudio (35 МБ) ставятся сами при первом `--diarize`. Если что-то не работает,
 `scripts/doctor.py` показывает, чего не хватает: пакеты, модели, ревизии их
 весов и дату последнего замера качества.
 
@@ -405,23 +402,26 @@ Apple M1, 16 ГБ, macOS 26.3, замеры сделаны на версии 0.
 [experiments/review-queue-eval](experiments/review-queue-eval/), о
 калибровке — в [references/quality.md](skills/transcriber/references/quality.md).
 
-Диаризация на синтетической схеме шести чередующихся голосов: FluidAudio
-нашёл все шесть, proxy DER 0,8 %; Sortformer нашёл три, 50,6 %. Это
-проверка целевого сценария, а не публичный бенчмарк: числа нельзя
-переносить на чужие записи.
+Диаризация на живых записях вдвоём (замер 2026-10-07): на 44 записях
+VoxConverse DER FluidAudio 4,6 % против 21,4 % у прежнего Sortformer, на шести
+русских интервью kremlin.ru — 8,8 % против 43,8 %. С известным числом голосов
+FluidAudio угадывает его в 95 % записей. Русский эталон собран из стенограмм
+с именами, поэтому это проверка целевого сценария, а не публичный бенчмарк.
+Метод и цифры — [references/models.md](skills/transcriber/references/models.md),
+раздел «Диаризация».
 
 ## Ограничения и что дальше
 
 - При диаризации граница смены говорящего может разрезать слово: обе модели
   слышат обрубок, и место попадает в очередь. На 17-минутной записи так
   выглядит примерно каждый пятый существенный пункт.
-- Диаризация Sortformer на длинных монологах склонна находить лишние
-  голоса; для одного голоса `--diarize` не нужен.
+- Диаризация теряет короткие вставки собеседника: из реплик в 1–3 секунды
+  находится половина. Для одного голоса `--diarize` не нужен.
 - Linux: русский маршрут идёт целиком — GigaAM и Vosk через onnx-asr, —
   но проверяющая в `max` — faster-whisper medium на CPU вместо Whisper Turbo.
   У английского маршрута на CPU меняется основная модель, и качество такой
   замены не замерялось; результат говорит об этом в предупреждениях.
-  Диаризации нет: Sortformer работает на MLX, а FluidAudio — бинарник macOS
+  Диаризации нет: FluidAudio — бинарник macOS
   arm64, который собирает CI этого репозитория из закреплённого коммита и
   `setup.sh` скачивает со сверкой суммы; происхождение и attestation — в
   [third-party/fluidaudio/NOTICE.md](skills/transcriber/third-party/fluidaudio/NOTICE.md).
@@ -457,8 +457,7 @@ CC-BY-4.0), FluidAudio (Apache-2.0).
 of Russian and English audio and video. It splits speech with Silero VAD,
 runs a primary model and an independent verifier on the same windows
 (GigaAM v3 → Whisper Turbo for Russian, Whisper Turbo → Parakeet TDT v3
-for English), diarizes with MLX Sortformer (≤4 speakers) or FluidAudio
-(5+), and produces verbatim and readable transcripts, SRT/VTT subtitles, a
+for English), diarizes with FluidAudio Offline Community-1 (CoreML), and produces verbatim and readable transcripts, SRT/VTT subtitles, a
 review queue of disputed spans, a glossary audit and a full manifest.
 It takes files or links: YouTube and hundreds of sites via yt-dlp, VK Video,
 Rutube and Yandex Music podcast episodes. It can grab existing captions in

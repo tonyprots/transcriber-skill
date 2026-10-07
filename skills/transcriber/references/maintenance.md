@@ -102,7 +102,7 @@ yt-dlp`, `pip install -U yt-dlp` или `yt-dlp -U`. Запускать её —
 размер любого маршрута считает сам скилл:
 `"$ASR_PYTHON" "$SKILL_DIR/scripts/prefetch_models.py" ru --print-size`.
 `setup.sh --models en` или `--models all` берут модели для английского,
-`--diarize` добавляет Sortformer. Без `--models` модели подтянутся при первом
+`--diarize` добавляет CoreML-модели FluidAudio (35 МБ). Без `--models` модели подтянутся при первом
 запуске. Установка заканчивается `scripts/doctor.py`: Python, ffmpeg, пакеты,
 какие модели в кэше, их ревизии и даты замеров. Его же запускай, когда что-то
 не работает.
