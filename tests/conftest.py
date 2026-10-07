@@ -57,3 +57,10 @@ def pytest_unconfigure(config) -> None:
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(_exit_status)
+
+
+@pytest.fixture(autouse=True)
+def isolated_update_check(tmp_path_factory, monkeypatch):
+    """Тесты не ходят на GitHub и не пишут в настоящий ~/.transcriber."""
+    monkeypatch.setenv("TRANSCRIBER_UPDATE_STATE", str(tmp_path_factory.mktemp("update") / "state.json"))
+    monkeypatch.setenv("TRANSCRIBER_NO_UPDATE_CHECK", "1")

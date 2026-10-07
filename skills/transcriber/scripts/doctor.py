@@ -38,6 +38,7 @@ from audio_transcription.catalog import (  # noqa: E402
     search_term,
     unpinned,
 )
+from audio_transcription import __version__, fluid_models, update_check  # noqa: E402
 from audio_transcription.audio import find_command  # noqa: E402
 from audio_transcription.fetching import (  # noqa: E402
     YT_DLP_SHELF_LIFE_DAYS,
@@ -66,22 +67,11 @@ def _module_version(name: str) -> str | None:
     return str(getattr(module, "__version__", "ok"))
 
 
-def _fluid_models_dir() -> Path:
-    return (
-        Path.home()
-        / "Library"
-        / "Application Support"
-        / "FluidAudio"
-        / "Models"
-        / "speaker-diarization-coreml"
-    )
-
-
 def check_catalog(today: date | None = None) -> list[dict]:
     """Состояние каждой модели: скачана ли, когда её последний раз мерили."""
     today = today or date.today()
     hub = hf_cache_dir()
-    fluid_ready = (_fluid_models_dir() / "plda-parameters.json").is_file()
+    fluid_ready = fluid_models.ready()
     rows = []
     for entry in CATALOG:
         cache_dir = entry.cache_dir
@@ -233,6 +223,13 @@ def check_yt_dlp(check_updates: bool = False) -> dict:
     return status
 
 
+def check_skill_update(check_updates: bool) -> dict:
+    """Версия скилла против последнего релиза; с --check-updates — спросить сейчас."""
+    if check_updates and not update_check.disabled():
+        update_check.refresh()
+    return {"installed": __version__, "checked": check_updates, "available": update_check.available()}
+
+
 def collect(check_updates: bool = False) -> dict:
     apple = platform.system() == "Darwin" and platform.machine() == "arm64"
     skill_dir = Path(__file__).resolve().parents[1]
@@ -256,7 +253,8 @@ def collect(check_updates: bool = False) -> dict:
         "fluidaudio_binary_problem": (
             bundled_binary_problem(fluid_binary, skill_dir) if fluid_binary else None
         ),
-        "fluidaudio_models": (_fluid_models_dir() / "plda-parameters.json").is_file(),
+        "fluidaudio_models": fluid_models.ready(),
+        "skill_update": check_skill_update(check_updates),
         "yt_dlp": check_yt_dlp(check_updates),
         "free_gb": round(shutil.disk_usage(Path.home()).free / 1024**3, 1),
     }
@@ -361,6 +359,16 @@ def render(report: dict) -> str:
         )
     else:
         lines.append("yt-dlp (ссылки) ✗ не установлен — работают только файлы")
+
+    skill = report["skill_update"]
+    if skill["available"]:
+        found = skill["available"]
+        lines.append(
+            f"! Вышла версия скилла {found['latest']} (у вас {found['installed']}): "
+            f"{found['how']}. Что нового: {found['notes']}"
+        )
+    elif skill["checked"]:
+        lines.append(f"Скилл {skill['installed']}: новее релиза нет")
 
     updates = report["updates"]
     if updates["checked"]:

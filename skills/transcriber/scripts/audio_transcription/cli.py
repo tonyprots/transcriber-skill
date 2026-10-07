@@ -18,7 +18,7 @@ from typing import Any, Callable
 
 import yaml
 
-from . import __version__
+from . import __version__, update_check
 from .audio import MediaToolError, prepare_audio, split_speech_windows
 from .fetching import (
     FetchError,
@@ -1808,6 +1808,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Ошибка: {exc}", file=sys.stderr)
         return 2
     batch = len(args.input) * len(_sections(args)) > 1
+    update_check.start(offline=args.offline)
     try:
         if not batch:
             payload: dict[str, Any] = summarize(run(args))
@@ -1817,6 +1818,14 @@ def main(argv: list[str] | None = None) -> int:
     except FAILURES as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
         return 2
+    newer = update_check.available()
+    if newer:
+        payload["update_available"] = newer
+        print(
+            f"Вышла версия скилла {newer['latest']} (у вас {newer['installed']}). "
+            f"Обновление — {newer['how']}. Что нового: {newer['notes']}",
+            file=sys.stderr,
+        )
     print(json.dumps(payload, ensure_ascii=False))
     if batch and any("error" in item for item in payload["results"]):
         return 2
