@@ -15,6 +15,13 @@ REQUIRED = (
     "wespeaker_v2.mlmodelc/model.mil",
     "plda-parameters.json",
 )
+# Только то, что берёт офлайновый режим: репозиторий держит ещё mlpackage-
+# исходники, int8- и PLDA-варианты, и широкий фильтр качал 70 МБ вместо 34.
+MODELS = (
+    "Segmentation", "Embedding", "FBank", "PldaRho",
+    "pyannote_segmentation", "wespeaker_v2",
+)
+FILES = ("config.json", "plda-parameters.json", "xvector-transform.json")
 
 
 class ModelsUnavailable(RuntimeError):
@@ -61,7 +68,7 @@ def ensure(target: Path | None = None, *, offline: bool = False) -> str:
         repo_id=FLUIDAUDIO.repo,
         revision=FLUIDAUDIO.revision,
         local_dir=target,
-        allow_patterns=["*.json", "*.mlmodelc/**"],
+        allow_patterns=[*FILES, *(f"{name}.mlmodelc/**" for name in MODELS)],
     )
     if not ready(target):
         raise ModelsUnavailable(f"После загрузки набор моделей FluidAudio неполон: {target}")
