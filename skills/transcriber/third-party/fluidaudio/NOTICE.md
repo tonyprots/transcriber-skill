@@ -14,10 +14,10 @@
 [`5c19d5e`](https://github.com/FluidInference/FluidAudio/commit/5c19d5e12320e22bbfb7a1877b089d2665a69add)
 на `macos-15` (arm64), подписывает ad-hoc и публикует в неизменяемом Release
 [`fluidaudio-5c19d5e`](https://github.com/tonyprots/transcriber-skill/releases/tag/fluidaudio-5c19d5e)
-вместе с attestation происхождения (SLSA, Sigstore). `setup.sh` на Apple
-Silicon скачивает его по адресу из `bin/macos-arm64/fluidaudiocli.url` и
-кладёт на место, только если SHA-256 совпал с
-`bin/macos-arm64/fluidaudiocli.sha256`:
+вместе с attestation происхождения (SLSA, Sigstore). `setup.sh` или первый
+`--diarize` на Apple Silicon скачивает его по адресу из
+`bin/macos-arm64/fluidaudiocli.url` и кладёт на место, только если SHA-256
+совпал с `bin/macos-arm64/fluidaudiocli.sha256`:
 
 `521016abdc7c2a1cdc31c8fe37043f93062cae6d842c90431a05d96ab9bde4a8`
 
