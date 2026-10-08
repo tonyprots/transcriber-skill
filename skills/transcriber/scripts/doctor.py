@@ -346,7 +346,11 @@ def render(report: dict) -> str:
     lines.append(
         f"FluidAudio (диаризация): бинарник {mark(report['fluidaudio_binary'] and not report['fluidaudio_binary_problem'])}, "
         f"CoreML-модели {mark(report['fluidaudio_models'])}"
-        + ("" if report["fluidaudio_models"] else " — поставятся при первом --diarize")
+        + (
+            ""
+            if report["fluidaudio_models"] and report["fluidaudio_binary"]
+            else " — недостающее скачается при первом --diarize"
+        )
     )
 
     yt_dlp = report["yt_dlp"]

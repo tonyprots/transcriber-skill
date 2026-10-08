@@ -138,3 +138,51 @@ def test_download_uses_pinned_revision(monkeypatch, tmp_path: Path) -> None:
     assert fluid_models.ensure(tmp_path / "models") == "downloaded"
     assert calls[0]["revision"] == fluid_models.FLUIDAUDIO.revision
     assert calls[0]["repo_id"] == fluid_models.FLUIDAUDIO.repo
+
+
+class _Response:
+    def __init__(self, payload: bytes) -> None:
+        self._payload = [payload, b""]
+
+    def read(self, _size: int) -> bytes:
+        return self._payload.pop(0)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        return None
+
+
+def _skill(tmp_path: Path, payload: bytes) -> Path:
+    import hashlib
+
+    folder = tmp_path / "skill" / "bin" / "macos-arm64"
+    folder.mkdir(parents=True)
+    (folder / "fluidaudiocli.url").write_text("https://example.invalid/fluidaudiocli\n", encoding="utf-8")
+    (folder / "fluidaudiocli.sha256").write_text(
+        f"{hashlib.sha256(payload).hexdigest()}  fluidaudiocli\n", encoding="utf-8"
+    )
+    return tmp_path / "skill"
+
+
+def test_binary_is_downloaded_and_checked(tmp_path: Path) -> None:
+    # Установка через /plugin, npx или корп-стор не запускает setup.sh.
+    skill = _skill(tmp_path, b"binary")
+    path = fluid_models.ensure_binary(skill, opener=lambda url, timeout: _Response(b"binary"))
+    assert path.read_bytes() == b"binary"
+    assert path.stat().st_mode & 0o111
+    assert fluid_models.ensure_binary(skill, opener=pytest.fail) == path
+
+
+def test_tampered_binary_is_rejected(tmp_path: Path) -> None:
+    skill = _skill(tmp_path, b"binary")
+    with pytest.raises(fluid_models.ModelsUnavailable, match="не совпал"):
+        fluid_models.ensure_binary(skill, opener=lambda url, timeout: _Response(b"evil"))
+    assert not fluid_models.bundled_binary(skill).exists()
+    assert not fluid_models.bundled_binary(skill).with_name("fluidaudiocli.part").exists()
+
+
+def test_binary_offline_fails_clearly(tmp_path: Path) -> None:
+    with pytest.raises(fluid_models.ModelsUnavailable, match="офлайн"):
+        fluid_models.ensure_binary(_skill(tmp_path, b"x"), offline=True, opener=pytest.fail)

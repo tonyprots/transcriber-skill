@@ -35,11 +35,10 @@
 ## Установка и другие платформы
 
 FluidAudio — бинарник macOS arm64, собранный CI репозитория из закреплённого
-коммита; `setup.sh` скачивает его из Release и ставит только при совпадении
-суммы (происхождение и проверка — `third-party/fluidaudio/NOTICE.md`). Нет его в
-`bin/macos-arm64/` — перезапусти `setup.sh`. CoreML-модели (35 МБ, закреплённая
-ревизия) скачиваются сами при первом `--diarize`; с `--offline` их нужно
-поставить заранее: `prefetch_models.py --diarize`.
+коммита. Он и CoreML-модели (около 20 и 34 МБ) скачиваются сами при первом
+`--diarize`; бинарник ставится только при совпадении SHA-256 с опубликованной
+суммой (происхождение и проверка — `third-party/fluidaudio/NOTICE.md`). С
+`--offline` их нужно поставить заранее: `prefetch_models.py --diarize`.
 
 ```bash
 "$ASR_PYTHON" "$SKILL_DIR/scripts/transcribe.py" INPUT \

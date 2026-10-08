@@ -1,11 +1,19 @@
-"""CoreML-модели FluidAudio: где лежат, полный ли набор, докачка закреплённой ревизии.
+"""FluidAudio: бинарник и CoreML-модели — где лежат, докачка с проверкой.
 
 fluidaudiocli ищет модели в каталоге Application Support. Сам он скачал бы
 последний коммит репозитория, поэтому ставим их мы — с ревизии, на которой
 мерили (catalog.FLUIDAUDIO.revision).
+
+Бинарник собирает CI репозитория и кладёт в Release; адрес и SHA-256 лежат в
+`bin/macos-arm64/`. Раньше его ставил только setup.sh, и установка через
+`/plugin`, `npx skills` или корпоративный стор оставалась без диаризации.
+Теперь он докачивается при первом `--diarize`, как модели.
 """
 from __future__ import annotations
 
+import hashlib
+import os
+import urllib.request
 from pathlib import Path
 
 from .catalog import FLUIDAUDIO
@@ -73,3 +81,41 @@ def ensure(target: Path | None = None, *, offline: bool = False) -> str:
     if not ready(target):
         raise ModelsUnavailable(f"После загрузки набор моделей FluidAudio неполон: {target}")
     return "downloaded"
+
+
+def bundled_binary(skill_dir: Path | None = None) -> Path:
+    skill_dir = skill_dir or Path(__file__).resolve().parents[2]
+    return skill_dir / "bin" / "macos-arm64" / "fluidaudiocli"
+
+
+def ensure_binary(skill_dir: Path | None = None, *, offline: bool = False, opener=urllib.request.urlopen) -> Path:
+    """Поставочный fluidaudiocli: уже на месте или скачанный и сверенный по SHA-256."""
+    target = bundled_binary(skill_dir)
+    if target.is_file() and os.access(target, os.X_OK):
+        return target
+    try:
+        url = target.with_name("fluidaudiocli.url").read_text(encoding="utf-8").strip()
+        expected = target.with_name("fluidaudiocli.sha256").read_text(encoding="utf-8").split()[0].lower()
+    except (OSError, IndexError) as error:
+        raise ModelsUnavailable(f"Нет адреса или суммы fluidaudiocli рядом с {target}") from error
+    if offline:
+        raise ModelsUnavailable(
+            "Нет fluidaudiocli (около 20 МБ), а прогон офлайн. Запустите без --offline "
+            "или prefetch_models.py --diarize"
+        )
+    part = target.with_name("fluidaudiocli.part")
+    digest = hashlib.sha256()
+    try:
+        with opener(url, timeout=60) as response, part.open("wb") as handle:
+            for block in iter(lambda: response.read(1 << 20), b""):
+                digest.update(block)
+                handle.write(block)
+    except OSError as error:
+        part.unlink(missing_ok=True)
+        raise ModelsUnavailable(f"fluidaudiocli не скачался: {error}") from error
+    if digest.hexdigest() != expected:
+        part.unlink(missing_ok=True)
+        raise ModelsUnavailable("Скачанный fluidaudiocli не совпал с опубликованной суммой")
+    part.chmod(0o755)
+    part.replace(target)
+    return target

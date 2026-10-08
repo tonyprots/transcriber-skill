@@ -13,7 +13,7 @@ from typing import Any
 from .backends import BackendMissing, _PinnedLoad, load_with_hub_fallback
 from .catalog import bundled_binary_problem, fluidaudio_binary_path
 from .diarization import partition_turns
-from .fluid_models import ModelsUnavailable, ensure as ensure_fluid_models
+from .fluid_models import ModelsUnavailable, ensure as ensure_fluid_models, ensure_binary as ensure_fluid_binary
 from .models import Diarization, SpeakerTurn
 from .exiting import exit_after_flush
 
@@ -38,6 +38,11 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 
 def _fluid_binary(config: dict[str, Any]) -> Path:
     path = fluidaudio_binary_path(config.get("binary"))
+    if path is None and not config.get("binary"):
+        try:
+            path = ensure_fluid_binary(offline=bool(config.get("offline", False)))
+        except ModelsUnavailable as error:
+            raise BackendMissing(str(error)) from error
     if path is None:
         raise FileNotFoundError(
             "Не найден fluidaudiocli. Укажите --fluidaudio-bin или установите "

@@ -24,7 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from audio_transcription.fluid_models import ensure as ensure_fluid_models  # noqa: E402
+from audio_transcription.fluid_models import ensure as ensure_fluid_models, ensure_binary  # noqa: E402
 from audio_transcription.catalog import (  # noqa: E402
     FASTER_WHISPER_FALLBACK,
     GIGAAM_RUSSIAN,
@@ -94,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
         steps.append((_label(PARAKEET_ENGLISH), pinned(PARAKEET_ENGLISH)))
     if args.diarize:
         if _apple():
+            steps.append(("fluidaudiocli (около 20 МБ)", ensure_binary))
             steps.append((_label(FLUIDAUDIO), ensure_fluid_models))
         else:
             print("Диаризация доступна только на macOS Apple Silicon: FluidAudio пропущен", file=sys.stderr)
