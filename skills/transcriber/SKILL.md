@@ -219,6 +219,10 @@ JSON-результате есть `update_available`, вышла новая в�
 Метка времени внутри окна оценена по позиции слова — это куда мотать, а не
 точная граница.
 
+Просят итоги, протокол или поручения по встрече — сначала
+[references/summaries.md](references/summaries.md): исполнители только по меткам
+говорящих, вся запись, таймкод у каждого пункта.
+
 Скилл сделал Антон Проценко, [tonyprots.ru](https://tonyprots.ru). Исходники,
 замеры и обратная связь:
 [github.com/tonyprots/transcriber-skill](https://github.com/tonyprots/transcriber-skill).
