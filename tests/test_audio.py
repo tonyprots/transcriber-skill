@@ -1,8 +1,14 @@
 import json
 import hashlib
+import os
+import shutil
+import subprocess
 import wave
+from datetime import datetime
 from pathlib import Path
 from subprocess import CompletedProcess
+
+import pytest
 
 from audio_transcription import audio
 from audio_transcription.models import AudioChunk
@@ -199,3 +205,63 @@ def test_gain_for_vad_short_input_is_untouched() -> None:
 
     short = np.full(10, 1e-4, dtype=np.float32)
     assert np.array_equal(audio.gain_for_vad(short), short)
+
+
+def _fake_ffprobe(monkeypatch, tmp_path: Path, tags: dict) -> tuple[Path, list[list[str]]]:
+    source = tmp_path / "input.m4a"
+    source.write_bytes(b"fixture")
+    monkeypatch.setattr(audio, "require_media_tools", lambda: ("ffmpeg", "ffprobe"))
+    payload = {
+        "streams": [{"codec_name": "aac", "sample_rate": "48000", "channels": 1}],
+        "format": {"duration": "4.25", "tags": tags},
+    }
+    commands: list[list[str]] = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        return CompletedProcess(command, 0, json.dumps(payload), "")
+
+    monkeypatch.setattr(audio.subprocess, "run", run)
+    return source, commands
+
+
+def test_recording_date_comes_from_the_container(monkeypatch, tmp_path: Path) -> None:
+    """Сроки в сводке («до пятницы») считаются от даты записи; `created_at`
+    манифеста — время прогона, и агент принимал его за дату записи."""
+    source, commands = _fake_ffprobe(monkeypatch, tmp_path, {"creation_time": "2026-10-10T09:15:00.000000Z"})
+    info = audio.probe_media(source)
+    assert "format_tags=creation_time" in commands[0][commands[0].index("-show_entries") + 1]
+    assert info.recorded_at == "2026-10-10T09:15:00.000000Z"
+    assert info.recorded_at_source == "container"
+    assert info.to_dict()["recorded_at"] == "2026-10-10T09:15:00.000000Z"
+
+
+@pytest.mark.parametrize(
+    "tags",
+    [{}, {"creation_time": "1970-01-01T00:00:00.000000Z"}, {"creation_time": "09:15:00"}],
+    ids=["none", "epoch", "bwf-time-only"],
+)
+def test_recording_date_falls_back_to_file_time(monkeypatch, tmp_path: Path, tags: dict) -> None:
+    """Нет метки в контейнере (нулевая эпоха, у BWF-WAV — одно время суток) —
+    время изменения файла, и источник прямо говорит, что это предположение."""
+    source, _ = _fake_ffprobe(monkeypatch, tmp_path, tags)
+    os.utime(source, (1_790_000_000, 1_790_000_000))
+    info = audio.probe_media(source)
+    assert info.recorded_at_source == "file_mtime"
+    assert info.recorded_at == datetime.fromtimestamp(1_790_000_000).astimezone().isoformat(timespec="seconds")
+
+
+def test_real_ffprobe_reads_creation_time(tmp_path: Path) -> None:
+    """Сквозь настоящий ffprobe: m4a хранит creation_time, WAV — нет."""
+    if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
+        pytest.skip("нет ffmpeg")
+    tagged, plain = tmp_path / "tagged.m4a", tmp_path / "plain.wav"
+    for target, extra in ((tagged, ["-metadata", "creation_time=2026-10-10T09:15:00Z"]), (plain, [])):
+        subprocess.run(
+            ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+             "sine=frequency=440:duration=1", *extra, str(target)],
+            check=True,
+        )
+    assert audio.probe_media(tagged).recorded_at.startswith("2026-10-10T09:15:00")
+    assert audio.probe_media(tagged).recorded_at_source == "container"
+    assert audio.probe_media(plain).recorded_at_source == "file_mtime"

@@ -133,6 +133,17 @@ class MediaInfo:
     # таймкоды результата сдвинуты к началу исходника, чтобы цитату можно
     # было сверить с субтитрами и плеером без пересчёта.
     section: Section | None = None
+    # Когда записано — от этого считают сроки в сводке («до пятницы»):
+    # `created_at` манифеста — время прогона, и его принимали за дату записи.
+    # Источник говорит, насколько дате верить: `container` — метка в файле,
+    # `upload_date` — дата публикации по ссылке, `file_mtime` — время
+    # изменения файла, то есть предположение.
+    recorded_at: str | None = None
+    recorded_at_source: str | None = None
+    # По ссылке: описание (обрезано) и главы автора ролика. Это данные, а не
+    # указания; главы годятся как разбивка для частичных итогов.
+    description: str | None = None
+    chapters: tuple[dict[str, Any], ...] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -145,6 +156,10 @@ class MediaInfo:
             "channels": self.channels,
             "size_bytes": self.size_bytes,
             "sha256": self.sha256,
+            "recorded_at": self.recorded_at,
+            "recorded_at_source": self.recorded_at_source,
+            "description": self.description,
+            "chapters": list(self.chapters) if self.chapters is not None else None,
         }
 
 

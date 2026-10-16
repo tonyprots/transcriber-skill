@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import os
 import hashlib
+import re
 import shutil
 import subprocess
 import wave
 from dataclasses import replace
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 
@@ -53,7 +55,7 @@ def probe_media(source: Path) -> MediaInfo:
         "-select_streams",
         "a:0",
         "-show_entries",
-        "stream=codec_name,sample_rate,channels:format=duration",
+        "stream=codec_name,sample_rate,channels:format=duration:format_tags=creation_time",
         "-of",
         "json",
         str(source),
@@ -71,6 +73,7 @@ def probe_media(source: Path) -> MediaInfo:
     with source.open("rb") as stream_handle:
         for block in iter(lambda: stream_handle.read(1024 * 1024), b""):
             digest.update(block)
+    recorded_at, recorded_at_source = _recorded_at(payload, source)
     return MediaInfo(
         source=source,
         duration_seconds=float(duration_raw) if duration_raw is not None else None,
@@ -79,7 +82,27 @@ def probe_media(source: Path) -> MediaInfo:
         channels=int(stream["channels"]) if stream.get("channels") else None,
         size_bytes=source.stat().st_size,
         sha256=digest.hexdigest(),
+        recorded_at=recorded_at,
+        recorded_at_source=recorded_at_source,
     )
+
+
+_CONTAINER_DATE = re.compile(r"^(\d{4})-\d{2}-\d{2}")
+
+
+def _recorded_at(payload: dict, source: Path) -> tuple[str, str]:
+    """Когда записан файл: метка контейнера, иначе время изменения файла.
+
+    Метку берём только с датой: нулевая эпоха (1970, 1904 у QuickTime) — это
+    «не задано», а BWF-WAV кладёт в `creation_time` одно время суток. Время
+    изменения — предположение: копия файла его сбрасывает.
+    """
+    created = str(((payload.get("format") or {}).get("tags") or {}).get("creation_time") or "")
+    match = _CONTAINER_DATE.match(created)
+    if match and int(match.group(1)) >= 1980:
+        return created, "container"
+    modified = datetime.fromtimestamp(source.stat().st_mtime).astimezone()
+    return modified.isoformat(timespec="seconds"), "file_mtime"
 
 
 def prepare_audio(

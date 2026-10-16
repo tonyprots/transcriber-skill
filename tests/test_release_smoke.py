@@ -46,7 +46,7 @@ def test_release_path_on_pinned_weights(tmp_path: Path) -> None:
     for name, word in EXPECTED.items():
         result = output / name
         manifest = json.loads((result / "manifest.json").read_text(encoding="utf-8"))
-        assert manifest["schema_version"] == 8
+        assert manifest["schema_version"] == 9
         revisions = manifest["model_revisions"]
         assert revisions, "манифест не назвал ни одной модели"
         for model, revision in revisions.items():

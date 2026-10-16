@@ -664,3 +664,76 @@ def test_playlist_of_one_is_its_video(monkeypatch) -> None:
     assert media.title == "Ролик"
     assert media.url == "https://vk.com/video-1_2"
     assert calls[1][-1] == "https://vk.com/video-1_2"
+
+
+def test_probe_keeps_chapters_and_a_short_description(yt_dlp) -> None:
+    """yt-dlp и так отдаёт описание и главы — раньше они выбрасывались."""
+    payload = {
+        "title": "Доклад",
+        "duration": 3600,
+        "upload_date": "20261001",
+        "description": "Слайды: https://example.com\n" + "х" * 5000,
+        "chapters": [
+            {"start_time": 0.0, "end_time": 95.0, "title": "Вступление"},
+            {"start_time": 95.0, "end_time": 3600.0, "title": "Архитектура"},
+        ],
+    }
+    yt_dlp(stdout=json.dumps(payload))
+    media = fetching.probe_remote("https://www.youtube.com/watch?v=a")
+    assert media.chapters == (
+        {"start": 0.0, "title": "Вступление"},
+        {"start": 95.0, "title": "Архитектура"},
+    )
+    assert media.description.startswith("Слайды: https://example.com\n")
+    assert len(media.description) <= fetching.DESCRIPTION_LIMIT + 1
+    assert media.description.endswith("…")
+    assert "chapters" not in media.summary(), "опрос остаётся компактным"
+
+
+def test_probe_without_chapters_or_description(yt_dlp) -> None:
+    yt_dlp(stdout=json.dumps({"title": "Ролик", "chapters": None, "description": ""}))
+    media = fetching.probe_remote("https://www.youtube.com/watch?v=a")
+    assert media.chapters == () and media.description is None
+
+
+def _local(**fields):
+    from audio_transcription.models import MediaInfo
+
+    return MediaInfo(Path("/tmp/transcriber-download-x/audio.webm"), 60.0, "opus", 48000, 1, **fields)
+
+
+def test_remote_source_carries_date_description_and_chapters() -> None:
+    """В `manifest.source` по ссылке: адрес без хвостов, дата выпуска, описание, главы."""
+    remote = RemoteMedia(
+        url="https://www.youtube.com/watch?v=a&si=share",
+        title="Доклад",
+        duration_seconds=60.0,
+        extractor="Youtube",
+        tracks=(),
+        upload_date="2026-10-01",
+        description="Описание",
+        chapters=({"start": 0.0, "title": "Вступление"},),
+    )
+    media = fetching.with_remote_source(
+        _local(recorded_at="2026-10-16T12:00:00+03:00", recorded_at_source="file_mtime"), remote
+    )
+    source = media.to_dict()
+    assert source["origin"] == "https://www.youtube.com/watch?v=a"
+    assert (source["recorded_at"], source["recorded_at_source"]) == ("2026-10-01", "upload_date")
+    assert source["description"] == "Описание"
+    assert source["chapters"] == [{"start": 0.0, "title": "Вступление"}]
+
+
+def test_remote_source_never_dates_by_the_downloaded_file() -> None:
+    """Время изменения скачанного файла — момент загрузки (или заголовок
+    сервера), а не записи. Без даты выпуска остаётся только метка контейнера."""
+    remote = RemoteMedia("https://example.com/a.mp3", "Запись", 60.0, "generic", ())
+    mtime = fetching.with_remote_source(
+        _local(recorded_at="2026-10-16T12:00:00+03:00", recorded_at_source="file_mtime"), remote
+    )
+    assert (mtime.recorded_at, mtime.recorded_at_source) == (None, None)
+    assert mtime.chapters is None and mtime.description is None
+    container = fetching.with_remote_source(
+        _local(recorded_at="2026-09-30T10:00:00Z", recorded_at_source="container"), remote
+    )
+    assert (container.recorded_at, container.recorded_at_source) == ("2026-09-30T10:00:00Z", "container")

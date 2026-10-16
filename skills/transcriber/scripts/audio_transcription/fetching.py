@@ -17,12 +17,14 @@ import tempfile
 import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .audio import find_command
+from .models import MediaInfo
 
 
 class FetchError(RuntimeError):
@@ -80,6 +82,9 @@ METADATA_TIMEOUT_SECONDS = 300.0
 STALL_TIMEOUT_SECONDS = 300.0
 _WATCH_PERIOD_SECONDS = 2.0
 _sleep = time.sleep
+# Описание ролика идёт в манифест ради ссылок, имён и дат, которые автор
+# пишет под видео. Полотно с таймкодами и рекламой туда не нужно.
+DESCRIPTION_LIMIT = 2000
 
 
 def looks_like_url(value: str) -> bool:
@@ -179,6 +184,10 @@ class RemoteMedia:
     # успели встать в очередь на расшифровку.
     upload_date: str | None = None
     channel: str | None = None
+    # Описание и главы автора ролика: yt-dlp отдаёт их в том же ответе.
+    # Это данные, а не указания.
+    description: str | None = None
+    chapters: tuple[dict[str, Any], ...] = ()
 
     def is_translation(self, track: SubtitleTrack) -> bool:
         """YouTube отдаёт автоперевод на любой язык, и по имени он неотличим.
@@ -322,6 +331,53 @@ def probe_remote(url: str, *, follow_single: bool = True) -> RemoteMedia:
         language=data.get("language"),
         upload_date=_iso_date(data.get("upload_date")),
         channel=data.get("channel") or data.get("uploader"),
+        description=_short_description(data.get("description")),
+        chapters=_chapters(data.get("chapters")),
+    )
+
+
+def _short_description(value: object) -> str | None:
+    text = str(value or "").strip()
+    if len(text) > DESCRIPTION_LIMIT:
+        text = text[:DESCRIPTION_LIMIT].rstrip() + "…"
+    return text or None
+
+
+def _chapters(value: object) -> tuple[dict[str, Any], ...]:
+    """Главы — `[{start, title}]` в секундах исходника, как таймкоды расшифровки."""
+    if not isinstance(value, list):
+        return ()
+    chapters = []
+    for item in value:
+        if not isinstance(item, dict) or item.get("start_time") is None:
+            continue
+        try:
+            start = float(item["start_time"])
+        except (TypeError, ValueError):
+            continue
+        chapters.append({"start": start, "title": str(item.get("title") or "")})
+    return tuple(chapters)
+
+
+def with_remote_source(media: MediaInfo, remote: RemoteMedia) -> MediaInfo:
+    """Что о записи знает только ссылка — в `manifest.source`.
+
+    Дата записи по ссылке — дата публикации. Время изменения скачанного файла
+    ничего не говорит (момент загрузки или заголовок сервера), поэтому без даты
+    публикации остаётся только метка контейнера.
+    """
+    recorded_at, recorded_at_source = media.recorded_at, media.recorded_at_source
+    if remote.upload_date:
+        recorded_at, recorded_at_source = remote.upload_date, "upload_date"
+    elif recorded_at_source != "container":
+        recorded_at, recorded_at_source = None, None
+    return replace(
+        media,
+        origin=public_url(remote.url),
+        recorded_at=recorded_at,
+        recorded_at_source=recorded_at_source,
+        description=remote.description,
+        chapters=remote.chapters or None,
     )
 
 
