@@ -10,6 +10,7 @@ from typing import Any
 from .backends import BackendMissing, BackendUnavailable, GigaAMBackend, MLXWhisperBackend, WhisperBackend
 from .isolated import hold_while_paused
 from .models import AudioChunk, Hypothesis
+from .weights import DownloadHeartbeat, download_listener
 from .exiting import run_entry_point
 
 
@@ -106,7 +107,14 @@ def main(argv: list[str] | None = None) -> int:
         payload = json.loads(request_path.read_text(encoding="utf-8"))
         if int(payload.get("schema", 0)) != 1:
             raise ValueError("Неподдерживаемая схема ASR-задания")
-        hypothesis = _transcribe(payload, progress_path)
+        # Первая закачка весов молчит: без этого сторож родителя убивал воркер
+        # на медленной сети, хотя байты шли.
+        heartbeat = DownloadHeartbeat(
+            lambda stage: _write_json(progress_path, {"stage": stage, "completed": 0, "total": None}),
+            "загрузка весов",
+        )
+        with download_listener(heartbeat):
+            hypothesis = _transcribe(payload, progress_path)
         _write_json(result_path, hypothesis.to_dict())
     except BackendMissing as error:
         # Код 3: бэкенда нет на машине. Только на него родитель уходит в fallback.

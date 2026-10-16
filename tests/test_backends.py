@@ -123,3 +123,150 @@ def test_hub_fallback_waits_out_a_real_download(monkeypatch) -> None:
     )
     assert result == "model-from-hub"
     assert backends.os.environ.get("HF_HUB_OFFLINE") == "0"
+
+
+def _restore_hub_state(monkeypatch) -> None:
+    """Переключение офлайна глобально для процесса: вернуть как было после теста."""
+    import huggingface_hub.constants as constants
+
+    for name in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(constants, "HF_HUB_OFFLINE", constants.HF_HUB_OFFLINE)
+    monkeypatch.setattr(backends, "_ORIGINAL_HUB_ENV", None, raising=False)
+
+
+def test_hub_fallback_does_not_build_model_twice(monkeypatch, tmp_path: Path) -> None:
+    """Веса уже найдены, а сборка из кэша дольше срока: ждём её, а не строим вторую копию.
+
+    Срок нужен сетевой части. Раньше под него попадала и сборка: после 45 с
+    офлайн-попытка строила ещё одну модель параллельно первой, а флаг офлайна
+    оставался в окружении и уходил во все воркеры прогона.
+    """
+    import threading
+    import time
+
+    import huggingface_hub.errors  # noqa: F401 — первый импорт сам дольше срока теста
+
+    from audio_transcription import catalog, weights
+
+    _restore_hub_state(monkeypatch)
+    # Без onnx: его первый импорт в allow_patterns сам дольше срока теста.
+    snapshot = tmp_path / "models--x" / "snapshots" / catalog.FASTER_WHISPER_FALLBACK.revision
+    snapshot.mkdir(parents=True)
+    lock = threading.Lock()
+    state = {"calls": 0, "active": 0, "peak": 0}
+
+    def load():
+        weights.fetch(catalog.FASTER_WHISPER_FALLBACK, download=lambda repo, **kwargs: str(snapshot))
+        with lock:
+            state["calls"] += 1
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+        time.sleep(1.0)
+        with lock:
+            state["active"] -= 1
+        return "model"
+
+    assert backends.load_with_hub_fallback(load, offline=False, label="x", stall_seconds=0.3) == "model"
+    assert (state["calls"], state["peak"]) == (1, 1)
+    assert backends.os.environ.get("HF_HUB_OFFLINE") != "1"
+
+
+def test_workers_do_not_inherit_forced_offline(monkeypatch, tmp_path: Path) -> None:
+    """Офлайн, в который ушёл главный процесс, не наследуется воркерами.
+
+    Иначе воркер с ещё не скачанной моделью падал сразу: и онлайн-, и
+    офлайн-попытка видели HF_HUB_OFFLINE=1.
+    """
+    import pytest
+
+    from audio_transcription import isolated
+
+    _restore_hub_state(monkeypatch)
+    captured: list[dict[str, str]] = []
+
+    class Done:
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    def popen(command, **kwargs):
+        # Только флаги офлайна: всё окружение в отчёте pytest — это и токены.
+        captured.append({name: kwargs["env"].get(name) for name in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")})
+        return Done()
+
+    monkeypatch.setattr(isolated.subprocess, "Popen", popen)
+    backends.force_hub_offline()
+    with pytest.raises(backends.BackendUnavailable):
+        isolated._run_worker("x", "x", {}, tmp_path, stall_timeout_seconds=1.0)
+    assert captured[0] == {"HF_HUB_OFFLINE": None, "TRANSFORMERS_OFFLINE": None}
+
+    # Офлайн, который пользователь задал сам, воркеры получают как есть.
+    _restore_hub_state(monkeypatch)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    backends.force_hub_offline()
+    backends._set_hub_offline(False)
+    with pytest.raises(backends.BackendUnavailable):
+        isolated._run_worker("x", "x", {}, tmp_path, stall_timeout_seconds=1.0)
+    assert captured[1]["HF_HUB_OFFLINE"] == "1"
+
+
+def _prepared(tmp_path: Path) -> Path:
+    import wave
+
+    prepared = tmp_path / "prepared.wav"
+    with wave.open(str(prepared), "wb") as target:
+        target.setnchannels(1)
+        target.setsampwidth(2)
+        target.setframerate(16_000)
+        target.writeframes(b"\0\0" * 32_000)
+    return prepared
+
+
+def test_mlx_whisper_keeps_decoding_temperature(monkeypatch, tmp_path: Path) -> None:
+    """Температура удачной попытки декодирования — рядом с avg_logprob в raw.json.
+
+    Без неё не видно, сколько окон Whisper вытянул повтором на 0,2–0,8.
+    """
+    answer = {
+        "text": "привет",
+        "language": "ru",
+        "segments": [
+            {"words": [], "avg_logprob": -0.2, "compression_ratio": 1.1, "no_speech_prob": 0.01, "temperature": 0.4}
+        ],
+    }
+    monkeypatch.setitem(
+        sys.modules, "mlx_audio.stt.generate", SimpleNamespace(generate_transcription=lambda **_kwargs: answer)
+    )
+    monkeypatch.setitem(sys.modules, "mlx_audio.stt.utils", SimpleNamespace(load_model=lambda _path: object()))
+    monkeypatch.setattr(backends, "weights_for", lambda model, quantization=None: None)
+    hypothesis = backends.MLXWhisperBackend().transcribe_chunks([AudioChunk(0, _prepared(tmp_path), 0.0, 1.0)], "ru")
+    assert hypothesis.text == "привет"
+    assert hypothesis.metadata["chunks"][0]["segment_metrics"] == [
+        {"avg_logprob": -0.2, "compression_ratio": 1.1, "no_speech_prob": 0.01, "temperature": 0.4}
+    ]
+
+
+def test_faster_whisper_keeps_segment_metrics(monkeypatch, tmp_path: Path) -> None:
+    phrase = SimpleNamespace(
+        text="привет", words=[], avg_logprob=-0.3, compression_ratio=1.2, no_speech_prob=0.02, temperature=0.2
+    )
+
+    class FakeWhisper:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def transcribe(self, *_args, **_kwargs):
+            return [phrase], SimpleNamespace(language="ru")
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=FakeWhisper))
+    monkeypatch.setattr(backends, "weights_for", lambda model, quantization=None: None)
+    hypothesis = backends.WhisperBackend().transcribe_chunks([AudioChunk(0, _prepared(tmp_path), 0.0, 1.0)], "ru")
+    assert hypothesis.text == "привет"
+    assert hypothesis.metadata["chunks"][0]["segment_metrics"] == [
+        {"avg_logprob": -0.3, "compression_ratio": 1.2, "no_speech_prob": 0.02, "temperature": 0.2}
+    ]

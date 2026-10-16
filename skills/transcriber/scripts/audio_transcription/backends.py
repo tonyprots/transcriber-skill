@@ -10,7 +10,7 @@ from typing import Any
 
 from .audio import SAMPLE_RATE, chunk_waveform
 from .catalog import FASTER_WHISPER_FALLBACK, WHISPER_TURBO
-from .weights import Weights, weights_for
+from .weights import Weights, resolved_in, weights_for
 from .models import AudioChunk, Hypothesis, Segment
 from .retry import recognize_with_retry
 
@@ -31,12 +31,20 @@ class BackendMissing(BackendUnavailable):
     """
 
 
+_HUB_ENV = ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
+# Как было до нашего первого переключения: это и получают дочерние процессы.
+_ORIGINAL_HUB_ENV: dict[str, str | None] | None = None
+
+
 def _set_hub_offline(offline: bool) -> None:
     """Переключает huggingface_hub между офлайном и сетью в текущем процессе.
 
     Переменной окружения мало: константу huggingface_hub читает при импорте,
     а библиотеки моделей импортируют его раньше нас. Поэтому правим и её.
     """
+    global _ORIGINAL_HUB_ENV
+    if _ORIGINAL_HUB_ENV is None:
+        _ORIGINAL_HUB_ENV = {name: os.environ.get(name) for name in _HUB_ENV}
     value = "1" if offline else "0"
     os.environ["HF_HUB_OFFLINE"] = value
     os.environ["TRANSFORMERS_OFFLINE"] = value
@@ -50,6 +58,22 @@ def _set_hub_offline(offline: bool) -> None:
 def force_hub_offline() -> None:
     """Переводит huggingface_hub в офлайн для текущего процесса."""
     _set_hub_offline(True)
+
+
+def child_hub_environment(environment: dict[str, str]) -> dict[str, str]:
+    """Окружение дочернего процесса без нашего переключения офлайна.
+
+    Офлайн, в который главный процесс ушёл после молчания Hub, — его решение
+    на одну загрузку: воркер с ещё не скачанной моделью иначе падал сразу.
+    `--offline` воркер получает в задании, а офлайн, заданный пользователем
+    в окружении, остаётся как был.
+    """
+    for name, value in (_ORIGINAL_HUB_ENV or {}).items():
+        if value is None:
+            environment.pop(name, None)
+        else:
+            environment[name] = value
+    return environment
 
 
 HUB_STALL_SECONDS = 45.0
@@ -95,6 +119,11 @@ def load_with_hub_fallback(
     worker = threading.Thread(target=attempt, name=f"hub-load:{label}", daemon=True)
     worker.start()
     worker.join(stall_seconds)
+    if worker.is_alive() and resolved_in(worker):
+        # Сеть позади: закреплённые веса уже на диске, идёт сборка модели.
+        # Срок — для молчащего Hub, а не для сборки: вторая попытка построила
+        # бы ещё одну копию модели рядом с первой.
+        worker.join()
     if "value" in box:
         return box["value"]
 
@@ -156,6 +185,21 @@ def _confidence(item: Any) -> float | None:
             except (TypeError, ValueError):
                 pass
     return None
+
+
+def _segment_metrics(phrase: Any) -> dict[str, Any]:
+    """Признаки декодирования фразы Whisper — в raw.json, на текст не влияют.
+
+    `temperature` — с какой попытки фраза принята: 0 — с первой, 0,2–0,8 —
+    после повторов по порогам logprob и сжатия. Без неё вопрос о температурных
+    повторах не решить дёшево: удачные повторы в кэше не видны.
+    """
+    return {
+        "avg_logprob": _value(phrase, "avg_logprob"),
+        "compression_ratio": _value(phrase, "compression_ratio"),
+        "no_speech_prob": _value(phrase, "no_speech_prob"),
+        "temperature": _value(phrase, "temperature"),
+    }
 
 
 def _segments(items: Iterable[Any]) -> list[Segment]:
@@ -337,10 +381,12 @@ class WhisperBackend:
                 text_parts: list[str] = []
                 words_meta: list[dict[str, Any]] = []
                 confidences: list[float] = []
+                segment_metrics: list[dict[str, Any]] = []
                 for phrase in raw_segments:
                     phrase_text = str(getattr(phrase, "text", "")).strip()
                     if phrase_text:
                         text_parts.append(phrase_text)
+                    segment_metrics.append(_segment_metrics(phrase))
                     for word in getattr(phrase, "words", None) or []:
                         word_text = str(getattr(word, "word", "")).strip()
                         if not word_text:
@@ -359,6 +405,7 @@ class WhisperBackend:
                 return {
                     "text": " ".join(text_parts).strip(),
                     "words": words_meta,
+                    "segment_metrics": segment_metrics,
                     "confidence": (
                         sum(confidences) / len(confidences) if confidences else None
                     ),
@@ -537,13 +584,7 @@ class MLXWhisperBackend:
                                 "confidence": confidence,
                             }
                         )
-                    segment_metrics.append(
-                        {
-                            "avg_logprob": _value(phrase, "avg_logprob"),
-                            "compression_ratio": _value(phrase, "compression_ratio"),
-                            "no_speech_prob": _value(phrase, "no_speech_prob"),
-                        }
-                    )
+                    segment_metrics.append(_segment_metrics(phrase))
                 return {
                     "text": text,
                     "words": words_meta,

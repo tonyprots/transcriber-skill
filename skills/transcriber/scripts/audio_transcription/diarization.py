@@ -105,6 +105,23 @@ def _speaker_order(label: str) -> tuple[int, str]:
     return (int(tail), label) if tail.isdigit() else (1 << 30, label)
 
 
+def number_by_first_appearance(turns: list[SpeakerTurn]) -> list[SpeakerTurn]:
+    """Перенумеровывает голоса по первому появлению: speaker_1 заговорил первым.
+
+    Модель нумерует голоса по-своему, и в 9% записей первым говорил не
+    «Спикер 1»: `--speaker-names 1=…` без чтения расшифровки угадывал неверно.
+    cpWER и DER от перестановки меток не зависят.
+    """
+    renamed: dict[str, str] = {}
+    for turn in sorted(turns, key=lambda item: item.start):
+        for speaker in turn.speakers:
+            renamed.setdefault(speaker, f"speaker_{len(renamed) + 1}")
+    return [
+        SpeakerTurn(turn.start, turn.end, tuple(sorted((renamed[s] for s in turn.speakers), key=_speaker_order)))
+        for turn in turns
+    ]
+
+
 def _speakers_for_interval(
     start: float,
     end: float,
@@ -191,11 +208,24 @@ def split_chunks_by_diarization(
             boundaries.add(min(chunk.end, turn.end))
         ordered = sorted(boundaries)
         raw_intervals = []
+        # Кусок короче min_seconds на смене голосов (перекрытие или пауза в
+        # кадр) отдельным окном не идёт, но и не выбрасывается — иначе его звук
+        # не попал бы ни в одно окно: приклеиваем к предыдущему куску, а в
+        # начале окна — к следующему.
+        carry: float | None = None
         for start, end in zip(ordered, ordered[1:]):
             if end - start < min_seconds:
+                if raw_intervals:
+                    previous_start, _, previous_speakers = raw_intervals[-1]
+                    raw_intervals[-1] = (previous_start, end, previous_speakers)
+                elif carry is None:
+                    carry = start
                 continue
             speakers = _speakers_for_interval(start, end, turns)
-            raw_intervals.append((start, end, speakers))
+            raw_intervals.append((start if carry is None else carry, end, speakers))
+            carry = None
+        if carry is not None:  # окно целиком из коротких кусков: оставляем как есть
+            raw_intervals.append((carry, ordered[-1], _speakers_for_interval(carry, ordered[-1], turns)))
         for start, end, speakers in _fill_unassigned(raw_intervals, turns):
             if (
                 intervals

@@ -227,20 +227,109 @@ def test_fluidaudio_binary_found_outside_skill_folder(tmp_path, monkeypatch) -> 
     assert catalog.fluidaudio_binary_path(skill_dir=skill_dir) == binary.resolve()
 
 
+def _executable(path: Path, body: str = "#!/bin/sh\n") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    path.chmod(0o755)
+    return path.resolve()
+
+
+def _bundled_skill(tmp_path: Path, *, present: bool = True) -> tuple[Path, str]:
+    """Скилл с поставочным бинарником (или только с его адресом и суммой)."""
+    import hashlib
+
+    skill = tmp_path / "skill"
+    folder = skill / "bin" / "macos-arm64"
+    folder.mkdir(parents=True)
+    body = "#!/bin/sh\n# поставочный\n"
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    (folder / "fluidaudiocli.sha256").write_text(f"{digest}  fluidaudiocli\n", encoding="utf-8")
+    (folder / "fluidaudiocli.url").write_text("https://example.invalid/fluidaudiocli\n", encoding="utf-8")
+    if present:
+        _executable(folder / "fluidaudiocli", body)
+    return skill, digest
+
+
 def test_fluidaudio_binary_priority(tmp_path, monkeypatch) -> None:
-    """Явный путь бьёт переменную, переменная — PATH, PATH — папку скилла."""
-    def executable(name: str) -> Path:
-        path = tmp_path / name
-        path.write_text("#!/bin/sh\n", encoding="utf-8")
-        path.chmod(0o755)
-        return path.resolve()
+    """Явный путь бьёт переменную, переменная — поставочный, поставочный — PATH.
 
-    explicit, from_env = executable("explicit"), executable("from-env")
+    PATH раньше обгонял закреплённую сборку, а смена сборки уже давала DER 0,8%
+    против 3,7%: случайный fluidaudiocli в PATH не должен подменять замеренный.
+    """
+    skill, digest = _bundled_skill(tmp_path)
+    explicit, from_env = _executable(tmp_path / "explicit"), _executable(tmp_path / "from-env")
+    on_path = _executable(tmp_path / "path" / "fluidaudiocli")
+    monkeypatch.setenv("PATH", str(on_path.parent))
     monkeypatch.setenv("TRANSCRIBER_FLUIDAUDIO_BIN", str(from_env))
-    monkeypatch.setenv("PATH", "")
 
-    assert catalog.fluidaudio_binary_path(explicit) == explicit
-    assert catalog.fluidaudio_binary_path() == from_env
+    assert catalog.fluidaudio_binary_path(explicit, skill) == explicit
+    assert catalog.choose_fluidaudio_binary(explicit, skill).source == "explicit"
+    assert catalog.fluidaudio_binary_path(skill_dir=skill) == from_env
+    monkeypatch.delenv("TRANSCRIBER_FLUIDAUDIO_BIN")
+    chosen = catalog.choose_fluidaudio_binary(skill_dir=skill)
+    assert (chosen.source, chosen.path, chosen.fingerprint) == (
+        "bundled",
+        (skill / "bin" / "macos-arm64" / "fluidaudiocli").resolve(),
+        digest[:12],
+    )
+    # Поставочного ещё нет, но он докачается: PATH всё равно не обгоняет.
+    skill_without, digest_without = _bundled_skill(tmp_path / "fresh", present=False)
+    chosen = catalog.choose_fluidaudio_binary(skill_dir=skill_without)
+    assert (chosen.source, chosen.path, chosen.fingerprint, chosen.problem) == ("bundled", None, digest_without[:12], None)
+    # Офлайн докачать нельзя — тогда PATH, с отпечатком своего файла.
+    chosen = catalog.choose_fluidaudio_binary(skill_dir=skill_without, offline=True)
+    assert (chosen.source, chosen.path) == ("path", on_path)
+
+
+@pytest.mark.parametrize("kind", ["missing", "not-executable", "directory"])
+@pytest.mark.parametrize("via", ["explicit", "env"])
+def test_wrong_explicit_fluidaudio_binary_is_an_error(tmp_path, monkeypatch, kind, via) -> None:
+    """Неверный --fluidaudio-bin или TRANSCRIBER_FLUIDAUDIO_BIN не подменяется молча."""
+    skill, _digest = _bundled_skill(tmp_path)
+    monkeypatch.setenv("PATH", "")
+    wrong = tmp_path / "my-build"
+    if kind == "not-executable":
+        wrong.write_text("#!/bin/sh\n", encoding="utf-8")
+        wrong.chmod(0o644)
+    elif kind == "directory":
+        wrong.mkdir()
+    explicit = None
+    if via == "explicit":
+        explicit = wrong
+    else:
+        monkeypatch.setenv("TRANSCRIBER_FLUIDAUDIO_BIN", str(wrong))
+    chosen = catalog.choose_fluidaudio_binary(explicit, skill)
+    assert chosen.source == via
+    assert chosen.problem and str(wrong.resolve()) in chosen.problem
+    assert catalog.fluidaudio_binary_path(explicit, skill) is None
+
+
+def test_fluidaudio_fingerprint_follows_file(tmp_path, monkeypatch) -> None:
+    import hashlib
+
+    monkeypatch.setenv("PATH", "")
+    first = _executable(tmp_path / "first", "#!/bin/sh\n# 1\n")
+    second = _executable(tmp_path / "second", "#!/bin/sh\n# 2\n")
+    skill = tmp_path / "skill"
+    one = catalog.choose_fluidaudio_binary(first, skill)
+    assert one.fingerprint == hashlib.sha256(first.read_bytes()).hexdigest()[:12]
+    assert catalog.choose_fluidaudio_binary(second, skill).fingerprint != one.fingerprint
+    assert catalog.choose_fluidaudio_binary(first, skill).fingerprint == one.fingerprint
+
+
+def test_tampered_bundled_fluidaudio_is_a_problem(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("PATH", "")
+    skill, _digest = _bundled_skill(tmp_path)
+    (skill / "bin" / "macos-arm64" / "fluidaudiocli").write_text("#!/bin/sh\n# подменён\n", encoding="utf-8")
+    chosen = catalog.choose_fluidaudio_binary(skill_dir=skill)
+    assert chosen.source == "bundled" and "не совпал" in chosen.problem
+
+
+def test_no_fluidaudio_offline_is_a_problem(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("PATH", "")
+    skill, _digest = _bundled_skill(tmp_path, present=False)
+    chosen = catalog.choose_fluidaudio_binary(skill_dir=skill, offline=True)
+    assert chosen.path is None and "prefetch_models.py --diarize" in chosen.problem
 
 
 def test_fluidaudio_binary_ignores_non_executable(tmp_path, monkeypatch) -> None:

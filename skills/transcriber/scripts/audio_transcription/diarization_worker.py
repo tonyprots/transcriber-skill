@@ -8,14 +8,22 @@ import tempfile
 import time
 import wave
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .backends import BackendMissing, _PinnedLoad, load_with_hub_fallback
-from .catalog import bundled_binary_problem, fluidaudio_binary_path
+from .catalog import bundled_binary_problem
 from .diarization import partition_turns
-from .fluid_models import ModelsUnavailable, ensure as ensure_fluid_models, ensure_binary as ensure_fluid_binary
-from .isolated import hold_while_paused
+from . import fluid_models
+from .fluid_models import (
+    ModelsUnavailable,
+    ensure as ensure_fluid_models,
+    ensure_binary as ensure_fluid_binary,
+    no_network_command,
+    offline_environment,
+)
+from .isolated import _tail, hold_while_paused
 from .models import Diarization, SpeakerTurn
+from .weights import DownloadHeartbeat, download_listener
 from .exiting import run_entry_point
 
 
@@ -37,18 +45,19 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
         raise
 
 
-def _fluid_binary(config: dict[str, Any]) -> Path:
-    path = fluidaudio_binary_path(config.get("binary"))
-    if path is None and not config.get("binary"):
-        try:
-            path = ensure_fluid_binary(offline=bool(config.get("offline", False)))
-        except ModelsUnavailable as error:
-            raise BackendMissing(str(error)) from error
-    if path is None:
-        raise FileNotFoundError(
-            "Не найден fluidaudiocli. Укажите --fluidaudio-bin или установите "
-            "бинарник в bin/macos-arm64/fluidaudiocli внутри скилла"
-        )
+def _fluid_binary(config: dict[str, Any], progress: Callable[[float], None] | None = None) -> Path:
+    """Бинарник выбрал родитель (`catalog.choose_fluidaudio_binary`): не
+    поставочный приходит путём и берётся как есть, поставочный — None, его
+    здесь докачиваем и сверяем с опубликованной суммой."""
+    if config.get("binary"):
+        path = Path(str(config["binary"]))
+        if not (path.is_file() and os.access(path, os.X_OK)):
+            raise FileNotFoundError(f"fluidaudiocli не найден или не исполняемый: {path}")
+        return path
+    try:
+        path = ensure_fluid_binary(offline=bool(config.get("offline", False)), progress=progress)
+    except ModelsUnavailable as error:
+        raise BackendMissing(str(error)) from error
     problem = bundled_binary_problem(path)
     if problem:
         raise RuntimeError(problem)
@@ -118,21 +127,82 @@ def _run_sortformer(
     )
 
 
+# Сердцебиение ниже раз в секунду обновляет progress.json, и сторож зависаний
+# родителя (`--backend-stall-timeout`) на FluidAudio не срабатывает. Свой срок
+# с запасом: на 42-минутной встрече бинарник укладывается в минуты.
+FLUIDAUDIO_DEADLINE_SECONDS = 300.0
+FLUIDAUDIO_DEADLINE_PER_AUDIO_SECOND = 1.0
+
+
+def _stop(process: subprocess.Popen) -> None:
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+
+def _run_binary(
+    command: list[str],
+    environment: dict[str, str],
+    progress_path: Path,
+    log_dir: Path,
+    deadline_seconds: float,
+) -> tuple[int, str]:
+    """Код выхода и хвост вывода. Вывод — в файлы, а не в пайп, который никто не
+    читает: на длинной записи бинарник встал бы на полном пайпе."""
+    stdout_path = log_dir / "fluidaudio.stdout.log"
+    stderr_path = log_dir / "fluidaudio.stderr.log"
+    with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+        process = subprocess.Popen(command, stdout=stdout, stderr=stderr, env=environment)
+        started = time.monotonic()
+        heartbeat = 0
+        try:
+            while process.poll() is None:
+                if time.monotonic() - started > deadline_seconds:
+                    _stop(process)
+                    raise RuntimeError(
+                        f"FluidAudio не уложился в срок ({deadline_seconds:.0f} с) и остановлен: "
+                        f"{_tail(stderr_path, 1000) or 'бинарник молчал'}"
+                    )
+                heartbeat += 1
+                _write_json(
+                    progress_path,
+                    {"stage": "inference", "completed": heartbeat, "total": None},
+                )
+                time.sleep(1.0)
+        except BaseException:
+            _stop(process)
+            raise
+    return process.returncode, _tail(stderr_path) or _tail(stdout_path)
+
+
 def _run_fluidaudio(
     audio_path: Path,
     config: dict[str, Any],
     progress_path: Path,
     result_path: Path,
 ) -> Diarization:
-    binary = _fluid_binary(config)
+    # Признак жизни — до поиска бинарника: первая докачка fluidaudiocli
+    # (около 20 МБ) иначе шла молча, и сторож родителя убивал воркер.
+    _write_json(progress_path, {"stage": "loading", "completed": 0})
+    binary = _fluid_binary(
+        config,
+        DownloadHeartbeat(
+            lambda stage: _write_json(progress_path, {"stage": stage, "completed": 0, "total": None}),
+            "загрузка fluidaudiocli",
+        ),
+    )
     output_path = result_path.with_name("fluidaudio-output.json")
     threshold = float(config.get("threshold", 0.7))
     started = time.monotonic()
-    _write_json(progress_path, {"stage": "loading", "completed": 0})
-    # Модели ставим сами и с закреплённой ревизии: иначе бинарник скачал бы
-    # последний коммит репозитория, а мерили мы конкретный.
+    # Модели ставим сами и с закреплённой ревизии в каталог, который читает
+    # бинарник: иначе он скачал бы последний коммит репозитория, а мерили мы
+    # конкретный.
     try:
-        ensure_fluid_models(offline=bool(config.get("offline", False)))
+        ensure_fluid_models(offline=bool(config.get("offline", False)), quiet=True)
     except ModelsUnavailable as error:
         raise BackendMissing(str(error)) from error
     command = [
@@ -151,33 +221,24 @@ def _run_fluidaudio(
     # (experiments/diarization-natural, 2026-10-07).
     if config.get("num_speakers"):
         command += ["--num-speakers", str(int(config["num_speakers"]))]
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    heartbeat = 0
-    try:
-        while process.poll() is None:
-            heartbeat += 1
-            _write_json(
-                progress_path,
-                {"stage": "inference", "completed": heartbeat, "total": None},
-            )
-            time.sleep(1.0)
-        stdout, stderr = process.communicate()
-    except BaseException:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-        raise
-    if process.returncode != 0:
-        detail = stderr.strip() or stdout.strip() or f"код {process.returncode}"
-        raise RuntimeError(f"FluidAudio завершился с ошибкой: {detail}")
+    # Сеть бинарнику не нужна: модели уже на месте. Закрываем её дважды —
+    # адрес реестра и песочница, — иначе при любом расхождении набора он
+    # молча скачал бы `main`, и `--offline` сеть не запрещал бы.
+    environment = offline_environment()
+    sandboxed = no_network_command(command)
+    network_sandbox = sandboxed != command
+    with wave.open(str(audio_path), "rb") as source:
+        duration = source.getnframes() / source.getframerate()
+    deadline = FLUIDAUDIO_DEADLINE_SECONDS + FLUIDAUDIO_DEADLINE_PER_AUDIO_SECOND * duration
+    log_dir = result_path.parent
+    returncode, detail = _run_binary(sandboxed, environment, progress_path, log_dir, deadline)
+    if returncode != 0 and network_sandbox:
+        # Песочница могла помешать сама (политика машины, новая macOS):
+        # один повтор без неё, реестр по-прежнему закрыт.
+        network_sandbox = False
+        returncode, detail = _run_binary(command, environment, progress_path, log_dir, deadline)
+    if returncode != 0:
+        raise RuntimeError(f"FluidAudio завершился с ошибкой: {detail or f'код {returncode}'}")
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     raw_turns = [
         SpeakerTurn(
@@ -209,6 +270,12 @@ def _run_fluidaudio(
             "average_quality_score": (
                 sum(quality_scores) / len(quality_scores) if quality_scores else None
             ),
+            "weights": fluid_models.weights_metadata(),
+            "binary": {
+                "source": config.get("binary_source", "bundled"),
+                "sha256": config.get("binary_fingerprint"),
+            },
+            "network_sandbox": network_sandbox,
             "raw_turns": [turn.to_dict() for turn in raw_turns],
         },
     )
@@ -228,17 +295,24 @@ def main(argv: list[str] | None = None) -> int:
         if bool(config.get("offline", False)):
             os.environ.setdefault("HF_HUB_OFFLINE", "1")
             os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-        if backend == "sortformer":
-            diarization = _run_sortformer(audio_path, config, progress_path)
-        elif backend == "fluidaudio":
-            diarization = _run_fluidaudio(
-                audio_path,
-                config,
-                progress_path,
-                result_path,
-            )
-        else:
-            raise ValueError(f"Неизвестный backend диаризации: {backend}")
+        # Веса Sortformer и модели FluidAudio качаются молча: пусть сторож
+        # родителя видит, что байты идут.
+        heartbeat = DownloadHeartbeat(
+            lambda stage: _write_json(progress_path, {"stage": stage, "completed": 0, "total": None}),
+            "загрузка моделей",
+        )
+        with download_listener(heartbeat):
+            if backend == "sortformer":
+                diarization = _run_sortformer(audio_path, config, progress_path)
+            elif backend == "fluidaudio":
+                diarization = _run_fluidaudio(
+                    audio_path,
+                    config,
+                    progress_path,
+                    result_path,
+                )
+            else:
+                raise ValueError(f"Неизвестный backend диаризации: {backend}")
         _write_json(result_path, diarization.to_dict())
     except BackendMissing as error:
         print(str(error), file=sys.stderr)

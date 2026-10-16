@@ -39,6 +39,7 @@ from .catalog import (
     SILERO_VAD,
     SORTFORMER,
     WHISPER_TURBO,
+    choose_fluidaudio_binary,
     revision_for_model,
     revisions_for_models,
     staleness_warnings,
@@ -53,7 +54,8 @@ from .cache import (
     save_hypothesis,
     prune as prune_cache,
 )
-from .diarization import drop_ghost_speakers, split_chunks_by_diarization
+from .diarization import drop_ghost_speakers, number_by_first_appearance, split_chunks_by_diarization
+from .fluid_models import installed_revision as installed_fluid_revision, preflight as fluidaudio_preflight
 from .glossary import (
     GlossaryEntry,
     apply_glossary,
@@ -545,6 +547,47 @@ def weights_as_keyed(metadata: dict[str, Any], signature: dict[str, str | None])
     return not weights or weights.get("revision") in signature.values()
 
 
+def diarization_weights(kind: str, model: str) -> tuple[str, str | None]:
+    """Имя и ревизия весов диаризации: для ключа кэша и проверки перед записью.
+
+    Модели FluidAudio ставятся не в кэш Hub, а в каталог бинарника, и там может
+    лежать набор, который он скачал себе сам: в ключ идёт то, что лежит, а не
+    то, что закреплено. Пока набора нет, воркер поставит закреплённый.
+    """
+    if kind == "fluidaudio":
+        return "FluidAudio Community-1 offline", installed_fluid_revision() or FLUIDAUDIO.revision
+    return model, revision_for_model(model)
+
+
+def diarization_cache_payload(
+    args: argparse.Namespace,
+    kind: str,
+    threshold: float,
+    source_identity: str,
+    binary_fingerprint: str | None,
+) -> dict[str, Any]:
+    """Всё, от чего зависит разметка голосов. Ключ кэша — хеш этого словаря.
+
+    `binary` — отпечаток fluidaudiocli: своя сборка или новый поставочный
+    бинарник дают свою разметку, и под ключом прежнего её не отдать.
+    `pipeline` меняется вместе с командой воркера: 0.6 — FluidAudio получает
+    `--num-speakers` (с 0.24), а разметка 0.23 без подсказки лежала под тем же
+    ключом.
+    """
+    model, revision = diarization_weights(kind, args.diarization_model)
+    return {
+        "pipeline": "0.6",
+        "source_sha256": source_identity,
+        "backend": kind,
+        "model": model,
+        "revision": revision,
+        "binary": binary_fingerprint,
+        "threshold": threshold,
+        "chunk_seconds": args.diarization_chunk_seconds,
+        "expected_speakers": args.expected_speakers,
+    }
+
+
 def loaded_revisions(
     expected: dict[str, str | None],
     results: list[Any],
@@ -1013,6 +1056,10 @@ def _validate(args: argparse.Namespace) -> None:
             "--diarize работает только на macOS Apple Silicon: Sortformer требует MLX, "
             "FluidAudio собран для macOS arm64. Запустите без --diarize."
         )
+    if args.diarize and diarization_backend(args.diarization_backend, args.expected_speakers) == "fluidaudio":
+        problem = fluidaudio_preflight(args.fluidaudio_bin, offline=args.offline)
+        if problem:
+            raise ValueError(problem)
 
 
 def _sections(args: argparse.Namespace) -> list[Section | None]:
@@ -1449,28 +1496,28 @@ def _transcribe(
         diarization: Diarization | None = None
         if args.diarize:
             assert diarization_kind is not None
-            diarization_model = (
-                "FluidAudio Community-1 offline"
+            fluid_binary = (
+                choose_fluidaudio_binary(args.fluidaudio_bin, offline=args.offline)
                 if diarization_kind == "fluidaudio"
-                else args.diarization_model
+                else None
             )
-            diarization_key = cache_key(
-                "diarization",
-                {
-                    "pipeline": "0.5",
-                    "source_sha256": source_identity,
-                    "backend": diarization_kind,
-                    "model": diarization_model,
-                    "revision": (
-                        FLUIDAUDIO.revision
-                        if diarization_kind == "fluidaudio"
-                        else revision_for_model(args.diarization_model)
-                    ),
-                    "threshold": diarization_threshold,
-                    "chunk_seconds": args.diarization_chunk_seconds,
-                    "expected_speakers": args.expected_speakers,
-                },
+            if fluid_binary is not None and fluid_binary.problem:
+                raise ValueError(fluid_binary.problem)
+            if fluid_binary is not None and fluid_binary.source != "bundled":
+                text = (
+                    f"FluidAudio: бинарник не поставочный ({fluid_binary.path}, sha256 "
+                    f"{fluid_binary.fingerprint}); замеры диаризации из references/quality.md к нему не относятся"
+                )
+                report.stage(f"Внимание: {text}")
+                warnings.append(text)
+            diarization_payload = diarization_cache_payload(
+                args,
+                diarization_kind,
+                diarization_threshold,
+                source_identity,
+                fluid_binary.fingerprint if fluid_binary is not None else None,
             )
+            diarization_key = cache_key("diarization", diarization_payload)
             diarization = (
                 None
                 if args.no_cache
@@ -1486,11 +1533,14 @@ def _transcribe(
                         "model_name": args.diarization_model,
                         "threshold": diarization_threshold,
                         "chunk_seconds": args.diarization_chunk_seconds,
+                        # Поставочный — None: воркер сам докачает и сверит его.
                         "binary": (
-                            str(args.fluidaudio_bin.expanduser().resolve())
-                            if args.fluidaudio_bin
+                            str(fluid_binary.path)
+                            if fluid_binary is not None and fluid_binary.source != "bundled"
                             else None
                         ),
+                        "binary_source": fluid_binary.source if fluid_binary is not None else None,
+                        "binary_fingerprint": fluid_binary.fingerprint if fluid_binary is not None else None,
                         "offline": args.offline,
                         "num_speakers": args.expected_speakers,
                     },
@@ -1498,8 +1548,7 @@ def _transcribe(
                     on_progress=report.windows("Диаризация"),
                 )
                 if not args.no_cache and weights_as_keyed(
-                    diarization.metadata,
-                    {args.diarization_model: revision_for_model(args.diarization_model)},
+                    diarization.metadata, {diarization_payload["model"]: diarization_payload["revision"]}
                 ):
                     save_diarization(args.cache_dir, diarization_key, diarization, source_identity)
             if args.expected_speakers is None:
@@ -1510,6 +1559,7 @@ def _transcribe(
                         f"Диаризация: отброшено голосов с речью меньше 5 с: "
                         f"{found - len(diarization.speakers)}"
                     )
+            diarization = replace(diarization, turns=number_by_first_appearance(diarization.turns))
             # Нарезка режет каждое окно по границам реплик и пишет их на диск:
             # на 42-минутной встрече это 7–8 минут без единой строки в логе.
             report.stage(f"Нарезка окон по говорящим: {len(base_chunks)}")

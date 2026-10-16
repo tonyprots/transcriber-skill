@@ -1,6 +1,8 @@
 import wave
 from pathlib import Path
 
+import pytest
+
 from audio_transcription.diarization import partition_turns, split_chunks_by_diarization
 from audio_transcription.models import AudioChunk, SpeakerTurn
 
@@ -103,3 +105,54 @@ def test_window_inside_diarization_pause_takes_nearest_speaker(tmp_path: Path) -
         ("speaker_2",),
         ("speaker_2",),
     ]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # Перекрытие в один кадр и пауза в один кадр на смене говорящих.
+        [SpeakerTurn(4.0, 8.0, ("1",)), SpeakerTurn(7.92, 14.0, ("2",))],
+        [SpeakerTurn(4.0, 7.92, ("1",)), SpeakerTurn(8.0, 14.0, ("2",))],
+    ],
+)
+def test_short_piece_on_speaker_change_is_not_lost(tmp_path: Path, raw) -> None:
+    """Кусок короче 0,1 с на стыке реплик приклеивается к соседу, а не выпадает из всех окон."""
+    chunks = split_chunks_by_diarization(
+        tmp_path / "prepared.wav",
+        [AudioChunk(0, tmp_path / "prepared.wav", 4.0, 14.0)],
+        partition_turns(raw),
+    )
+    assert chunks[0].start == 4.0 and chunks[-1].end == 14.0
+    assert all(left.end == right.start for left, right in zip(chunks, chunks[1:]))
+    assert sum(chunk.duration for chunk in chunks) == pytest.approx(10.0)
+    assert [chunk.speakers for chunk in chunks] == [("speaker_1",), ("speaker_2",)]
+
+
+def test_short_piece_at_window_start_joins_next(tmp_path: Path) -> None:
+    turns = [SpeakerTurn(0.0, 4.05, ("speaker_1",)), SpeakerTurn(4.05, 9.0, ("speaker_2",))]
+    chunks = split_chunks_by_diarization(
+        tmp_path / "prepared.wav", [AudioChunk(0, tmp_path / "prepared.wav", 4.0, 9.0)], turns
+    )
+    assert [(chunk.start, chunk.end, chunk.speakers) for chunk in chunks] == [(4.0, 9.0, ("speaker_2",))]
+
+
+def test_speakers_are_numbered_by_first_appearance() -> None:
+    """«Спикер 1» — тот, кто заговорил первым: `--speaker-names 1=…` угадывается без чтения.
+
+    Модель нумерует голоса по-своему, и в 9% записей первым говорил не speaker_1.
+    """
+    from audio_transcription.diarization import number_by_first_appearance
+
+    turns = [
+        SpeakerTurn(0.0, 3.0, ("speaker_3",)),
+        SpeakerTurn(3.0, 5.0, ("speaker_1", "speaker_3")),
+        SpeakerTurn(5.0, 9.0, ("speaker_2",)),
+        SpeakerTurn(9.0, 12.0, ("speaker_1",)),
+    ]
+    assert number_by_first_appearance(turns) == [
+        SpeakerTurn(0.0, 3.0, ("speaker_1",)),
+        SpeakerTurn(3.0, 5.0, ("speaker_1", "speaker_2")),
+        SpeakerTurn(5.0, 9.0, ("speaker_3",)),
+        SpeakerTurn(9.0, 12.0, ("speaker_2",)),
+    ]
+    assert number_by_first_appearance([]) == []

@@ -147,3 +147,40 @@ def test_manifest_names_loaded_weights_and_warns_when_unpinned() -> None:
     found = cli.loaded_revisions({"gigaam-v3-e2e-rnnt": "a" * 40}, [loaded], warnings)
     assert found == {"gigaam-v3-e2e-rnnt": "e" * 40}
     assert "не закреплённые" in warnings[0]
+
+
+def test_silent_download_bars_still_report_bytes() -> None:
+    """Полосы загрузки молчат, но байты доходят до слушателя.
+
+    Без этого первая закачка весов в изолированном воркере не оставляла
+    следов ни в progress.json, ни в логе, и сторож зависаний убивал воркер.
+    """
+    heard: list[tuple[float, int]] = []
+    silent = weights._silent_tqdm()
+    with weights.download_listener(lambda n, bar: heard.append((n, bar))):
+        transfer = silent(total=3_000_000, unit="B", unit_scale=True)
+        transfer.update(1_000_000)
+        transfer.update(-1)  # откат на докачке: не рост
+        files = silent(total=5, unit="it")
+        files.update(1)  # «Fetching 5 files» — не байты
+        transfer.close()
+        files.close()
+    assert heard == [(1_000_000, id(transfer))]
+    after = silent(total=1, unit="B")
+    after.update(1)  # слушатель снят — молчим
+    assert len(heard) == 1
+
+
+def test_download_heartbeat_writes_only_on_growth(monkeypatch) -> None:
+    clock = [0.0]
+    monkeypatch.setattr(weights.time, "monotonic", lambda: clock[0])
+    written: list[str] = []
+    heartbeat = weights.DownloadHeartbeat(written.append, "загрузка весов")
+    heartbeat(2_000_000, 1)
+    heartbeat(2_000_000, 1)  # та же секунда — не пишем
+    clock[0] = 1.5
+    heartbeat(1_000_000, 1)
+    heartbeat(4_000_000, 2)  # вторая полоса того же потока
+    clock[0] = 3.0
+    heartbeat(1_000_000, 2)
+    assert written == ["загрузка весов: 2 МБ", "загрузка весов: 5 МБ"]

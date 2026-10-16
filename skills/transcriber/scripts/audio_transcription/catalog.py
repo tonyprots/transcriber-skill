@@ -357,32 +357,110 @@ def hf_cache_dir() -> Path:
         return Path.home() / ".cache" / "huggingface" / "hub"
 
 
+@dataclass(frozen=True)
+class FluidBinary:
+    """Какой fluidaudiocli пойдёт в прогон и можно ли им диаризовать.
+
+    `path` None у поставочного, которого ещё нет: воркер докачает его и сверит
+    с опубликованной суммой. `fingerprint` — первые 12 знаков SHA-256: у
+    поставочного опубликованная сумма, у остальных — сумма самого файла.
+    """
+
+    source: str  # "explicit", "env", "bundled", "path"
+    path: Path | None = None
+    fingerprint: str | None = None
+    problem: str | None = None
+
+
+def _sha256_prefix(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()[:12]
+
+
+def _published_sum(bundled: Path) -> str | None:
+    try:
+        return bundled.with_name("fluidaudiocli.sha256").read_text(encoding="utf-8").split()[0].lower()
+    except (OSError, IndexError):
+        return None
+
+
+def _executable(path: Path) -> bool:
+    return path.is_file() and os.access(path, os.X_OK)
+
+
+def choose_fluidaudio_binary(
+    explicit: str | Path | None = None,
+    skill_dir: Path | None = None,
+    *,
+    offline: bool = False,
+) -> FluidBinary:
+    """Единственный порядок поиска fluidaudiocli на скилл.
+
+    Явный путь (`--fluidaudio-bin`) → `TRANSCRIBER_FLUIDAUDIO_BIN` →
+    поставочный в папке скилла (на месте или докачается) → `PATH`. Явный путь
+    и переменная исключительны: неверный — ошибка, а не тихая подмена другим
+    бинарником. PATH последним: смена сборки уже давала DER 0,8% против 3,7%, и
+    случайный fluidaudiocli не должен обгонять замеренный. Раньше поиск был
+    написан дважды — в `diarization_worker` и в `doctor`, — и реализации
+    разошлись.
+    """
+    if skill_dir is None:
+        skill_dir = Path(__file__).resolve().parents[2]
+    for source, candidate, label in (
+        ("explicit", explicit, "--fluidaudio-bin"),
+        ("env", os.environ.get("TRANSCRIBER_FLUIDAUDIO_BIN"), "TRANSCRIBER_FLUIDAUDIO_BIN"),
+    ):
+        if not candidate:
+            continue
+        path = Path(candidate).expanduser().resolve()
+        if not _executable(path):
+            return FluidBinary(source, path, problem=f"{label}: {path} — не исполняемый файл")
+        return FluidBinary(source, path, _sha256_prefix(path))
+    bundled = skill_dir / "bin" / "macos-arm64" / "fluidaudiocli"
+    expected = _published_sum(bundled)
+    if _executable(bundled):
+        return FluidBinary(
+            "bundled",
+            bundled.resolve(),
+            expected[:12] if expected else None,
+            bundled_binary_problem(bundled, skill_dir),
+        )
+    downloadable = expected is not None and bundled.with_name("fluidaudiocli.url").is_file()
+    if downloadable and not offline:
+        return FluidBinary("bundled", None, expected[:12])
+    found = shutil.which("fluidaudiocli")
+    if found:
+        path = Path(found).resolve()
+        return FluidBinary("path", path, _sha256_prefix(path))
+    if downloadable:
+        problem = (
+            "Нет fluidaudiocli (около 20 МБ), а прогон офлайн. Запустите без --offline "
+            "или поставьте заранее: prefetch_models.py --diarize"
+        )
+    else:
+        problem = (
+            "Не найден fluidaudiocli. Укажите --fluidaudio-bin или установите "
+            "бинарник в bin/macos-arm64/fluidaudiocli внутри скилла"
+        )
+    return FluidBinary("bundled", None, problem=problem)
+
+
 def fluidaudio_binary_path(
     explicit: str | Path | None = None,
     skill_dir: Path | None = None,
 ) -> Path | None:
-    """Где лежит fluidaudiocli, или None. Единственный порядок поиска на скилл.
+    """Где лежит fluidaudiocli, который пойдёт в прогон, или None.
 
-    Порядок: явный путь (`--fluidaudio-bin`) → `TRANSCRIBER_FLUIDAUDIO_BIN` →
-    `PATH` → папка внутри скилла. Раньше поиск был написан дважды — в
-    `diarization_worker` и в `doctor`, — и реализации разошлись: доктор смотрел
-    только в папку скилла и печатал «✗» там, где диаризация работала.
+    Обёртка над `choose_fluidaudio_binary` для доктора: только то, что уже на
+    диске. Сверку поставочного он делает сам (`bundled_binary_problem`).
     """
-    if skill_dir is None:
-        skill_dir = Path(__file__).resolve().parents[2]
-    candidates = [
-        explicit,
-        os.environ.get("TRANSCRIBER_FLUIDAUDIO_BIN"),
-        shutil.which("fluidaudiocli"),
-        skill_dir / "bin" / "macos-arm64" / "fluidaudiocli",
-    ]
-    for candidate in candidates:
-        if not candidate:
-            continue
-        path = Path(candidate).expanduser().resolve()
-        if path.is_file() and os.access(path, os.X_OK):
-            return path
-    return None
+    chosen = choose_fluidaudio_binary(explicit, skill_dir, offline=True)
+    if chosen.path is None or (chosen.problem and chosen.source != "bundled"):
+        return None
+    return chosen.path
 
 
 def bundled_binary_problem(path: Path, skill_dir: Path | None = None) -> str | None:
