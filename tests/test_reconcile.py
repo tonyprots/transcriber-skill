@@ -260,3 +260,10 @@ def test_same_number_in_a_term_is_still_a_spelling_difference() -> None:
         ("сегмент B2B растёт", "сегмент B2 B растёт"),
     ):
         assert kinds(left, right) == ["spelling"], (left, right)
+
+
+def test_whole_hour_is_the_same_time() -> None:
+    """«8:00» и «8» — одно и то же время: нули минут не произносят."""
+    assert kinds("встречаемся в 8:00", "встречаемся в 8") == ["equivalent"]
+    for left, right in (("встречаемся в 8:30", "встречаемся в 8"), ("в 8:00", "в 9")):
+        assert "equivalent" not in kinds(left, right), (left, right)

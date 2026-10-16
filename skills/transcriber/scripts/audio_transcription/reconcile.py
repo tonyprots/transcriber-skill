@@ -373,6 +373,8 @@ def _equivalent(left: str, right: str, *, near_number: bool = False) -> bool:
         # «800 000» — это разделитель тысяч (группа ровно из трёх цифр), а
         # «60 70» — диапазон: склеивать можно только первое.
         joined = re.sub(r"(?<=\d)\s+(?=\d{3}\b)", "", joined)
+        # «8:00» — ровно восемь: нули минут не произносят.
+        joined = re.sub(r"(?<=\d)\s+00\b", "", joined)
         return re.sub(r"\b([a-zа-я])\s+(?=[a-zа-я]\b)", r"\1", joined)
 
     return canonical(left_words) == canonical(right_words)
