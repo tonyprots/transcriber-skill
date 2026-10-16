@@ -131,6 +131,13 @@ def test_pipeline_writes_full_contract(tmp_path: Path, spoken_audio: Path, monke
     srt = (output / "subtitles.srt").read_text(encoding="utf-8")
     assert "-->" in srt and "PostgreSQL" in srt
 
+    # Словарь пополнен, а не «не пополнен»: перехват в cli ловит и TypeError
+    # (поле словаря, опустошённое руками), и ошибка в самом learn() без этой
+    # проверки ушла бы в предупреждение незамеченной.
+    assert not any("Словарь не пополнен" in warning for warning in manifest["warnings"])
+    pending = cli.load_document(Path(manifest["glossary"]["store"]))["pending"]
+    assert [item["aliases"] for item in pending] == [["PostgreSQL", "постгрес"]]
+
 
 @requires_speech
 def test_pipeline_applies_glossary_and_keeps_raw_intact(
