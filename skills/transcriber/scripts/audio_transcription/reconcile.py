@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 
-from .fillers import strip_fillers
+from .fillers import is_filler_token, strip_fillers
 from .models import Hypothesis, ReviewItem, Segment
 
 
@@ -13,6 +13,9 @@ _PUNCTUATION = re.compile(r"[^\w\s-]+", re.UNICODE)
 # Слова-паразиты. Их расхождение — не работа для человека: одна модель
 # услышала «uh», другая промолчала, а читаемая версия их всё равно убирает.
 # На часовом интервью это 378 расхождений из 1068 (замер 2026-09-20).
+# Звуки вроде «хмм», «ммм», «эмм», «uhh» узнаёт `fillers.is_filler_token` —
+# то же правило, по которому их убирает readable; здесь — слова и обороты,
+# которые readable оставляет, но спорить о которых не о чем.
 FILLERS = frozenset(
     {
         "uh", "um", "uhh", "umm", "ah", "er", "erm", "hmm", "mhm", "mm", "huh",
@@ -343,7 +346,9 @@ def without_fillers(text: str) -> str:
     result = text
     for phrase in sorted((f for f in FILLERS if " " in f), key=len, reverse=True):
         result = re.sub(rf"\b{re.escape(phrase)}\b", " ", result)
-    words = [word for word in result.split() if word not in FILLERS]
+    words = [
+        word for word in result.split() if word not in FILLERS and not is_filler_token(word)
+    ]
     return " ".join(words)
 
 

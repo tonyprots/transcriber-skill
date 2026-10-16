@@ -52,6 +52,15 @@ def fix_punctuation_spacing(text: str) -> str:
     return out
 
 
+def is_filler_token(word: str) -> bool:
+    """Слово целиком — филлер, который readable убирает («хмм», «э-э», «um»).
+
+    Тот же признак, что у `strip_fillers`, только без контекста: им очередь
+    проверки решает, что спор о слове — спор о паразите.
+    """
+    return _TOKEN.fullmatch(word) is not None
+
+
 def _ends_sentence(text: str) -> bool:
     core = text.rstrip(_CLOSING_QUOTES)
     return bool(core) and core[-1] in _SENTENCE_END

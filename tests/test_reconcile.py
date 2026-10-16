@@ -182,3 +182,25 @@ def test_boundary_transfer_may_empty_a_window() -> None:
     )
     # Ни «М-м / Классный», ни «Классный» отдельно, ни пустого окна с «М-м».
     assert items == []
+
+
+def kinds(left: str, right: str) -> list[str]:
+    from audio_transcription.reconcile import disagreements
+
+    return [item.kind for item in disagreements(left, right)]
+
+
+def test_fillers_that_readable_drops_are_fillers_in_the_queue_too() -> None:
+    """«Хмм», «Ммм», «эмм» убирает readable, а очередь звала их «слова нет».
+
+    Список паразитов очереди и правило `fillers` расходились: первый знал
+    только «э», «эм», «ээ», «мм», и «хмм / ∅» вставало в «Слушать».
+    """
+    for left, right in (
+        ("Хмм, давай так и сделаем", "давай так и сделаем"),
+        ("Ммм, давай так и сделаем", "давай так и сделаем"),
+        ("Ну, эмм, давай так и сделаем", "давай так и сделаем"),
+        ("so hmmm we did it", "so we did it"),
+        ("uhh we did it", "we did it"),
+    ):
+        assert kinds(left, right) == ["filler"], (left, right)
