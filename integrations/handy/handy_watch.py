@@ -76,8 +76,21 @@ def output_dir_for(wav: Path, root: Path) -> Path:
 
 
 def notify(title: str, message: str) -> None:
-    script = f"display notification {json.dumps(message)} with title {json.dumps(title)}"
-    subprocess.run(["osascript", "-e", script], check=False, capture_output=True)
+    # Текст — аргументами, а не внутри скрипта: json.dumps экранировал
+    # кириллицу в \uXXXX, такого escape в AppleScript нет, и уведомление
+    # молча не приходило ни разу.
+    result = subprocess.run(
+        [
+            "osascript",
+            "-e", "on run argv",
+            "-e", "display notification (item 2 of argv) with title (item 1 of argv)",
+            "-e", "end run",
+            title, message,
+        ],
+        check=False, capture_output=True,
+    )
+    if result.returncode != 0:
+        log(f"уведомление не показано: {result.stderr.decode('utf-8', 'replace').strip()}")
 
 
 def to_clipboard(text: str) -> None:
