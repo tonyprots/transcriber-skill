@@ -937,6 +937,12 @@ def _validate(args: argparse.Namespace) -> None:
         raise ValueError("--review-threshold должен быть в диапазоне [0, 1]")
     if args.verifier_window_seconds < 0:
         raise ValueError("--verifier-window-seconds не может быть отрицательным")
+    # 0 и меньше уводили Silero VAD в бесконечный цикл: нарезка длинной фразы
+    # шагом в ноль секунд не кончается, а прогон всё это время держит машину.
+    # Крошечная доля секунды — окно в ноль отсчётов, тот же цикл; окно короче
+    # секунды смысла не имеет ни у одной модели. `not >=` ловит и nan.
+    if not args.speech_window_seconds >= 1:
+        raise ValueError("--speech-window-seconds должен быть не меньше 1 с")
     if args.backend_stall_timeout <= 0:
         raise ValueError("--backend-stall-timeout должен быть положительным")
     if (
