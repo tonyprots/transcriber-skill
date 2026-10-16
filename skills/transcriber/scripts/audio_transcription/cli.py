@@ -81,6 +81,7 @@ from .render import ensure_disk_space, ensure_output_available, parse_speaker_na
 from .routing import (
     AUTO_LANGUAGE,
     BackendSpec,
+    LanguageRoute,
     diarization_backend,
     language_route,
     normalize_language,
@@ -560,6 +561,26 @@ def loaded_revisions(
             if text not in warnings:
                 warnings.append(text)
     return found
+
+
+def models_in_run(
+    args: argparse.Namespace,
+    route: LanguageRoute,
+    verifier_spec: BackendSpec | None,
+    diarization_kind: str | None,
+) -> list[str]:
+    """Модели, которые этот прогон запускает: для устаревания и `model_revisions`.
+
+    Диаризация — по фактическому бэкенду, а не по `--diarization-model`: его
+    умолчание — Sortformer, а с 0.24 по умолчанию работает FluidAudio, и манифест
+    называл модель, которая не запускалась.
+    """
+    models = [route.primary.model] + ([verifier_spec.model] if verifier_spec else [])
+    if diarization_kind == "fluidaudio":
+        models.append(FLUIDAUDIO.model)
+    elif diarization_kind is not None:
+        models.append(args.diarization_model)
+    return models
 
 
 def run_route_backend(
@@ -1384,9 +1405,7 @@ def _transcribe(
         # Устаревание моделей проверяется на каждом прогоне: doctor.py после
         # установки никто не запускает, и сигнал бы туда не дошёл.
         verifier_spec = route.verifier_for(args.mode)
-        used_models = [route.primary.model] + ([verifier_spec.model] if verifier_spec else [])
-        if args.diarize:
-            used_models.append(args.diarization_model)
+        used_models = models_in_run(args, route, verifier_spec, diarization_kind)
         for text in staleness_warnings(used_models):
             report.stage(f"Внимание: {text}")
             warnings.append(text)
