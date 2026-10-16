@@ -76,6 +76,30 @@ def test_rename_finished_result_keeps_machine_labels(tmp_path: Path) -> None:
     assert "Антон: Привет" in (output / "readable.md").read_text()
 
 
+def test_one_name_for_two_labels_is_one_speaker(tmp_path: Path) -> None:
+    """FluidAudio раздвоил голос: обе метки названы «Антон».
+
+    Раньше в тексте выходило «Перекрытие (Антон + Антон)»; машинные метки при
+    этом остаются как были — по ним считается cpWER.
+    """
+    output = _bundle(tmp_path)
+    raw_before = (output / "raw.json").read_text()
+    segments_before = (output / "segments.json").read_text()
+    rename_speakers(output, parse_speaker_names("1=Антон,2=Антон"))
+    readable = (output / "readable.md").read_text()
+    assert "Перекрытие" not in readable
+    assert "Антон: Да" in readable
+    assert "Антон: Здравствуйте" in readable
+    assert "Антон: Да" in (output / "subtitles.srt").read_text()
+    assert (output / "raw.json").read_text() == raw_before
+    assert (output / "segments.json").read_text() == segments_before
+
+
+def test_overlap_of_two_people_keeps_both_names_in_order(tmp_path: Path) -> None:
+    output = _bundle(tmp_path, speaker_names={"speaker_1": "Антон", "speaker_2": "Мария"})
+    assert "Перекрытие (Антон + Мария): Да" in (output / "readable.md").read_text()
+
+
 def test_rename_refuses_result_without_speakers(tmp_path: Path) -> None:
     source = tmp_path / "source.wav"
     source.write_bytes(b"fixture")

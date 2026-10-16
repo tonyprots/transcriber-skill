@@ -63,8 +63,12 @@ def _speaker_name(identifier: str, names: SpeakerNames | None = None) -> str:
 def _speaker_prefix(segment: Segment, names: SpeakerNames | None = None) -> str:
     if not segment.speakers:
         return ""
-    label = " + ".join(_speaker_name(item, names) for item in segment.speakers)
-    return f"{label}: " if len(segment.speakers) == 1 else f"Перекрытие ({label}): "
+    # Одно имя у двух меток — один человек: так склеивают голос, который
+    # диаризация раздвоила (`rename_speakers.py 1=Антон,3=Антон`). Без этого
+    # выходило «Перекрытие (Антон + Антон)».
+    people = list(dict.fromkeys(_speaker_name(item, names) for item in segment.speakers))
+    label = " + ".join(people)
+    return f"{label}: " if len(people) == 1 else f"Перекрытие ({label}): "
 
 
 def _markdown(segments: list[Segment], title: str, names: SpeakerNames | None = None) -> str:
