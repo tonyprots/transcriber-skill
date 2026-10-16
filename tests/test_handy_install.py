@@ -1,4 +1,4 @@
-"""integrations/handy/install.sh и умолчания handy_result: где искать окружение скилла."""
+"""Установщики: корневой install.sh, integrations/handy/install.sh и умолчания handy_result."""
 
 from __future__ import annotations
 
@@ -89,3 +89,22 @@ def test_result_default_python_without_agent(tmp_path: Path, monkeypatch, venv: 
     monkeypatch.setattr(handy_result, "PLIST", tmp_path / "нет.plist")
     args = handy_result.parse_args([str(tmp_path / "handy-1790899241.wav")])
     assert args.python == str(repo / venv)
+
+
+def test_root_installer_explains_unreachable_repository(tmp_path: Path) -> None:
+    # set -e с pipefail обрывали `REF="$(latest_tag)"` молча: rc 128, ни строки.
+    missing = tmp_path / "нет-такого-репозитория"
+    result = subprocess.run(
+        ["bash", str(ROOT / "install.sh")],
+        capture_output=True, text=True, timeout=60,
+        env={
+            **os.environ,
+            "HOME": str(tmp_path / "home"),
+            "TRANSCRIBER_HOME": str(tmp_path / "target"),
+            "TRANSCRIBER_REPO": str(missing),
+            "TRANSCRIBER_REF": "",
+        },
+    )
+    assert result.returncode != 0
+    assert str(missing) in result.stderr
+    assert not (tmp_path / "target").exists()

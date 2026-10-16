@@ -26,11 +26,15 @@ done
 
 # Последний релиз — по номеру версии, а не по дате тега.
 latest_tag() {
-  git ls-remote --tags --refs "$REPO" 'v*' 2>/dev/null \
+  git ls-remote --tags --refs "$REPO" 'v*' \
     | sed 's|.*refs/tags/||' | sort -t. -k1,1V -k2,2n -k3,3n | tail -n 1
 }
 if [ -z "$REF" ]; then
-  REF="$(latest_tag)"
+  # Без if сбой ls-remote под set -e и pipefail обрывал установку молча, с кодом 128.
+  if ! REF="$(latest_tag)"; then
+    echo "Не достучался до $REPO (git ls-remote): проверьте адрес и сеть" >&2
+    exit 1
+  fi
   if [ -z "$REF" ]; then
     echo "Не удалось узнать последний релиз в $REPO: ставлю main" >&2
     REF="main"
