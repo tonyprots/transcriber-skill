@@ -45,6 +45,16 @@ PICKUP_GRACE_SECONDS = 20.0
 POLL_SECONDS = 1.0
 
 
+def default_python(repo: Path) -> str:
+    """Питон окружения скилла, если агент не установлен и plist его не назвал.
+
+    setup.sh кладёт .venv рядом со скиллом, разработка по README — в корень
+    репозитория; порядок тот же, что в SKILL.md и install.sh.
+    """
+    candidates = [repo / "skills/transcriber/.venv/bin/python", repo / ".venv/bin/python"]
+    return str(next((path for path in candidates if path.exists()), candidates[0]))
+
+
 def agent_config(plist: Path) -> dict[str, str]:
     """--ключ значение из ProgramArguments агента."""
     try:
@@ -206,7 +216,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("wav", type=Path)
     parser.add_argument("--output-root", type=Path,
                         default=Path(config.get("output-root", REPO / "out/handy")))
-    parser.add_argument("--python", default=config.get("python", str(REPO / ".venv/bin/python")))
+    parser.add_argument("--python", default=config.get("python") or default_python(REPO))
     parser.add_argument("--transcribe", default=config.get(
         "transcribe", str(REPO / "skills/transcriber/scripts/transcribe.py")))
     parser.add_argument("--state", type=Path, default=STATE_FILE)

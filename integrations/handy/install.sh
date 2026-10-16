@@ -47,8 +47,17 @@ fi
 
 [ -n "$OUTPUT_ROOT" ] || { echo "нужен --output-root" >&2; exit 2; }
 [ -d "$RECORDINGS" ] || { echo "нет папки записей Handy: $RECORDINGS" >&2; exit 1; }
-ASR_PYTHON="$REPO/.venv/bin/python"
-[ -x "$ASR_PYTHON" ] || { echo "нет окружения скилла: $ASR_PYTHON (запусти setup.sh)" >&2; exit 1; }
+# Окружение скилла: setup.sh кладёт .venv рядом со скиллом, разработка по
+# README — в корень репозитория. Порядок тот же, что в SKILL.md.
+ASR_PYTHON=""
+for candidate in "$REPO/skills/transcriber/.venv/bin/python" "$REPO/.venv/bin/python"; do
+  if [ -x "$candidate" ]; then ASR_PYTHON="$candidate"; break; fi
+done
+if [ -z "$ASR_PYTHON" ]; then
+  echo "нет окружения скилла ни в $REPO/skills/transcriber/.venv, ни в $REPO/.venv" >&2
+  echo "поставь его: bash \"$REPO/skills/transcriber/scripts/setup.sh\"" >&2
+  exit 1
+fi
 WATCH="$REPO/integrations/handy/handy_watch.py"
 TRANSCRIBE="$REPO/skills/transcriber/scripts/transcribe.py"
 
