@@ -39,6 +39,8 @@ FluidAudio — бинарник macOS arm64, собранный CI репози�
 `--diarize`; бинарник ставится только при совпадении SHA-256 с опубликованной
 суммой (происхождение и проверка — `third-party/fluidaudio/NOTICE.md`). С
 `--offline` их нужно поставить заранее: `prefetch_models.py --diarize`.
+Оборванная загрузка моделей докачивается следующим запуском; каталог с чужими
+файлами скилл не перезаписывает и просит переместить его в архив.
 
 Модели лежат в `~/Library/Application Support/FluidAudio/Models/speaker-diarization/`
 — только этот каталог читает `fluidaudiocli process --mode offline`. Сеть

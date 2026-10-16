@@ -235,10 +235,58 @@ def test_models_offline_without_cache_fail_clearly(tmp_path: Path) -> None:
         fluid_models.ensure(tmp_path / "missing", offline=True)
 
 
-def test_partial_models_are_not_overwritten(tmp_path: Path) -> None:
+def test_foreign_content_is_not_overwritten(monkeypatch, tmp_path: Path) -> None:
+    import huggingface_hub
+
     (tmp_path / "plda-parameters.json").write_text("{}", encoding="utf-8")
-    with pytest.raises(fluid_models.ModelsUnavailable, match="неполон"):
+    (tmp_path / "notes.txt").write_text("чужое", encoding="utf-8")
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda **_kwargs: pytest.fail("перезапись чужого"))
+    with pytest.raises(fluid_models.ModelsUnavailable, match="notes.txt"):
         fluid_models.ensure(tmp_path)
+    assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "чужое"
+
+
+def test_interrupted_download_resumes(monkeypatch, tmp_path: Path) -> None:
+    # Обрыв первой загрузки (Ctrl-C, сторож, сеть) оставляет каталог непустым:
+    # раньше каждый следующий --diarize отказывал до ручной уборки.
+    import huggingface_hub
+
+    download = tmp_path / ".cache" / "huggingface" / "download"
+    download.mkdir(parents=True)
+    (download / "plda-parameters.json.incomplete").write_bytes(b"half")
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "Segmentation.mlmodelc").mkdir()
+    (tmp_path / "Segmentation.mlmodelc" / "model.mil").write_text("x", encoding="utf-8")
+    (tmp_path / ".DS_Store").write_bytes(b"")
+    calls: list[dict] = []
+
+    def resume(**kwargs):
+        calls.append(kwargs)
+        _complete(Path(kwargs["local_dir"]))
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", resume)
+    assert fluid_models.ensure(tmp_path) == "downloaded"
+    assert len(calls) == 1 and calls[0]["revision"] == fluid_models.FLUIDAUDIO.revision
+
+
+@pytest.mark.parametrize("error", [OSError("сеть"), RuntimeError("Hub ответил 500")])
+def test_download_failure_is_models_unavailable(monkeypatch, tmp_path: Path, error) -> None:
+    import huggingface_hub
+
+    def broken(**_kwargs):
+        raise error
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", broken)
+    with pytest.raises(fluid_models.ModelsUnavailable, match="не скачались"):
+        fluid_models.ensure(tmp_path / "models")
+
+
+def test_incomplete_after_download_is_reported(monkeypatch, tmp_path: Path) -> None:
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda **_kwargs: None)
+    with pytest.raises(fluid_models.ModelsUnavailable, match="неполон"):
+        fluid_models.ensure(tmp_path / "models")
 
 
 def test_download_uses_pinned_revision(monkeypatch, tmp_path: Path) -> None:

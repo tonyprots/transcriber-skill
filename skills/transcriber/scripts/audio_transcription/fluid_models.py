@@ -132,14 +132,27 @@ def no_network_command(command: list[str]) -> list[str]:
     return [*prefix, *command] if probe.returncode == 0 else list(command)
 
 
+def _foreign(target: Path) -> list[str]:
+    """Что в каталоге не из нашего набора: такое не перезаписываем.
+
+    Набор и служебный `.cache` huggingface_hub — следы прерванной загрузки,
+    которую snapshot_download сам докачает и сверит. `.DS_Store` кладёт Finder.
+    """
+    if not target.is_dir():
+        return []
+    known = {*FILES, *(f"{name}.mlmodelc" for name in MODELS), ".cache", ".DS_Store"}
+    return sorted(path.name for path in target.iterdir() if path.name not in known)
+
+
 def ensure(target: Path | None = None, *, offline: bool = False) -> str:
     """Возвращает "ready" или "downloaded"; иначе ModelsUnavailable."""
     target = (target or default_target()).expanduser()
     if ready(target):
         return "ready"
-    if target.exists() and any(target.iterdir()):
+    foreign = _foreign(target)
+    if foreign:
         raise ModelsUnavailable(
-            f"Каталог моделей FluidAudio неполон: {target}. "
+            f"Каталог моделей FluidAudio неполон, и в нём чужие файлы ({', '.join(foreign[:3])}): {target}. "
             "Переместите его в архив и повторите запуск — набор скачается заново"
         )
     if offline:
@@ -152,12 +165,18 @@ def ensure(target: Path | None = None, *, offline: bool = False) -> str:
     except ImportError as error:
         raise ModelsUnavailable("Не установлен huggingface_hub") from error
     target.mkdir(parents=True, exist_ok=True)
-    snapshot_download(
-        repo_id=FLUIDAUDIO.repo,
-        revision=FLUIDAUDIO.revision,
-        local_dir=target,
-        allow_patterns=[*FILES, *(f"{name}.mlmodelc/**" for name in MODELS)],
-    )
+    # Ошибки Hub бывают любого вида (OSError, httpx, свои классы по версиям);
+    # для прогона все они значат одно — моделей нет, и это понятный отказ, а
+    # не «воркер упал». Повторный запуск докачает с места обрыва.
+    try:
+        snapshot_download(
+            repo_id=FLUIDAUDIO.repo,
+            revision=FLUIDAUDIO.revision,
+            local_dir=target,
+            allow_patterns=[*FILES, *(f"{name}.mlmodelc/**" for name in MODELS)],
+        )
+    except Exception as error:
+        raise ModelsUnavailable(f"CoreML-модели FluidAudio не скачались: {error}") from error
     if not ready(target):
         raise ModelsUnavailable(f"После загрузки набор моделей FluidAudio неполон: {target}")
     return "downloaded"
