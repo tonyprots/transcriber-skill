@@ -130,9 +130,11 @@ def run(
             "duration_seconds": media.duration_seconds,
         }
 
-    own = media.track_for(languages, allow_automatic=not args.no_auto)
+    # Копия — для ролика без своих субтитров. Своя автодорожка, отсечённая
+    # `--no-auto`, поиск не запускает: с копии пришли бы те же автосубтитры.
+    own = media.track_for(languages)
     if args.mirror and own is None and media.extractor != "Youtube":
-        return _from_mirror(media, languages, destination)
+        return _from_mirror(media, languages, destination, allow_automatic=not args.no_auto)
     raw, track = fetch_subtitles(
         media,
         destination,
@@ -152,11 +154,17 @@ def run(
     }
 
 
-def _from_mirror(media, languages: tuple[str, ...], destination: Path) -> dict[str, object]:
+def _from_mirror(
+    media, languages: tuple[str, ...], destination: Path, *, allow_automatic: bool = True
+) -> dict[str, object]:
     """Субтитры с копии на YouTube или отказ с причинами по каждому кандидату."""
     language = (languages or (media.language or "ru",))[0]
     found, rejected = find_mirror(
-        media, language, destination, _anchor_transcriber(media, language)
+        media,
+        language,
+        destination,
+        _anchor_transcriber(media, language),
+        allow_automatic=allow_automatic,
     )
     if found is None:
         raise FetchError(

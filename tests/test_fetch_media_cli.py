@@ -105,3 +105,45 @@ def test_batch_videos_with_the_same_title_get_their_own_folders(monkeypatch, tmp
     folders = [Path(item["audio"]).parent.name for item in results]
     assert folders == ["выпуск", "выпуск-2", "выпуск-3"]
     assert [Path(item["audio"]).read_text(encoding="utf-8") for item in results] == urls
+
+
+def _rutube_with_auto_track(url: str) -> RemoteMedia:
+    return RemoteMedia(
+        url=url,
+        title="Митап",
+        duration_seconds=3600.0,
+        extractor="Rutube",
+        tracks=(SubtitleTrack("ru", False, origin="auto"),),
+        language="ru",
+    )
+
+
+def test_mirror_is_not_searched_when_the_video_has_its_own_track(monkeypatch, tmp_path, capsys) -> None:
+    """У Рутуба своя автодорожка: с `--no-auto` она отсекается, но копию это не
+    оправдывает — `--mirror` только для ролика без своих субтитров, а с копии
+    пришли бы те же автосубтитры, только YouTube. До правки шёл поиск копии.
+    """
+    monkeypatch.setattr(fetch_media, "probe_remote", _rutube_with_auto_track)
+    monkeypatch.setattr(
+        fetch_media, "_from_mirror", lambda *a, **k: (_ for _ in ()).throw(AssertionError("копия не нужна"))
+    )
+    argv = ["https://rutube.ru/video/a/", "--subtitles", "--mirror", "--no-auto", "--output", str(tmp_path)]
+    assert fetch_media.main(argv) == 1
+    assert "Подходящих субтитров нет" in capsys.readouterr().err
+
+
+def test_mirror_passes_no_auto_to_the_copy(monkeypatch, tmp_path, capsys) -> None:
+    seen: dict[str, object] = {}
+
+    def find_mirror(media, language, dest_dir, transcribe, **kwargs):
+        seen.update(kwargs)
+        return None, [{"url": "https://www.youtube.com/watch?v=x", "reason": "нет авторских субтитров `ru`"}]
+
+    def silent(url: str) -> RemoteMedia:
+        return RemoteMedia(url, "Митап", 3600.0, "Rutube", (), language="ru")
+
+    monkeypatch.setattr(fetch_media, "probe_remote", silent)
+    monkeypatch.setattr(fetch_media, "find_mirror", find_mirror)
+    argv = ["https://rutube.ru/video/a/", "--subtitles", "--mirror", "--no-auto", "--output", str(tmp_path)]
+    assert fetch_media.main(argv) == 1
+    assert seen.get("allow_automatic") is False
