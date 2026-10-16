@@ -101,31 +101,48 @@ def _words_of(result: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-def _text_for(
-    source: AudioChunk,
+def _midpoint(word: dict[str, Any]) -> float:
+    return (float(word.get("start", 0.0)) + float(word.get("end", 0.0))) / 2
+
+
+def _assign_words(
+    sources: tuple[AudioChunk, ...],
     words: list[dict[str, Any]],
     *,
     tolerance: float = 0.35,
-) -> tuple[str, float | None]:
-    """Собирает текст исходного окна из слов, попавших в его границы.
+) -> list[list[dict[str, Any]]]:
+    """Раздаёт слова длинного окна исходным окнам.
 
     Основное правило — середина слова внутри окна. Если так не набралось
     ничего, окно осталось бы вовсе без проверки, поэтому берём слова,
     которые окно хотя бы задевает: у Whisper пословные таймкоды плывут на
     доли секунды, и на коротком окне этого хватает, чтобы промахнуться.
+    Запасное правило берёт только ничьи слова — из зазора между окнами.
+    Крайнее слово соседа, уже доставшееся ему по середине, оно раньше
+    копировало, и одно слово попадало в два окна: в пустом окне с «Угу»
+    вставал ложный пункт «окно целиком под вопросом».
     """
     taken = [
-        word
-        for word in words
-        if source.start <= (float(word.get("start", 0.0)) + float(word.get("end", 0.0))) / 2 < source.end
+        [index for index, word in enumerate(words) if source.start <= _midpoint(word) < source.end]
+        for source in sources
     ]
-    if not taken:
-        taken = [
-            word
-            for word in words
-            if float(word.get("end", 0.0)) > source.start - tolerance
+    claimed = {index for indices in taken for index in indices}
+    for position, source in enumerate(sources):
+        if taken[position]:
+            continue
+        taken[position] = [
+            index
+            for index, word in enumerate(words)
+            if index not in claimed
+            and float(word.get("end", 0.0)) > source.start - tolerance
             and float(word.get("start", 0.0)) < source.end + tolerance
         ]
+        claimed.update(taken[position])
+    return [[words[index] for index in indices] for indices in taken]
+
+
+def _text_for(taken: list[dict[str, Any]]) -> tuple[str, float | None]:
+    """Текст и средняя уверенность слов, доставшихся исходному окну."""
     text = " ".join(str(word["text"]).strip() for word in taken).strip()
     confidences = [
         float(word["confidence"]) for word in taken if word.get("confidence") is not None
@@ -177,8 +194,8 @@ def unpack_hypothesis(
                 chunk_results.append({**source.to_dict(), "text": text, "status": "ok"})
             continue
 
-        for source in window.sources:
-            text, confidence = _text_for(source, words)
+        for source, taken in zip(window.sources, _assign_words(window.sources, words)):
+            text, confidence = _text_for(taken)
             if text:
                 segments.append(
                     Segment(source.start, source.end, text, confidence, source.speakers)

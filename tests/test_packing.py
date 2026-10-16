@@ -100,6 +100,57 @@ def test_every_word_lands_in_exactly_one_window() -> None:
     assert restored == [word["text"] for word in words]
 
 
+def test_fallback_does_not_copy_words_of_the_neighbours() -> None:
+    """Пустое окно между соседями брало их крайние слова по допуску 0,35 с.
+
+    «привет.» уже досталось A, «Классный» — C, а B получал «привет. Классный»,
+    и в «Слушать» вставал ложный пункт «окно целиком под вопросом».
+    """
+    sources = (chunk(0, 0.0, 5.0), chunk(1, 5.2, 6.0), chunk(2, 6.1, 10.0))
+    words = [
+        {"text": "Я", "start": 3.6, "end": 3.8},
+        {"text": "сказал", "start": 3.9, "end": 4.5},
+        {"text": "привет.", "start": 4.6, "end": 5.1},
+        {"text": "Классный", "start": 6.0, "end": 6.6},
+        {"text": "день.", "start": 6.7, "end": 7.2},
+    ]
+    windows = [PackedWindow(chunk=chunk(0, 0.0, 10.0), sources=sources)]
+    packed = Hypothesis(
+        "whisper", "ru", 1.0, [], {"chunks": [{"sequence": 0, "start": 0.0, "end": 10.0,
+                                               "text": " ".join(w["text"] for w in words),
+                                               "words": words}]}
+    )
+    result = unpack_hypothesis(packed, windows)
+    restored = " ".join(segment.text for segment in result.segments).split()
+    assert restored == [word["text"] for word in words]
+    assert [chunk_result["status"] for chunk_result in result.metadata["chunks"]] == [
+        "ok", "empty", "ok",
+    ]
+
+
+def test_fallback_still_takes_a_word_from_the_gap() -> None:
+    """Слово в зазоре между окнами никому не досталось — его берёт пустое окно."""
+    sources = (chunk(0, 0.0, 2.0), chunk(1, 2.4, 3.0), chunk(2, 3.6, 6.0))
+    words = [
+        {"text": "раз", "start": 0.5, "end": 1.0},
+        {"text": "два", "start": 2.95, "end": 3.1},
+        {"text": "три", "start": 3.1, "end": 3.3},
+        {"text": "четыре", "start": 4.0, "end": 4.5},
+    ]
+    windows = [PackedWindow(chunk=chunk(0, 0.0, 6.0), sources=sources)]
+    packed = Hypothesis(
+        "whisper", "ru", 1.0, [], {"chunks": [{"sequence": 0, "start": 0.0, "end": 6.0,
+                                               "text": "раз два три четыре",
+                                               "words": words}]}
+    )
+    result = unpack_hypothesis(packed, windows)
+    assert [(segment.start, segment.text) for segment in result.segments] == [
+        (0.0, "раз"),
+        (2.4, "два три"),
+        (3.6, "четыре"),
+    ]
+
+
 def test_missing_word_timestamps_do_not_lose_the_text() -> None:
     sources = (chunk(0, 0.0, 2.0), chunk(1, 2.0, 4.0))
     windows = [PackedWindow(chunk=chunk(0, 0.0, 4.0), sources=sources)]

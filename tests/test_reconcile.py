@@ -184,6 +184,49 @@ def test_boundary_transfer_may_empty_a_window() -> None:
     assert items == []
 
 
+def test_short_reply_between_neighbours_is_not_a_review_item() -> None:
+    """«Угу» встык между фразами: Whisper его не пишет, и окно остаётся пустым.
+
+    Раньше раскладка упакованного окна отдавала ему крайние слова соседей, и
+    в «Слушать» вставал пункт «Угу. / привет. Классный».
+    """
+    from pathlib import Path
+
+    from audio_transcription.models import AudioChunk
+    from audio_transcription.packing import PackedWindow, unpack_hypothesis
+
+    sources = tuple(
+        AudioChunk(index, Path(f"chunk-{index}.wav"), start, end)
+        for index, (start, end) in enumerate(((0.0, 5.0), (5.2, 6.0), (6.1, 10.0)))
+    )
+    words = [
+        {"text": "Я", "start": 3.6, "end": 3.8},
+        {"text": "сказал", "start": 3.9, "end": 4.5},
+        {"text": "привет.", "start": 4.6, "end": 5.1},
+        {"text": "Классный", "start": 6.0, "end": 6.6},
+        {"text": "день.", "start": 6.7, "end": 7.2},
+    ]
+    packed = Hypothesis(
+        "whisper", "ru", 1.0, [],
+        {"chunks": [{"sequence": 0, "start": 0.0, "end": 10.0,
+                     "text": " ".join(word["text"] for word in words), "words": words}]},
+    )
+    verifier = unpack_hypothesis(
+        packed,
+        [PackedWindow(chunk=AudioChunk(0, Path("packed.wav"), 0.0, 10.0), sources=sources)],
+    )
+    primary = Hypothesis(
+        "primary", "ru", 0.0,
+        [
+            Segment(0.0, 5.0, "Я сказал привет."),
+            Segment(5.2, 6.0, "Угу."),
+            Segment(6.1, 10.0, "Классный день."),
+        ],
+        {},
+    )
+    assert find_review_items(primary, verifier) == []
+
+
 def kinds(left: str, right: str) -> list[str]:
     from audio_transcription.reconcile import disagreements
 
