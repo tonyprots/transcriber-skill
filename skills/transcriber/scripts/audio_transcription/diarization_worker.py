@@ -21,6 +21,7 @@ from .fluid_models import (
     no_network_command,
     offline_environment,
 )
+from .isolated import _tail
 from .models import Diarization, SpeakerTurn
 from .exiting import exit_after_flush
 
@@ -123,37 +124,56 @@ def _run_sortformer(
     )
 
 
+# Сердцебиение ниже раз в секунду обновляет progress.json, и сторож зависаний
+# родителя (`--backend-stall-timeout`) на FluidAudio не срабатывает. Свой срок
+# с запасом: на 42-минутной встрече бинарник укладывается в минуты.
+FLUIDAUDIO_DEADLINE_SECONDS = 300.0
+FLUIDAUDIO_DEADLINE_PER_AUDIO_SECOND = 1.0
+
+
+def _stop(process: subprocess.Popen) -> None:
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+
 def _run_binary(
     command: list[str],
     environment: dict[str, str],
     progress_path: Path,
-) -> tuple[int, str, str]:
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=environment,
-    )
-    heartbeat = 0
-    try:
-        while process.poll() is None:
-            heartbeat += 1
-            _write_json(
-                progress_path,
-                {"stage": "inference", "completed": heartbeat, "total": None},
-            )
-            time.sleep(1.0)
-        stdout, stderr = process.communicate()
-    except BaseException:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-        raise
-    return process.returncode, stdout, stderr
+    log_dir: Path,
+    deadline_seconds: float,
+) -> tuple[int, str]:
+    """Код выхода и хвост вывода. Вывод — в файлы, а не в пайп, который никто не
+    читает: на длинной записи бинарник встал бы на полном пайпе."""
+    stdout_path = log_dir / "fluidaudio.stdout.log"
+    stderr_path = log_dir / "fluidaudio.stderr.log"
+    with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+        process = subprocess.Popen(command, stdout=stdout, stderr=stderr, env=environment)
+        started = time.monotonic()
+        heartbeat = 0
+        try:
+            while process.poll() is None:
+                if time.monotonic() - started > deadline_seconds:
+                    _stop(process)
+                    raise RuntimeError(
+                        f"FluidAudio не уложился в срок ({deadline_seconds:.0f} с) и остановлен: "
+                        f"{_tail(stderr_path, 1000) or 'бинарник молчал'}"
+                    )
+                heartbeat += 1
+                _write_json(
+                    progress_path,
+                    {"stage": "inference", "completed": heartbeat, "total": None},
+                )
+                time.sleep(1.0)
+        except BaseException:
+            _stop(process)
+            raise
+    return process.returncode, _tail(stderr_path) or _tail(stdout_path)
 
 
 def _run_fluidaudio(
@@ -196,15 +216,18 @@ def _run_fluidaudio(
     environment = offline_environment()
     sandboxed = no_network_command(command)
     network_sandbox = sandboxed != command
-    returncode, stdout, stderr = _run_binary(sandboxed, environment, progress_path)
+    with wave.open(str(audio_path), "rb") as source:
+        duration = source.getnframes() / source.getframerate()
+    deadline = FLUIDAUDIO_DEADLINE_SECONDS + FLUIDAUDIO_DEADLINE_PER_AUDIO_SECOND * duration
+    log_dir = result_path.parent
+    returncode, detail = _run_binary(sandboxed, environment, progress_path, log_dir, deadline)
     if returncode != 0 and network_sandbox:
         # Песочница могла помешать сама (политика машины, новая macOS):
         # один повтор без неё, реестр по-прежнему закрыт.
         network_sandbox = False
-        returncode, stdout, stderr = _run_binary(command, environment, progress_path)
+        returncode, detail = _run_binary(command, environment, progress_path, log_dir, deadline)
     if returncode != 0:
-        detail = stderr.strip() or stdout.strip() or f"код {returncode}"
-        raise RuntimeError(f"FluidAudio завершился с ошибкой: {detail}")
+        raise RuntimeError(f"FluidAudio завершился с ошибкой: {detail or f'код {returncode}'}")
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     raw_turns = [
         SpeakerTurn(

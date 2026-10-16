@@ -73,9 +73,10 @@ def _fake_fluid(monkeypatch, tmp_path: Path, returncodes: tuple[int, ...] = ()) 
         def poll(self) -> int:
             return self.returncode
 
-        def communicate(self):
-            return "", ""
+        def wait(self, timeout=None) -> int:
+            return self.returncode
 
+    _silence(tmp_path / "audio.wav")
     monkeypatch.setattr(diarization_worker, "_fluid_binary", lambda _config: tmp_path / "fluidaudiocli")
     monkeypatch.setattr(diarization_worker, "ensure_fluid_models", lambda **_kwargs: "ready")
     monkeypatch.setattr(diarization_worker.subprocess, "Popen", FakeProcess)
@@ -373,3 +374,119 @@ def test_diarization_cache_key_follows_installed_models(monkeypatch) -> None:
         cli.SORTFORMER.model,
         cli.revision_for_model(cli.SORTFORMER.model),
     )
+
+
+def _silence(path: Path, seconds: float = 1.0) -> Path:
+    import wave
+
+    with wave.open(str(path), "wb") as target:
+        target.setnchannels(1)
+        target.setsampwidth(2)
+        target.setframerate(16000)
+        target.writeframes(b"\0\0" * int(16000 * seconds))
+    return path
+
+
+def _script_fluid(monkeypatch, tmp_path: Path, body: str) -> Path:
+    """Настоящий процесс вместо fluidaudiocli: проверяем пайпы и сроки, а не модель."""
+    script = tmp_path / "fluidaudiocli"
+    script.write_text(
+        "#!/bin/sh\n"
+        f"echo $$ > '{tmp_path / 'pid'}'\n"
+        'while [ $# -gt 0 ]; do [ "$1" = "--output" ] && out="$2"; shift; done\n'
+        f"{body}\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    monkeypatch.setattr(diarization_worker, "_fluid_binary", lambda _config: script)
+    monkeypatch.setattr(diarization_worker, "ensure_fluid_models", lambda **_kwargs: "ready")
+    monkeypatch.setattr(diarization_worker, "no_network_command", lambda command: list(command))
+    monkeypatch.setattr(fluid_models, "default_target", lambda: tmp_path / "models")
+    return script
+
+
+def _alive(pid: int) -> bool:
+    import os
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    # Зомби: процесс завершён, но ещё не прибран — для нас он уже мёртв.
+    import subprocess
+
+    state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout
+    return bool(state.strip()) and not state.strip().startswith("Z")
+
+
+def _run_bounded(function, seconds: float):
+    """Вызов с потолком: на старом коде бинарник висит на полном пайпе вечно."""
+    import threading
+
+    outcome: dict = {}
+
+    def target() -> None:
+        try:
+            outcome["value"] = function()
+        except BaseException as error:  # noqa: BLE001 — отдаём в тест как есть
+            outcome["error"] = error
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    return thread.is_alive(), outcome
+
+
+def test_chatty_fluidaudio_does_not_fill_pipe(monkeypatch, tmp_path: Path) -> None:
+    _script_fluid(
+        monkeypatch,
+        tmp_path,
+        "head -c 204800 /dev/zero | tr '\\000' x >&2\n"
+        'printf \'{"speakerCount":1,"segments":[{"startTimeSeconds":0,"endTimeSeconds":1,"speakerId":"1"}]}\' > "$out"',
+    )
+    audio = _silence(tmp_path / "audio.wav")
+    hung, outcome = _run_bounded(
+        lambda: diarization_worker._run_fluidaudio(audio, {}, tmp_path / "progress.json", tmp_path / "result.json"),
+        15.0,
+    )
+    if hung:
+        import os
+        import signal
+
+        os.kill(int((tmp_path / "pid").read_text()), signal.SIGKILL)
+    assert not hung, "FluidAudio повис на полном пайпе stderr"
+    assert "error" not in outcome, outcome.get("error")
+    assert [turn.speakers for turn in outcome["value"].turns] == [("speaker_1",)]
+    assert (tmp_path / "fluidaudio.stderr.log").stat().st_size == 204800
+
+
+def test_fluidaudio_error_carries_stderr_tail(monkeypatch, tmp_path: Path) -> None:
+    _script_fluid(monkeypatch, tmp_path, "echo 'CoreML: модель не открылась' >&2\nexit 7")
+    with pytest.raises(RuntimeError, match="модель не открылась"):
+        diarization_worker._run_fluidaudio(
+            _silence(tmp_path / "audio.wav"), {}, tmp_path / "progress.json", tmp_path / "result.json"
+        )
+
+
+def test_stuck_fluidaudio_is_killed_after_deadline(monkeypatch, tmp_path: Path) -> None:
+    # Сердцебиение раз в секунду глушит сторож зависаний родителя; без своего
+    # срока зависший бинарник держал бы прогон вечно.
+    _script_fluid(monkeypatch, tmp_path, "exec sleep 1000")
+    monkeypatch.setattr(diarization_worker, "FLUIDAUDIO_DEADLINE_SECONDS", 1.0)
+    monkeypatch.setattr(diarization_worker, "FLUIDAUDIO_DEADLINE_PER_AUDIO_SECOND", 0.0)
+    hung, outcome = _run_bounded(
+        lambda: diarization_worker._run_fluidaudio(
+            _silence(tmp_path / "audio.wav"), {}, tmp_path / "progress.json", tmp_path / "result.json"
+        ),
+        15.0,
+    )
+    pid = int((tmp_path / "pid").read_text())
+    if hung:
+        import os
+        import signal
+
+        os.kill(pid, signal.SIGKILL)
+    assert not hung, "зависший FluidAudio не остановлен"
+    assert isinstance(outcome.get("error"), RuntimeError)
+    assert "не уложился" in str(outcome["error"])
+    assert not _alive(pid)
