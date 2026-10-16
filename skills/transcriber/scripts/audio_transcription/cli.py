@@ -258,6 +258,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--priority",
+        action="store_true",
+        help=(
+            "Вне очереди — для диктовки, которую ждут сейчас (так зовёт интеграция "
+            "Handy): пакет и другие прогоны пропускают её вперёд и отдают ей машину "
+            "между окнами модели. Только для одной записи"
+        ),
+    )
+    parser.add_argument(
         "--keep-wav",
         action="store_true",
         help="Оставить подготовленный prepared.wav в каталоге результата (плюс размер записи)",
@@ -931,6 +940,10 @@ def _spoken_duration(remote: RemoteMedia) -> str:
 def _validate(args: argparse.Namespace) -> None:
     if args.early_text is not None and len(args.input) * len(_sections(args)) > 1:
         raise ValueError("--early-text пишет один файл и годится только для одной записи")
+    if args.priority and len(args.input) * len(_sections(args)) > 1:
+        # Пакет вне очереди держал бы метку на каждой записи и сам стал бы тем,
+        # что не пропускает голосовое.
+        raise ValueError("--priority — для одной записи, которую ждут сейчас, а не для пакета")
     if args.glossary_profile:
         profile_path(args.glossary_profile)  # плохое имя — до часа расшифровки, а не после
     if not 0 <= args.review_threshold <= 1:
@@ -1255,18 +1268,19 @@ def _transcribe(
         ensure_disk_space(work_dir, media.duration_seconds)
         # Очередь занимаем после скачивания и ffmpeg — им делить машину
         # незачем, — а отпускаем до уборки временного каталога: её растягивает
-        # антивирус, и следующий прогон ждать её не должен.
-        timings["queue"] = round(
-            held.enter_context(
-                machine_slot(
-                    output.name,
-                    on_wait=lambda holder, waited: report.stage(
-                        f"Жду очереди ({waited:.0f} с): машину занимает {holder}"
-                    ),
-                )
-            ),
-            2,
+        # антивирус, и следующий прогон ждать её не должен. Замок — на одну
+        # запись: пакет отпускает машину между записями, а голосовому
+        # (`--priority`) отдаёт её и между окнами модели.
+        slot = held.enter_context(
+            machine_slot(
+                output.name,
+                priority=args.priority,
+                on_wait=lambda holder, waited: report.stage(
+                    f"Жду очереди ({waited:.0f} с): машину занимает {holder}"
+                ),
+            )
         )
+        timings["queue"] = round(slot.waited, 2)
         mark = time.monotonic()
         report.stage(f"Длительность {duration}, режим {args.mode}; ищу речевые окна")
         # Загрузку модели называем отдельной строкой: без неё тишина в логе на
@@ -1685,6 +1699,9 @@ def _transcribe(
             only_words=disputed_primary_words(review_items) if verifier_ran else None,
         )
         timed("glossary", mark)
+        if slot.yielded:
+            # Отдано голосовому по ходу работы: входит в этапы и в total.
+            timings["yielded"] = round(slot.yielded, 2)
         # Итог считаем после словаря: раньше он стоял до пополнения и подсказок,
         # и 10–30 секунд хвоста в ориентиры скорости не попадали.
         timings["total"] = round(time.monotonic() - started_at, 2)

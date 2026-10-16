@@ -129,10 +129,12 @@ def marker_alive(marker: Path) -> bool:
 def transcribe(
     wav: Path, out: Path, early: Path, args: argparse.Namespace, sink
 ) -> subprocess.Popen:
+    # `--priority`: диктовку ждут сейчас, и пакет на машине уступает ей очередь
+    # (2026-10-10 голосовое простояло 25 минут за выпуском подкаста).
     command = [
         args.python, args.transcribe, str(wav),
         "--mode", args.mode, "--language", args.language,
-        "--output", str(out), "--early-text", str(early), "--quiet",
+        "--output", str(out), "--early-text", str(early), "--priority", "--quiet",
     ]
     # Вывод в файл, а не в пайп: пока мы ждём текст, пайп никто не читает, и
     # переполненный буфер повесил бы прогон.

@@ -14,6 +14,7 @@ from .backends import BackendMissing, _PinnedLoad, load_with_hub_fallback
 from .catalog import bundled_binary_problem, fluidaudio_binary_path
 from .diarization import partition_turns
 from .fluid_models import ModelsUnavailable, ensure as ensure_fluid_models, ensure_binary as ensure_fluid_binary
+from .isolated import hold_while_paused
 from .models import Diarization, SpeakerTurn
 from .exiting import exit_after_flush
 
@@ -99,6 +100,7 @@ def _run_sortformer(
             progress_path,
             {"stage": "inference", "completed": index, "total": total},
         )
+        hold_while_paused(progress_path)
     turns = partition_turns(raw_turns)
     return Diarization(
         model=str(config["model_name"]),

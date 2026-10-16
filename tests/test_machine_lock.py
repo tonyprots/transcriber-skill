@@ -15,9 +15,9 @@ def test_second_run_waits_and_names_the_holder(tmp_path: Path) -> None:
 
     def second() -> None:
         with machine_slot("второй", path=lock, poll_seconds=0.01,
-                          on_wait=lambda holder, waited: seen.append(holder)) as waited:
+                          on_wait=lambda holder, waited: seen.append(holder)) as slot:
             order.append("второй")
-            assert waited > 0
+            assert slot.waited > 0
 
     # Ждём события, а не времени: под нагрузкой (load average 60, 2026-10-04)
     # 0,2 с не хватало, чтобы второй поток успел упереться в замок.

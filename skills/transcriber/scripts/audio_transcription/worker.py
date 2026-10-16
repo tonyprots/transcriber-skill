@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .backends import BackendMissing, BackendUnavailable, GigaAMBackend, MLXWhisperBackend, WhisperBackend
+from .isolated import hold_while_paused
 from .models import AudioChunk, Hypothesis
 from .exiting import exit_after_flush
 
@@ -42,6 +43,8 @@ def _transcribe(payload: dict[str, Any], progress_path: Path) -> Hypothesis:
 
     def progress(completed: int, total: int) -> None:
         _write_json(progress_path, {"completed": completed, "total": total})
+        # Окно закончено — здесь можно встать, пока машину держит голосовое.
+        hold_while_paused(progress_path)
 
     progress(0, len(chunks))
     if backend == "mlx-whisper-lid":

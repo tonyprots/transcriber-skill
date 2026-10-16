@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
+from . import machine_lock
 from .backends import BackendMissing, BackendUnavailable
 from .models import AudioChunk, Diarization, Hypothesis
 
@@ -63,6 +64,12 @@ def wait_for_progress(
     signature = _progress_signature(progress_path)
     activity = _activity_signature(activity_paths)
     while process.poll() is None:
+        if machine_lock.priority_waiting():
+            _pause_and_give_way(progress_path)
+            # Простой на голосовом — не зависание: отсчёт watchdog с нуля.
+            last_progress = time.monotonic()
+            activity = _activity_signature(activity_paths)
+            continue
         current = _progress_signature(progress_path)
         current_activity = _activity_signature(activity_paths)
         if current_activity != activity:
@@ -85,6 +92,49 @@ def wait_for_progress(
             return False
         time.sleep(poll_seconds)
     return True
+
+
+# Метка паузы лежит рядом с progress.json воркера; внутри — pid родителя.
+PAUSE_NAME = "pause"
+
+
+def _pause_and_give_way(progress_path: Path) -> None:
+    """Голосовое ждёт машину: воркер встаёт после текущего окна, машина уходит
+    голосовому и возвращается, когда оно закончит.
+
+    Конца окна не ждём: окно — секунды, а ждать подтверждения от воркера,
+    который грузит или качает модель, пришлось бы минутами. Модель остаётся
+    в памяти, ядра свободны. Воркер без точек паузы (бинарник FluidAudio)
+    досчитывает рядом с голосовым — как до общей очереди.
+    """
+    pause = progress_path.with_name(PAUSE_NAME)
+    try:
+        pause.write_text(str(os.getpid()), encoding="utf-8")
+    except OSError:
+        return  # воркер не встанет — машину не отдаём; голосовое ждёт как раньше
+    try:
+        machine_lock.give_way()
+    finally:
+        pause.unlink(missing_ok=True)
+
+
+def hold_while_paused(progress_path: Path, *, poll_seconds: float = 0.5) -> None:
+    """Сторона воркера: между окнами стоять, пока родитель отдал машину.
+
+    Родитель умер — ждать некого: выходим сразу, иначе сирота держал бы
+    гигабайты весов вечно.
+    """
+    pause = progress_path.with_name(PAUSE_NAME)
+    while True:
+        try:
+            parent = int(pause.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError):
+            parent = os.getppid()  # метку как раз пишут — перечитаем на следующем шаге
+        if os.getppid() != parent:
+            os._exit(2)
+        time.sleep(poll_seconds)
 
 
 WORKER_MISSING_EXIT_CODE = 3
