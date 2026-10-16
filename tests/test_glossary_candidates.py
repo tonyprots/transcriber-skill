@@ -139,3 +139,20 @@ def test_known_terms_are_skipped_whatever_the_case() -> None:
     """`known` нормализован, а токены расхождения — в исходном регистре и с «ё»."""
     assert collect_candidates([_item("бэклог", "Backlog")], known={"backlog"}) == []
     assert collect_candidates([_item("Ёлка", "Yolka")], known={"елка"}) == []
+
+
+def test_canonical_keeps_the_verifier_spelling_not_a_neighbour() -> None:
+    """Контекст проверяющей собран из слов основной: там то же слово бывает строчными."""
+    item = {
+        "start": 1.0,
+        "end": 3.0,
+        "comparison_text": "мы сравнили notion и Notion вчера",
+        "differing_tokens": ["нотион / Notion"],
+        "verifier_span": "Notion",
+    }
+    (candidate,) = collect_candidates([item], known=set())
+    assert candidate["canonical"] == "Notion"
+    # Старый segments.json: токены строчными, регистр восстанавливается по контексту.
+    old = {"start": 1.0, "end": 3.0, "comparison_text": "про Notion сегодня",
+           "differing_tokens": ["нотион / notion"]}
+    assert collect_candidates([old], known=set())[0]["canonical"] == "Notion"

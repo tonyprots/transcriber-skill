@@ -135,6 +135,21 @@ def _latin_candidate(heard: str, verifier: str) -> tuple[bool, bool]:
     return heard[:1].isupper() and verifier[:1].isupper(), False
 
 
+def _verifier_spelling(verifier: str, item: dict[str, Any]) -> str:
+    """Написание проверяющей в исходном регистре.
+
+    С 0.13 расхождение отдаёт токены как есть, и регистр уже в них. Искать его
+    в `comparison_text` нельзя: этот контекст собран из соседних слов
+    основной модели, и строчное «notion» рядом давало канон «notion»
+    вместо «Notion». Строчный токен бывает и в старом `segments.json`, где
+    расхождения хранились нормализованными, — тогда регистр берётся из
+    фрагмента проверяющей, а у совсем старых записей — из контекста.
+    """
+    if verifier != verifier.casefold():
+        return verifier
+    return original_case(verifier, item.get("verifier_span") or item.get("comparison_text", ""))
+
+
 def collect_candidates(
     review_items: list[dict[str, Any]],
     known: set[str],
@@ -195,11 +210,7 @@ def collect_candidates(
                         # основная модель, правильного написания нет ни у
                         # кого — тогда это не готовая запись, а место,
                         # которое должен назвать пользователь.
-                        "canonical": (
-                            original_case(verifier, item.get("comparison_text", ""))
-                            if verifier_latin
-                            else ""
-                        ),
+                        "canonical": _verifier_spelling(verifier, item) if verifier_latin else "",
                         "latin": term,
                         "count": 0,
                         "first_at": float(item.get("start", 0.0)),
