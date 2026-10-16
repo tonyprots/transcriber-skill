@@ -1408,9 +1408,20 @@ def _transcribe(
             if args.no_glossary
             else store_path(args.glossary_store, args.glossary_profile, route.language)
         )
-        glossary = merge_glossaries(
-            curated, [] if learned_path is None else entries_of(load_document(learned_path))
-        )
+        learned_now: list[GlossaryEntry] = []
+        if learned_path is not None:
+            try:
+                learned_now = entries_of(load_document(learned_path))
+            except (OSError, ValueError, yaml.YAMLError) as error:
+                # Опечатка в ручной правке своего словаря роняла каждый прогон,
+                # в том числе быстрый текст Handy. Прогон идёт без выученного
+                # и без обучения: файл остаётся как есть, чинит его человек.
+                warnings.append(
+                    f"Свой словарь {learned_path} не прочитан, прогон без него "
+                    f"и без пополнения: {error}"
+                )
+                learned_path = None
+        glossary = merge_glossaries(curated, learned_now)
         # Подсказки модели берём только из выверенного словаря пользователя.
         # Свой словарь скилл пополняет после каждого прогона, и если пускать
         # его сюда, ключ кэша менялся бы вместе с ним: обещание «повторный

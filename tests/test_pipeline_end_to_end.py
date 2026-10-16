@@ -620,3 +620,32 @@ def test_failed_learning_keeps_the_finished_transcript(
     manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
     assert any("Словарь не пополнен" in warning for warning in manifest["warnings"])
     assert "PostgreSQL" in (output / "readable.md").read_text(encoding="utf-8")
+
+
+@requires_speech
+def test_broken_store_warns_and_is_left_alone(
+    tmp_path: Path, spoken_audio: Path, monkeypatch
+) -> None:
+    """Опечатка в ручной правке своего словаря роняла каждый прогон."""
+    monkeypatch.setattr(cli, "run_isolated_backend", fake_backend)
+    store = tmp_path / "glossary.yaml"
+    monkeypatch.setenv("TRANSCRIBER_GLOSSARY_STORE", str(store))
+    broken = "version: 1\nentries:\n  - canonical: PostgreSQL\n    aliases: [постгрес\n"
+    store.write_text(broken, encoding="utf-8")
+    output = tmp_path / "result"
+
+    cli.run(
+        cli.build_parser().parse_args(
+            [
+                str(spoken_audio), "--output", str(output), "--mode", "max",
+                "--language", "ru", "--no-cache", "--quiet",
+                "--verifier-window-seconds", "0",
+            ]
+        )
+    )
+
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    assert any("не прочитан" in warning for warning in manifest["warnings"])
+    assert manifest["glossary"]["learning"] is False
+    # Файл не перезаписан: правку человека вместе с опечаткой чинит человек.
+    assert store.read_text(encoding="utf-8") == broken
