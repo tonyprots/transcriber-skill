@@ -591,3 +591,42 @@ def test_diarization_pipeline_moves_with_worker_command(monkeypatch, tmp_path: P
     flags = [part for part in commands[0] if part.startswith("--")]
     payload = cli.diarization_cache_payload(_diarize_args(tmp_path), "fluidaudio", 0.7, "sha", None)
     assert (payload["pipeline"], flags) == ("0.6", ["--mode", "--threshold", "--output", "--num-speakers"])
+
+
+def test_diarization_worker_reports_model_download(monkeypatch, tmp_path: Path) -> None:
+    """Загрузка моделей диаризации видна сторожу так же, как у ASR-воркера."""
+    from audio_transcription import weights
+    from audio_transcription.models import Diarization
+
+    def downloading(audio_path, config, progress_path, result_path):
+        bar = weights._silent_tqdm()(total=10_000_000, unit="B")
+        bar.update(3_000_000)
+        bar.close()
+        snapshot.append(json.loads(progress_path.read_text(encoding="utf-8")))
+        return Diarization(model="fake", elapsed_seconds=0.0, turns=[], metadata={})
+
+    snapshot: list[dict] = []
+    monkeypatch.setattr(diarization_worker, "_run_fluidaudio", downloading)
+    request = tmp_path / "request.json"
+    request.write_text(
+        json.dumps({"backend": "fluidaudio", "audio_path": str(tmp_path / "a.wav"), "config": {}}), encoding="utf-8"
+    )
+    code = diarization_worker.main([str(request), str(tmp_path / "result.json"), str(tmp_path / "progress.json")])
+    assert code == 0
+    assert snapshot[0]["stage"] == "загрузка моделей: 3 МБ"
+
+
+def test_models_download_quietly_in_worker(monkeypatch, tmp_path: Path) -> None:
+    import huggingface_hub
+
+    calls: list[dict] = []
+
+    def fake_snapshot(**kwargs):
+        calls.append(kwargs)
+        _complete(Path(kwargs["local_dir"]))
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot)
+    fluid_models.ensure(tmp_path / "quiet", quiet=True)
+    fluid_models.ensure(tmp_path / "loud")
+    assert calls[0]["tqdm_class"].__name__ == "Silent"
+    assert "tqdm_class" not in calls[1]  # prefetch и setup показывают полосу

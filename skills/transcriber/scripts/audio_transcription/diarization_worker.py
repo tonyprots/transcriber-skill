@@ -23,6 +23,7 @@ from .fluid_models import (
 )
 from .isolated import _tail
 from .models import Diarization, SpeakerTurn
+from .weights import DownloadHeartbeat, download_listener
 from .exiting import exit_after_flush
 
 
@@ -192,7 +193,7 @@ def _run_fluidaudio(
     # бинарник: иначе он скачал бы последний коммит репозитория, а мерили мы
     # конкретный.
     try:
-        ensure_fluid_models(offline=bool(config.get("offline", False)))
+        ensure_fluid_models(offline=bool(config.get("offline", False)), quiet=True)
     except ModelsUnavailable as error:
         raise BackendMissing(str(error)) from error
     command = [
@@ -285,17 +286,24 @@ def main(argv: list[str] | None = None) -> int:
         if bool(config.get("offline", False)):
             os.environ.setdefault("HF_HUB_OFFLINE", "1")
             os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-        if backend == "sortformer":
-            diarization = _run_sortformer(audio_path, config, progress_path)
-        elif backend == "fluidaudio":
-            diarization = _run_fluidaudio(
-                audio_path,
-                config,
-                progress_path,
-                result_path,
-            )
-        else:
-            raise ValueError(f"Неизвестный backend диаризации: {backend}")
+        # Веса Sortformer и модели FluidAudio качаются молча: пусть сторож
+        # родителя видит, что байты идут.
+        heartbeat = DownloadHeartbeat(
+            lambda stage: _write_json(progress_path, {"stage": stage, "completed": 0, "total": None}),
+            "загрузка моделей",
+        )
+        with download_listener(heartbeat):
+            if backend == "sortformer":
+                diarization = _run_sortformer(audio_path, config, progress_path)
+            elif backend == "fluidaudio":
+                diarization = _run_fluidaudio(
+                    audio_path,
+                    config,
+                    progress_path,
+                    result_path,
+                )
+            else:
+                raise ValueError(f"Неизвестный backend диаризации: {backend}")
         _write_json(result_path, diarization.to_dict())
     except BackendMissing as error:
         print(str(error), file=sys.stderr)

@@ -162,8 +162,13 @@ def preflight(explicit: str | Path | None = None, *, offline: bool = False) -> s
     return None
 
 
-def ensure(target: Path | None = None, *, offline: bool = False) -> str:
-    """Возвращает "ready" или "downloaded"; иначе ModelsUnavailable."""
+def ensure(target: Path | None = None, *, offline: bool = False, quiet: bool = False) -> str:
+    """Возвращает "ready" или "downloaded"; иначе ModelsUnavailable.
+
+    `quiet` — для воркера: полоса загрузки молчит, а байты идут слушателю
+    `weights.download_listener` (сторож зависаний). prefetch и setup её
+    показывают.
+    """
     target = (target or default_target()).expanduser()
     if ready(target):
         return "ready"
@@ -186,12 +191,18 @@ def ensure(target: Path | None = None, *, offline: bool = False) -> str:
     # Ошибки Hub бывают любого вида (OSError, httpx, свои классы по версиям);
     # для прогона все они значат одно — моделей нет, и это понятный отказ, а
     # не «воркер упал». Повторный запуск докачает с места обрыва.
+    extra: dict[str, object] = {}
+    if quiet:
+        from .weights import _silent_tqdm
+
+        extra["tqdm_class"] = _silent_tqdm()
     try:
         snapshot_download(
             repo_id=FLUIDAUDIO.repo,
             revision=FLUIDAUDIO.revision,
             local_dir=target,
             allow_patterns=[*FILES, *(f"{name}.mlmodelc/**" for name in MODELS)],
+            **extra,
         )
     except Exception as error:
         raise ModelsUnavailable(f"CoreML-модели FluidAudio не скачались: {error}") from error

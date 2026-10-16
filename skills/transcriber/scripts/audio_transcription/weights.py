@@ -13,7 +13,10 @@ references/quality.md переставали описывать прогон м�
 from __future__ import annotations
 
 import sys
-from collections.abc import Callable
+import threading
+import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -80,13 +83,66 @@ def _warn(text: str) -> None:
     print(f"Внимание: {text}", file=sys.stderr, flush=True)
 
 
+# Слушатель байтов загрузки: (сколько пришло, id полосы). Ставит воркер на
+# время своей работы (`download_listener`), чтобы молчащие полосы оставляли
+# след для сторожа зависаний.
+_listener: Callable[[float, int], None] | None = None
+
+
+@contextmanager
+def download_listener(listener: Callable[[float, int], None]) -> Iterator[None]:
+    global _listener
+    previous, _listener = _listener, listener
+    try:
+        yield
+    finally:
+        _listener = previous
+
+
+class DownloadHeartbeat:
+    """Признак жизни во время загрузки: сколько мегабайт уже пришло.
+
+    Полосы загрузки молчат (`_silent_tqdm`), а сторож зависаний родителя видит
+    только progress.json и логи воркера: первая закачка весов медленнее
+    ~8 МБ/с убивалась как зависшая. Пишем не чаще раза в секунду и только при
+    росте — вставшая закачка по-прежнему ловится. Hub ведёт байты двумя
+    полосами сразу (сеть и диск), поэтому считаем по самой длинной.
+    """
+
+    def __init__(self, write: Callable[[str], None], label: str, every_seconds: float = 1.0) -> None:
+        self._write = write
+        self._label = label
+        self._every = every_seconds
+        self._totals: dict[int, float] = {}
+        self._written = 0.0
+        self._at = float("-inf")
+        self._lock = threading.Lock()
+
+    def __call__(self, received: float, bar: int = 0) -> None:
+        with self._lock:
+            self._totals[bar] = self._totals.get(bar, 0.0) + received
+            now = time.monotonic()
+            done = max(self._totals.values())
+            if now - self._at < self._every or done <= self._written:
+                return
+            self._at, self._written = now, done
+            self._write(f"{self._label}: {done / 1e6:.0f} МБ")
+
+
 def _silent_tqdm() -> type:
     from tqdm.auto import tqdm
 
     class Silent(tqdm):  # type: ignore[misc, valid-type]
         def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self._counts_bytes = kwargs.get("unit") == "B"
             kwargs["disable"] = True
             super().__init__(*args, **kwargs)
+
+        def update(self, n: float | None = 1) -> bool | None:
+            listener = _listener
+            if listener is not None and self._counts_bytes and n and n > 0:
+                listener(n, id(self))
+            return super().update(n)
 
     return Silent
 
