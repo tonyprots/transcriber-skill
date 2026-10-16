@@ -7,8 +7,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from audio_transcription.cli import main
-from audio_transcription.exiting import exit_after_flush
+from audio_transcription.exiting import run_entry_point
 
 
 if __name__ == "__main__":
-    exit_after_flush(main())
+    run_entry_point(main)

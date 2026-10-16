@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import platform
 import re
-import shutil
-import subprocess
 import sys
 import tempfile
 import threading
 import time
+import unicodedata
 from contextlib import ExitStack, contextmanager
 from collections.abc import Iterator
 from dataclasses import replace
@@ -30,6 +30,7 @@ from .fetching import (
     with_remote_source,
 )
 from .machine_lock import machine_slot
+from .scratch import ORPHAN_AGE_HOURS, mark_owner, remove_detached, sweep_orphans
 from .backends import BackendMissing, BackendUnavailable
 from .catalog import (
     FASTER_WHISPER_FALLBACK,
@@ -79,6 +80,7 @@ from .render import ensure_disk_space, ensure_output_available, parse_speaker_na
 from .routing import (
     AUTO_LANGUAGE,
     BackendSpec,
+    LanguageRoute,
     diarization_backend,
     language_route,
     normalize_language,
@@ -227,8 +229,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.82,
         help=(
-            "Сходство гипотез, ниже которого окно уходит в очередь проверки "
-            "(по умолчанию 0.82). Числа, имена и термины попадают туда в любом случае"
+            "Сходство окна, ниже которого причина места пишется как «гипотезы сильно "
+            "расходятся, окно целиком под вопросом» (по умолчанию 0.82). На состав "
+            "очереди не влияет: в неё идёт каждое расхождение"
         ),
     )
     parser.add_argument(
@@ -246,7 +249,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Пропустить запись, у которой каталог результата уже содержит "
-            "manifest.json: так продолжают прерванную пачку, не скачивая готовое заново"
+            "manifest.json этой же записи (сверка по ссылке или файлу): так продолжают "
+            "прерванную пачку, не скачивая готовое заново"
         ),
     )
     parser.add_argument(
@@ -568,6 +572,26 @@ def loaded_revisions(
     return found
 
 
+def models_in_run(
+    args: argparse.Namespace,
+    route: LanguageRoute,
+    verifier_spec: BackendSpec | None,
+    diarization_kind: str | None,
+) -> list[str]:
+    """Модели, которые этот прогон запускает: для устаревания и `model_revisions`.
+
+    Диаризация — по фактическому бэкенду, а не по `--diarization-model`: его
+    умолчание — Sortformer, а с 0.24 по умолчанию работает FluidAudio, и манифест
+    называл модель, которая не запускалась.
+    """
+    models = [route.primary.model] + ([verifier_spec.model] if verifier_spec else [])
+    if diarization_kind == "fluidaudio":
+        models.append(FLUIDAUDIO.model)
+    elif diarization_kind is not None:
+        models.append(args.diarization_model)
+    return models
+
+
 def run_route_backend(
     args: argparse.Namespace,
     spec: BackendSpec,
@@ -607,6 +631,7 @@ def run_route_backend(
             on_progress=report.windows(
                 f"GigaAM {spec.model}" if spec.family == "gigaam" else spec.model
             ),
+            label=spec.model,
         )
     else:
         raise ValueError(f"Неизвестное семейство ASR: {spec.family}")
@@ -950,6 +975,12 @@ def _validate(args: argparse.Namespace) -> None:
         raise ValueError("--review-threshold должен быть в диапазоне [0, 1]")
     if args.verifier_window_seconds < 0:
         raise ValueError("--verifier-window-seconds не может быть отрицательным")
+    # 0 и меньше уводили Silero VAD в бесконечный цикл: нарезка длинной фразы
+    # шагом в ноль секунд не кончается, а прогон всё это время держит машину.
+    # Крошечная доля секунды — окно в ноль отсчётов, тот же цикл; окно короче
+    # секунды смысла не имеет ни у одной модели. `not >=` ловит и nan.
+    if not args.speech_window_seconds >= 1:
+        raise ValueError("--speech-window-seconds должен быть не меньше 1 с")
     if args.backend_stall_timeout <= 0:
         raise ValueError("--backend-stall-timeout должен быть положительным")
     if (
@@ -972,6 +1003,23 @@ def _validate(args: argparse.Namespace) -> None:
 
 def _sections(args: argparse.Namespace) -> list[Section | None]:
     return list(args.section or []) or [None]
+
+
+def _check_early_text(args: argparse.Namespace, output: Path) -> None:
+    """Ранний текст не может лежать в каталоге результата.
+
+    Его файл создавал каталог раньше `write_bundle`, и тот в самом конце
+    прогона отказывал «Каталог уже существует», а с `--overwrite` увозил
+    ранний текст в архив.
+    """
+    if args.early_text is None:
+        return
+    early = args.early_text.expanduser().resolve()
+    if early == output or output in early.parents:
+        raise ValueError(
+            "--early-text не может лежать внутри каталога результата: укажите файл "
+            "рядом с ним, например OUTPUT_DIR.txt"
+        )
 
 
 def _resolve_input(raw: str) -> tuple[RemoteMedia | None, Path | None]:
@@ -1009,8 +1057,9 @@ def run(args: argparse.Namespace) -> Path:
         output = Path(f"{_output_stem(remote, None, section)}.transcript").resolve()
     else:
         output = source.with_name(f"{_output_stem(None, source, section)}.transcript")  # type: ignore[union-attr]
+    _check_early_text(args, output)
     report = ProgressReporter(enabled=not args.quiet)
-    if args.skip_done and _is_done(output):
+    if args.skip_done and _is_done(output, remote, source):
         report.stage(f"Уже расшифровано, пропускаю: {output}")
         return output
     output = ensure_output_available(output, overwrite=args.overwrite)
@@ -1045,7 +1094,9 @@ def run_batch(args: argparse.Namespace) -> list[dict[str, Any]]:
     report = ProgressReporter(enabled=not args.quiet)
     results: list[dict[str, Any]] = []
     plan: list[tuple[str, RemoteMedia | None, Path | None, list[tuple[Section | None, Path]]]] = []
-    taken: set[Path] = set()
+    # Ключи, а не пути: APFS не различает регистр и форму Unicode, и Meeting с
+    # meeting сталкивались только при записи результата, после всей расшифровки.
+    taken: set[str] = set()
     for raw in args.input:
         try:
             remote, source = _resolve_input(raw)
@@ -1057,16 +1108,23 @@ def run_batch(args: argparse.Namespace) -> list[dict[str, Any]]:
         for section in sections:
             name = _output_stem(remote, source, section)
             candidate, attempt = base / name, 2
-            while candidate in taken:
+            # С --skip-done каталог с чужим манифестом занят, даже если имя
+            # совпало: запись ищет свой готовый каталог или первый свободный.
+            while _name_key(candidate) in taken or (
+                args.skip_done
+                and (candidate / "manifest.json").is_file()
+                and not _is_done(candidate, remote, source)
+            ):
                 candidate, attempt = base / f"{name}-{attempt}", attempt + 1
-            taken.add(candidate)
-            if args.skip_done and _is_done(candidate):
+            taken.add(_name_key(candidate))
+            if args.skip_done and _is_done(candidate, remote, source):
                 report.stage(f"Уже расшифровано, пропускаю: {candidate.name}")
                 results.append({"input": raw, "skipped": True, **summarize(candidate)})
                 continue
             # Занятый каталог — отказ одной записи, а не всей пачки: раньше
             # один такой каталог ронял пакет до первого скачанного байта.
             try:
+                _check_early_text(args, candidate)
                 jobs.append((section, ensure_output_available(candidate, overwrite=args.overwrite)))
             except FAILURES as error:
                 report.stage(f"Пропускаю {candidate.name}: {error}")
@@ -1109,9 +1167,55 @@ def run_batch(args: argparse.Namespace) -> list[dict[str, Any]]:
     return results
 
 
-def _is_done(output: Path) -> bool:
-    """Готов тот каталог, где есть манифест: он пишется последним."""
-    return (output.expanduser() / "manifest.json").is_file()
+def _name_key(path: Path) -> str:
+    return unicodedata.normalize("NFC", str(path)).casefold()
+
+
+def _is_done(
+    output: Path, remote: RemoteMedia | None = None, source: Path | None = None
+) -> bool:
+    """Готов тот каталог, где есть манифест этой же записи: он пишется последним.
+
+    Одного манифеста мало: имя каталога — заголовок и порядок входов, и у
+    канала с одинаковыми названиями новый ролик садился на каталог прошлого и
+    числился готовым с его расшифровкой.
+    """
+    manifest = output.expanduser() / "manifest.json"
+    return manifest.is_file() and not _foreign_manifest(manifest, remote, source)
+
+
+def _foreign_manifest(manifest: Path, remote: RemoteMedia | None, source: Path | None) -> bool:
+    """В манифесте другая запись. Нечем сравнить (манифест старой версии,
+    файл не читается) — считаем своей, как до проверки."""
+    try:
+        recorded = json.loads(manifest.read_text(encoding="utf-8")).get("source")
+    except (OSError, ValueError, AttributeError):
+        return False
+    if not isinstance(recorded, dict):
+        return False
+    origin = recorded.get("origin")
+    if remote is not None:
+        return bool(origin) and origin != public_url(remote.url)
+    if source is None:
+        return False
+    if origin:
+        return True  # там запись по ссылке, здесь свой файл
+    path, sha256 = recorded.get("source"), recorded.get("sha256")
+    if not path or path == str(source) or not sha256:
+        return False
+    # Файл переложили: та же запись узнаётся по содержимому.
+    try:
+        return sha256 != _file_sha256(source)
+    except OSError:
+        return False
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _failure(raw: str, section: Section | None, error: BaseException) -> dict[str, Any]:
@@ -1153,22 +1257,16 @@ def scratch_dir(prefix: str) -> Iterator[Path]:
     десяти минут после готового результата (`.memory/defender-slow-temp-cleanup.md`).
     Всё это время stdout молчал, Handy не получал текст, а следующая запись
     пачки ждала. Удаление уходит отдельному процессу вне нашей сессии: он
-    переживает выход интерпретатора и никого не задерживает.
+    переживает выход интерпретатора и никого не задерживает. Метка владельца
+    бережёт каталог от уборки осиротевших (`scratch.sweep_orphans`), пока
+    прогон жив.
     """
     path = Path(tempfile.mkdtemp(prefix=prefix))
+    mark_owner(path)
     try:
         yield path
     finally:
-        try:
-            subprocess.Popen(
-                ["rm", "-rf", str(path)],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-        except OSError:
-            shutil.rmtree(path, ignore_errors=True)
+        remove_detached(path)
 
 
 def write_plain_text(path: Path, segments: list[Any]) -> None:
@@ -1233,6 +1331,17 @@ def _transcribe(
             report.stage(
                 f"Кэш: убрано записей старше {args.cache_max_age_days:g} дн.: {swept.files}"
             )
+
+    # Остатки убитых прогонов — копии записей в $TMPDIR. Уборка тоже побочная.
+    try:
+        orphans = sweep_orphans()
+    except OSError:
+        orphans = []
+    if orphans:
+        report.stage(
+            f"Временные каталоги старше {ORPHAN_AGE_HOURS:g} ч без владельца, "
+            f"убрано осиротевших: {len(orphans)}"
+        )
 
     # Скачивание в total не входит: это сеть, а не расшифровка, и по total
     # сравнивают скорость прогонов между собой.
@@ -1316,9 +1425,7 @@ def _transcribe(
         # Устаревание моделей проверяется на каждом прогоне: doctor.py после
         # установки никто не запускает, и сигнал бы туда не дошёл.
         verifier_spec = route.verifier_for(args.mode)
-        used_models = [route.primary.model] + ([verifier_spec.model] if verifier_spec else [])
-        if args.diarize:
-            used_models.append(args.diarization_model)
+        used_models = models_in_run(args, route, verifier_spec, diarization_kind)
         for text in staleness_warnings(used_models):
             report.stage(f"Внимание: {text}")
             warnings.append(text)
@@ -1718,9 +1825,7 @@ def _transcribe(
             corrections = _shift_all(corrections, offset)
             suggestions = [_shift_mapping(item, offset) for item in suggestions]
             if diarization is not None:
-                diarization_output = replace(
-                    diarization, turns=_shift_all(diarization.turns, offset)
-                )
+                diarization_output = _shift_diarization(diarization, offset)
         if args.early_text is not None:
             # Ранний текст уже в буфере; файл теперь отдаёт итог — со словарём
             # и правками проверяющей. Иначе агент, пришедший к готовой записи,
@@ -1777,12 +1882,26 @@ def _shift_all(items: list[Any], offset: float) -> list[Any]:
     return [replace(item, start=item.start + offset, end=item.end + offset) for item in items]
 
 
+# Вложенные списки с таймкодами в метаданных: пословные метки Whisper и части
+# окна после retry-split (у частей свои `words`). Без них raw.json при
+# `--section` мешал время фрагмента со временем исходника.
+_NESTED_TIMED = ("words", "subchunks")
+
+
 def _shift_mapping(item: dict[str, Any], offset: float) -> dict[str, Any]:
-    return item | {
+    shifted = item | {
         key: item[key] + offset
         for key in ("start", "end")
         if isinstance(item.get(key), (int, float))
     }
+    for key in _NESTED_TIMED:
+        nested = item.get(key)
+        if isinstance(nested, list):
+            shifted[key] = [
+                _shift_mapping(child, offset) if isinstance(child, dict) else child
+                for child in nested
+            ]
+    return shifted
 
 
 def _shift_hypothesis(hypothesis: Hypothesis, offset: float) -> Hypothesis:
@@ -1798,6 +1917,18 @@ def _shift_hypothesis(hypothesis: Hypothesis, offset: float) -> Hypothesis:
         segments=_shift_all(hypothesis.segments, offset),
         metadata=metadata,
     )
+
+
+def _shift_diarization(diarization: Diarization, offset: float) -> Diarization:
+    """Реплики и сырые реплики модели (`raw_turns` в speakers.json) — по исходнику."""
+    metadata = dict(diarization.metadata)
+    raw_turns = metadata.get("raw_turns")
+    if isinstance(raw_turns, list):
+        metadata["raw_turns"] = [
+            _shift_mapping(turn, offset) if isinstance(turn, dict) else turn
+            for turn in raw_turns
+        ]
+    return replace(diarization, turns=_shift_all(diarization.turns, offset), metadata=metadata)
 
 
 def expand_inputs(args: argparse.Namespace) -> list[str]:
@@ -1824,7 +1955,10 @@ def main(argv: list[str] | None = None) -> int:
     except FAILURES as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
         return 2
-    batch = len(args.input) * len(_sections(args)) > 1
+    # Плейлист — пачка и тогда, когда развернулся в один ролик: --output у него
+    # родитель каталогов, а не каталог результата, иначе прошлые ролики канала
+    # уехали бы в архив вместе с ним.
+    batch = args.playlist or len(args.input) * len(_sections(args)) > 1
     update_check.start(offline=args.offline)
     try:
         if not batch:

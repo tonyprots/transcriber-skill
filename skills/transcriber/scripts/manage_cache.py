@@ -9,6 +9,9 @@
 
   stats                    сколько записей, сколько места, самая старая;
   prune --older-than 30    убрать то, к чему не обращались 30 дней;
+  prune --temp             убрать осиротевшие transcriber-asr-* и
+                           transcriber-download-* в $TMPDIR старше 24 ч
+                           (копии записей после убитого прогона);
   forget <файл|sha256>     забыть всё про одну запись и её фрагменты;
   clear                    очистить кэш целиком.
 
@@ -27,6 +30,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from audio_transcription.cache import cache_stats, clear, forget, prune  # noqa: E402
+from audio_transcription.scratch import ORPHAN_AGE_HOURS, sweep_orphans  # noqa: E402
 
 DEFAULT_CACHE = Path.home() / ".cache" / "transcriber"
 _SHA256 = re.compile(r"[0-9a-fA-F]{64}")
@@ -56,11 +60,18 @@ def main(argv: list[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("stats", help="размер и возраст кэша")
     pruning = commands.add_parser("prune", help="убрать записи старше срока")
-    pruning.add_argument("--older-than", type=float, required=True, metavar="ДНЕЙ")
+    pruning.add_argument("--older-than", type=float, metavar="ДНЕЙ")
+    pruning.add_argument(
+        "--temp",
+        action="store_true",
+        help=f"убрать осиротевшие временные каталоги прогонов старше {ORPHAN_AGE_HOURS:g} ч",
+    )
     forgetting = commands.add_parser("forget", help="забыть одну запись")
     forgetting.add_argument("source", help="исходный файл записи или его SHA-256")
     commands.add_parser("clear", help="очистить кэш целиком")
     args = parser.parse_args(argv)
+    if args.command == "prune" and args.older_than is None and not args.temp:
+        parser.error("prune: нужен --older-than ДНЕЙ, --temp или оба")
     cache_dir = args.cache_dir.expanduser()
 
     if args.command == "stats":
@@ -78,6 +89,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
         return 0
 
+    if args.command == "prune" and args.older_than is None:
+        return _report_temp(sweep_orphans(), as_json=args.json)
     if args.command == "prune":
         swept = prune(cache_dir, args.older_than)
         what = f"старше {args.older_than:g} дн."
@@ -88,8 +101,12 @@ def main(argv: list[str] | None = None) -> int:
     else:
         swept = clear(cache_dir)
         what = "всего кэша"
+    temp = sweep_orphans() if args.command == "prune" and args.temp else None
     if args.json:
-        print(json.dumps({"removed_files": swept.files, "removed_bytes": swept.bytes}))
+        payload = {"removed_files": swept.files, "removed_bytes": swept.bytes}
+        if temp is not None:
+            payload["removed_temp_dirs"] = len(temp)
+        print(json.dumps(payload))
     else:
         print(f"Убрано {what}: записей {swept.files}, {_megabytes(swept.bytes)}")
         if args.command == "forget" and not swept.files:
@@ -97,6 +114,16 @@ def main(argv: list[str] | None = None) -> int:
                 "Записи до версии 0.19 не помечены исходником: их уберёт prune по сроку или clear",
                 file=sys.stderr,
             )
+        if temp is not None:
+            _report_temp(temp, as_json=False)
+    return 0
+
+
+def _report_temp(removed: list[Path], *, as_json: bool) -> int:
+    if as_json:
+        print(json.dumps({"removed_temp_dirs": len(removed)}))
+    else:
+        print(f"Убрано временных каталогов без владельца старше {ORPHAN_AGE_HOURS:g} ч: {len(removed)}")
     return 0
 
 
