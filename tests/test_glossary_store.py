@@ -342,6 +342,35 @@ def test_header_advice_matches_what_learn_respects(tmp_path: Path) -> None:
     assert load_document(store)["entries"] == []
 
 
+@pytest.mark.parametrize(
+    "pending",
+    ["pending:\n  -\n", "pending:\n  - aliases:\n    windows: 1\n", "pending:\n  - строка\n"],
+    ids=["empty-item", "null-aliases", "string-item"],
+)
+def test_hand_broken_pending_is_rejected_on_read(tmp_path: Path, pending: str) -> None:
+    """Раньше чтение проходило, а обучение падало TypeError уже после расшифровки."""
+    store = tmp_path / "glossary.yaml"
+    text = "version: 1\nentries: []\n" + pending
+    store.write_text(text, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="pending #1"):
+        load_document(store)
+    with pytest.raises(ValueError, match="pending #1"):
+        update_from_run(store, _run("трэц", "Threads"), source="rec1")
+    assert store.read_text(encoding="utf-8") == text
+
+
+def test_broken_learned_field_is_rejected_on_read(tmp_path: Path) -> None:
+    store = tmp_path / "glossary.yaml"
+    store.write_text(
+        "version: 1\nentries:\n  - canonical: Threads\n    aliases: [трэц]\n"
+        "    learned:\n      held_aliases:\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="learned.held_aliases"):
+        load_document(store)
+
+
 def test_verifier_spelling_of_a_hand_term_reinforces_it(tmp_path: Path) -> None:
     store = tmp_path / "glossary.yaml"
     store.write_text(

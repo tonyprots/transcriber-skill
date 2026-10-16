@@ -588,3 +588,35 @@ def test_working_alias_is_not_taken_for_an_ordinary_word(
     assert "PostgreSQL" in (output / "readable.md").read_text(encoding="utf-8")
     (entry,) = cli.entries_of(cli.load_document(store))
     assert entry.aliases == ("постгрес",)
+
+
+@requires_speech
+def test_failed_learning_keeps_the_finished_transcript(
+    tmp_path: Path, spoken_audio: Path, monkeypatch
+) -> None:
+    """Обучение падает после расшифровки — результат всё равно пишется.
+
+    Раньше ловился только OSError, и TypeError из испорченного pending
+    обрывал прогон, а в пачке — всю пачку.
+    """
+    monkeypatch.setattr(cli, "run_isolated_backend", fake_backend)
+
+    def broken(*args, **kwargs):
+        raise TypeError("'NoneType' object is not iterable")
+
+    monkeypatch.setattr(cli, "update_from_run", broken)
+    output = tmp_path / "result"
+
+    cli.run(
+        cli.build_parser().parse_args(
+            [
+                str(spoken_audio), "--output", str(output), "--mode", "max",
+                "--language", "ru", "--no-cache", "--quiet",
+                "--verifier-window-seconds", "0",
+            ]
+        )
+    )
+
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    assert any("Словарь не пополнен" in warning for warning in manifest["warnings"])
+    assert "PostgreSQL" in (output / "readable.md").read_text(encoding="utf-8")

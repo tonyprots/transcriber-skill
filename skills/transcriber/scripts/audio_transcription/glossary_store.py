@@ -220,7 +220,40 @@ def load_document(path: Path) -> dict[str, Any]:
     payload.setdefault("pruned", [])
     if not all(isinstance(payload[key], list) for key in ("entries", "pending", "pruned")):
         raise ValueError(f"В словаре {path} entries, pending и pruned должны быть списками")
+    _check_items(payload, path)
     return payload
+
+
+# Поля learned, которые обучение перебирает как списки.
+_LEARNED_LISTS = ("held_aliases", "pruned_aliases", "sources")
+
+
+def _check_items(payload: dict[str, Any], path: Path) -> None:
+    """Проверяет форму записей до расчёта, а не после.
+
+    Раздел pending ждёт человека, и правка руками там штатная. Пустой пункт
+    («-») или пустые `aliases:` раньше проходили чтение и роняли обучение
+    TypeError уже после расшифровки: в пачке такое исключение обрывало всю
+    пачку, а посчитанный результат не записывался.
+    """
+    for section in ("entries", "pending", "pruned"):
+        for index, item in enumerate(payload[section], start=1):
+            where = f"Словарь {path}: {section} #{index}"
+            if not isinstance(item, dict):
+                raise ValueError(f"{where} должен быть отображением, а не {item!r}")
+            aliases = item.get("aliases", [])
+            if not isinstance(aliases, list) or not all(
+                isinstance(alias, (str, int, float)) for alias in aliases
+            ):
+                raise ValueError(f"{where}: aliases должен быть списком строк")
+            if "learned" not in item:
+                continue
+            learned = item["learned"]
+            if not isinstance(learned, dict):
+                raise ValueError(f"{where}: learned должен быть отображением")
+            for key in _LEARNED_LISTS:
+                if key in learned and not isinstance(learned[key], list):
+                    raise ValueError(f"{where}: learned.{key} должен быть списком")
 
 
 def entries_of(document: dict[str, Any]) -> list[GlossaryEntry]:

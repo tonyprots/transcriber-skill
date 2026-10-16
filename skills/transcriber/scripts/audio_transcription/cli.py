@@ -1660,9 +1660,11 @@ def _transcribe(
                 # термин, добравший порог на этой записи, правит уже её текст,
                 # а не только следующую.
                 glossary = merge_glossaries(curated, learned_entries)
-            except OSError as error:
-                # Недоступный словарь не повод терять расшифровку: она уже
-                # посчитана, и без пополнения останется только следующий раз.
+            except (OSError, ValueError, TypeError, yaml.YAMLError) as error:
+                # Недоступный или испорченный словарь не повод терять
+                # расшифровку: она уже посчитана, и без пополнения останется
+                # только следующий раз. TypeError — пустой пункт pending,
+                # дописанный руками посреди прогона: в пачке он ронял всю пачку.
                 warnings.append(f"Словарь не пополнен: {error}")
             else:
                 summary = learned_report.summary()
