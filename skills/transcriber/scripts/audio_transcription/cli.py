@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import platform
 import re
@@ -246,7 +247,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Пропустить запись, у которой каталог результата уже содержит "
-            "manifest.json: так продолжают прерванную пачку, не скачивая готовое заново"
+            "manifest.json этой же записи (сверка по ссылке или файлу): так продолжают "
+            "прерванную пачку, не скачивая готовое заново"
         ),
     )
     parser.add_argument(
@@ -1021,7 +1023,7 @@ def run(args: argparse.Namespace) -> Path:
         output = source.with_name(f"{_output_stem(None, source, section)}.transcript")  # type: ignore[union-attr]
     _check_early_text(args, output)
     report = ProgressReporter(enabled=not args.quiet)
-    if args.skip_done and _is_done(output):
+    if args.skip_done and _is_done(output, remote, source):
         report.stage(f"Уже расшифровано, пропускаю: {output}")
         return output
     output = ensure_output_available(output, overwrite=args.overwrite)
@@ -1068,10 +1070,16 @@ def run_batch(args: argparse.Namespace) -> list[dict[str, Any]]:
         for section in sections:
             name = _output_stem(remote, source, section)
             candidate, attempt = base / name, 2
-            while candidate in taken:
+            # С --skip-done каталог с чужим манифестом занят, даже если имя
+            # совпало: запись ищет свой готовый каталог или первый свободный.
+            while candidate in taken or (
+                args.skip_done
+                and (candidate / "manifest.json").is_file()
+                and not _is_done(candidate, remote, source)
+            ):
                 candidate, attempt = base / f"{name}-{attempt}", attempt + 1
             taken.add(candidate)
-            if args.skip_done and _is_done(candidate):
+            if args.skip_done and _is_done(candidate, remote, source):
                 report.stage(f"Уже расшифровано, пропускаю: {candidate.name}")
                 results.append({"input": raw, "skipped": True, **summarize(candidate)})
                 continue
@@ -1121,9 +1129,51 @@ def run_batch(args: argparse.Namespace) -> list[dict[str, Any]]:
     return results
 
 
-def _is_done(output: Path) -> bool:
-    """Готов тот каталог, где есть манифест: он пишется последним."""
-    return (output.expanduser() / "manifest.json").is_file()
+def _is_done(
+    output: Path, remote: RemoteMedia | None = None, source: Path | None = None
+) -> bool:
+    """Готов тот каталог, где есть манифест этой же записи: он пишется последним.
+
+    Одного манифеста мало: имя каталога — заголовок и порядок входов, и у
+    канала с одинаковыми названиями новый ролик садился на каталог прошлого и
+    числился готовым с его расшифровкой.
+    """
+    manifest = output.expanduser() / "manifest.json"
+    return manifest.is_file() and not _foreign_manifest(manifest, remote, source)
+
+
+def _foreign_manifest(manifest: Path, remote: RemoteMedia | None, source: Path | None) -> bool:
+    """В манифесте другая запись. Нечем сравнить (манифест старой версии,
+    файл не читается) — считаем своей, как до проверки."""
+    try:
+        recorded = json.loads(manifest.read_text(encoding="utf-8")).get("source")
+    except (OSError, ValueError, AttributeError):
+        return False
+    if not isinstance(recorded, dict):
+        return False
+    origin = recorded.get("origin")
+    if remote is not None:
+        return bool(origin) and origin != public_url(remote.url)
+    if source is None:
+        return False
+    if origin:
+        return True  # там запись по ссылке, здесь свой файл
+    path, sha256 = recorded.get("source"), recorded.get("sha256")
+    if not path or path == str(source) or not sha256:
+        return False
+    # Файл переложили: та же запись узнаётся по содержимому.
+    try:
+        return sha256 != _file_sha256(source)
+    except OSError:
+        return False
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _failure(raw: str, section: Section | None, error: BaseException) -> dict[str, Any]:
