@@ -101,13 +101,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help=(
             "Каталог результата, по умолчанию ./media; в пакете у каждой ссылки "
-            "свой подкаталог по названию"
+            "свой подкаталог по названию (совпавшие — с суффиксом -2, -3)"
         ),
     )
     return parser
 
 
-def run(args: argparse.Namespace, url: str, destination: Path) -> dict[str, object]:
+def run(
+    args: argparse.Namespace, url: str, destination: Path, taken: set[str] | None = None
+) -> dict[str, object]:
+    """`taken` — имена каталогов, уже занятых в этом пакете."""
     languages = tuple(args.language or ())
     media = probe_remote(url)
     if not (args.subtitles or args.audio):
@@ -118,7 +121,7 @@ def run(args: argparse.Namespace, url: str, destination: Path) -> dict[str, obje
         }
 
     if len(args.url) > 1:
-        destination = destination / _slug(media.title)
+        destination = destination / _batch_folder(media.title, set() if taken is None else taken)
     if args.audio:
         path = fetch_audio(media.url, destination)
         return {
@@ -127,9 +130,11 @@ def run(args: argparse.Namespace, url: str, destination: Path) -> dict[str, obje
             "duration_seconds": media.duration_seconds,
         }
 
-    own = media.track_for(languages, allow_automatic=not args.no_auto)
+    # Копия — для ролика без своих субтитров. Своя автодорожка, отсечённая
+    # `--no-auto`, поиск не запускает: с копии пришли бы те же автосубтитры.
+    own = media.track_for(languages)
     if args.mirror and own is None and media.extractor != "Youtube":
-        return _from_mirror(media, languages, destination)
+        return _from_mirror(media, languages, destination, allow_automatic=not args.no_auto)
     raw, track = fetch_subtitles(
         media,
         destination,
@@ -149,11 +154,17 @@ def run(args: argparse.Namespace, url: str, destination: Path) -> dict[str, obje
     }
 
 
-def _from_mirror(media, languages: tuple[str, ...], destination: Path) -> dict[str, object]:
+def _from_mirror(
+    media, languages: tuple[str, ...], destination: Path, *, allow_automatic: bool = True
+) -> dict[str, object]:
     """Субтитры с копии на YouTube или отказ с причинами по каждому кандидату."""
     language = (languages or (media.language or "ru",))[0]
     found, rejected = find_mirror(
-        media, language, destination, _anchor_transcriber(media, language)
+        media,
+        language,
+        destination,
+        _anchor_transcriber(media, language),
+        allow_automatic=allow_automatic,
     )
     if found is None:
         raise FetchError(
@@ -234,6 +245,19 @@ def _slug(title: str) -> str:
     return re.sub(r"[^\w]+", "-", title.lower()).strip("-")[:60] or "video"
 
 
+def _batch_folder(title: str, taken: set[str]) -> str:
+    """Каталог ролика в пакете: у серии выпусков название бывает общим.
+
+    Без суффикса второй выпуск ложился в каталог первого. Порядок ссылок тот
+    же — и при повторе пакета имена те же, как у `transcribe.py`.
+    """
+    name, attempt = _slug(title), 2
+    while name in taken:
+        name, attempt = f"{_slug(title)}-{attempt}", attempt + 1
+    taken.add(name)
+    return name
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     destination = (args.output or Path("media")).expanduser().resolve()
@@ -260,12 +284,13 @@ def main(argv: list[str] | None = None) -> int:
     # Пакет: отказ одной ссылки не останавливает остальные, а ролик без
     # субтитров не теряется — он получает `error` и идёт в transcribe.py.
     results: list[dict[str, object]] = []
+    taken: set[str] = set()
     for index, url in enumerate(args.url):
         if index:
             _sleep(BATCH_PAUSE_SECONDS)
         print(f"Пакет {index + 1}/{len(args.url)}: {public_url(url)}", file=sys.stderr)
         try:
-            results.append({"input": url, **run(args, url, destination)})
+            results.append({"input": url, **run(args, url, destination, taken)})
         except FetchError as error:
             results.append({"input": url, "error": str(error)})
     print(json.dumps({"results": results}, ensure_ascii=False, indent=2))

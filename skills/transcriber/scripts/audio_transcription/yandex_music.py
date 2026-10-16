@@ -18,10 +18,11 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
+import os
 import re
 import shutil
-import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ElementTree
 from pathlib import Path
@@ -113,15 +114,38 @@ def download(url: str, dest_dir: Path) -> Path:
     )
     dest_dir.mkdir(parents=True, exist_ok=True)
     target = dest_dir / "audio.mp3"
+    # Под итоговым именем — только целый файл: при обрыве `read()` отдаёт b''
+    # без исключения, и усечённый выпуск молча ушёл бы в расшифровку.
+    partial = dest_dir / "audio.mp3.part"
     try:
-        with _open(file_url) as response, target.open("wb") as sink:
+        with _open(file_url) as response, partial.open("wb") as sink:
             shutil.copyfileobj(response, sink, length=1 << 20)
-    except (urllib.error.URLError, OSError) as error:
-        target.unlink(missing_ok=True)
+            expected = _content_length(response)
+    except (OSError, http.client.HTTPException) as error:
+        partial.unlink(missing_ok=True)
         raise FetchError(f"Не удалось скачать выпуск Яндекс Музыки: {error}" + _MANUAL) from error
-    if target.stat().st_size == 0:
+    received = partial.stat().st_size
+    if expected is not None and received != expected:
+        partial.unlink(missing_ok=True)
+        raise FetchError(
+            f"Выпуск Яндекс Музыки скачался не целиком ({received} из {expected} байт): "
+            "соединение оборвалось. Повторите позже или скачайте выпуск вручную и "
+            "передайте файл."
+        )
+    if received == 0:
+        partial.unlink(missing_ok=True)
         raise FetchError("Яндекс Музыка отдала пустой файл")
+    os.replace(partial, target)
     return target
+
+
+def _content_length(response: object) -> int | None:
+    headers = getattr(response, "headers", None)
+    value = headers.get("Content-Length") if headers is not None else None
+    try:
+        return int(value) if value is not None else None
+    except ValueError:
+        return None
 
 
 def _track(identifier: str) -> dict[str, Any]:
@@ -139,10 +163,12 @@ def _json(url: str) -> dict[str, Any]:
 
 
 def _get(url: str) -> bytes:
+    # Таймаут и обрыв (`TimeoutError`, `IncompleteRead`) urllib в URLError не
+    # заворачивает: без них отказ API ронял `fetch_media.py` трейсбеком.
     try:
         with _open(url) as response:
             return response.read()
-    except urllib.error.URLError as error:
+    except (OSError, http.client.HTTPException) as error:
         raise FetchError(f"Яндекс Музыка не ответила: {error}" + _MANUAL) from error
 
 

@@ -218,14 +218,13 @@ def test_distant_repetition_survives(tmp_path: Path) -> None:
     assert [cue.text for cue in fetching.read_cues(source)].count("да") == 2
 
 
-def test_audio_prefers_light_track_in_parallel(yt_dlp, tmp_path: Path) -> None:
+def test_audio_prefers_light_track_in_parallel(monkeypatch, tmp_path: Path) -> None:
     """ВК отдавал 128 МБ по фрагменту: 100 минут на 68-минутный ролик.
 
     Лёгкая дорожка в восемь потоков — 30 секунд. Нижняя граница 64 кбит/с
     держит YouTube на прежней opus 103k вместо HE-AAC 49k.
     """
-    calls = yt_dlp()
-    (tmp_path / "audio.m4a").write_bytes(b"x")
+    calls = _writing_yt_dlp(monkeypatch, [{"m4a": "x"}])
     fetching.fetch_audio("https://vkvideo.ru/video-1_2", tmp_path)
     command = calls[0]
     selector = command[command.index("-f") + 1].split("/")
@@ -233,13 +232,12 @@ def test_audio_prefers_light_track_in_parallel(yt_dlp, tmp_path: Path) -> None:
     assert command[command.index("--concurrent-fragments") + 1] == "8"
 
 
-def test_audio_prefers_original_over_auto_dub(yt_dlp, tmp_path: Path) -> None:
+def test_audio_prefers_original_over_auto_dub(monkeypatch, tmp_path: Path) -> None:
     """С автодубляжем оригинал шёл на 62k, фильтр 64–96 взял тамильский.
 
     Полтора часа Whisper распознавал дубляж как английский (2026-10-06).
     """
-    calls = yt_dlp()
-    (tmp_path / "audio.webm").write_bytes(b"x")
+    calls = _writing_yt_dlp(monkeypatch, [{"webm": "x"}])
     fetching.fetch_audio("https://youtu.be/PkoX6R5sn8Y", tmp_path)
     selector = calls[0][calls[0].index("-f") + 1].split("/")
     light = selector.index("bestaudio[abr>=64][abr<=96]")
@@ -257,15 +255,21 @@ def test_rate_limit_is_retried_then_reported(yt_dlp, monkeypatch) -> None:
     assert len(calls) == 3 and pauses == list(fetching._RETRY_PAUSES_SECONDS)
 
 
-def _scripted_yt_dlp(monkeypatch, results: list[tuple[int, str]]) -> list[list[str]]:
-    """Каждый вызов берёт следующий (returncode, stderr) из списка."""
+def _scripted_yt_dlp(monkeypatch, results: list[tuple]) -> list[list[str]]:
+    """Каждый вызов берёт следующий (returncode, stderr[, файлы]) из списка.
+
+    Файлы — {то, что встанет вместо `%(ext)s`: содержимое} по шаблону `-o`.
+    """
     calls: list[list[str]] = []
     monkeypatch.setattr(fetching, "require_yt_dlp", lambda: "yt-dlp")
     monkeypatch.setattr(fetching, "yt_dlp_status", lambda today=None: {"stale": False})
 
     def fake_execute(command, **kwargs):
-        returncode, stderr = results[len(calls)]
+        returncode, stderr, *written = results[len(calls)]
         calls.append(command)
+        template = command[command.index("-o") + 1] if "-o" in command else ""
+        for ext, body in (written[0] if written else {}).items():
+            Path(template.replace("%(ext)s", ext)).write_text(body, encoding="utf-8")
         return CompletedProcess(command, returncode, "", stderr)
 
     monkeypatch.setattr(fetching, "_execute", fake_execute)
@@ -281,11 +285,12 @@ def test_youtube_stream_403_falls_back_to_other_clients(monkeypatch, tmp_path: P
     Повтор идёт свежим извлечением через android и mweb — они отдают ролик
     360p целиком. Огрызок первой попытки файлом результата не считается.
     """
-    calls = _scripted_yt_dlp(monkeypatch, [(1, _STREAM_403), (0, "")])
-    (tmp_path / "audio.webm.part").write_bytes(b"x")
-    (tmp_path / "audio.mp4").write_bytes(b"x")
+    calls = _scripted_yt_dlp(
+        monkeypatch, [(1, _STREAM_403, {"webm.part": "x"}), (0, "", {"mp4": "360p"})]
+    )
     path = fetching.fetch_audio("https://youtu.be/MM-C3JqCXBk", tmp_path)
-    assert path.name == "audio.mp4"
+    assert path == tmp_path / "audio.mp4" and path.read_text(encoding="utf-8") == "360p"
+    assert sorted(item.name for item in tmp_path.iterdir()) == ["audio.mp4"]
     assert len(calls) == 2 and "--extractor-args" not in calls[0]
     retry = calls[1]
     assert retry[retry.index("--extractor-args") + 1] == fetching._YOUTUBE_FALLBACK_CLIENTS
@@ -456,3 +461,279 @@ def test_stalled_download_is_stopped_but_slow_one_is_not(tmp_path: Path, monkeyp
     monkeypatch.setattr(fetching, "require_yt_dlp", lambda: stuck)
     with pytest.raises(fetching.FetchError, match="без новых данных"):
         fetching._run_yt_dlp(["x"], failure="f", watch=target)
+
+
+_VTT = "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n{text}\n"
+
+
+def _writing_yt_dlp(monkeypatch, outputs: list[dict[str, str]]) -> list[list[str]]:
+    """yt-dlp, который пишет файлы по шаблону `-o`: вызов N берёт outputs[N].
+
+    Ключ — то, что yt-dlp подставит вместо `%(ext)s` (у субтитров `ru.vtt`).
+    Готовый файл yt-dlp не перезаписывает («has already been downloaded»,
+    «subtitle … is already present»), и подмена ведёт себя так же.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(fetching, "require_yt_dlp", lambda: "yt-dlp")
+    monkeypatch.setattr(fetching, "yt_dlp_status", lambda today=None: {"stale": False})
+
+    def fake_execute(command, **kwargs):
+        written = outputs[len(calls)]
+        calls.append(command)
+        template = command[command.index("-o") + 1]
+        for ext, body in written.items():
+            target = Path(template.replace("%(ext)s", ext))
+            if not target.exists():
+                target.write_text(body, encoding="utf-8")
+        return CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(fetching, "_execute", fake_execute)
+    return calls
+
+
+def _video(*languages: str) -> RemoteMedia:
+    return RemoteMedia(
+        url="https://www.youtube.com/watch?v=b",
+        title="Ролик Б",
+        duration_seconds=60.0,
+        extractor="Youtube",
+        tracks=tuple(SubtitleTrack(language, True) for language in languages),
+        language=languages[0],
+    )
+
+
+def test_subtitles_ignore_other_files_in_the_folder(monkeypatch, tmp_path: Path) -> None:
+    """Каталог по умолчанию общий (./media): там лежат свой `captions.md`
+    и субтитры прошлых роликов. Брать надо только то, что скачано сейчас.
+
+    До правки при `ru` первым по алфавиту оказывался `captions.md` (0 реплик,
+    и он перезаписывался пустой шапкой), а `captions.en.vtt` чужого ролика
+    уходил под шапкой нового.
+    """
+    (tmp_path / "captions.md").write_text("# Ролик Б\n\n[00:00:01] прошлый прогон\n", encoding="utf-8")
+    (tmp_path / "captions.en.vtt").write_text(_VTT.format(text="video A"), encoding="utf-8")
+    _writing_yt_dlp(monkeypatch, [{"ru.vtt": _VTT.format(text="ролик Б")}])
+    raw, track = fetching.fetch_subtitles(_video("ru"), tmp_path, languages=("ru",))
+    assert raw == tmp_path / "captions.ru.vtt"
+    assert [cue.text for cue in fetching.read_cues(raw)] == ["ролик Б"]
+    assert track.language == "ru"
+    assert not [path.name for path in tmp_path.iterdir() if path.name.startswith(".")]
+
+
+def test_subtitles_replace_the_same_language_from_a_previous_video(
+    monkeypatch, tmp_path: Path
+) -> None:
+    (tmp_path / "captions.ru.vtt").write_text(_VTT.format(text="ролик А"), encoding="utf-8")
+    _writing_yt_dlp(monkeypatch, [{"ru.vtt": _VTT.format(text="ролик Б")}])
+    raw, _ = fetching.fetch_subtitles(_video("ru"), tmp_path, languages=("ru",))
+    assert [cue.text for cue in fetching.read_cues(raw)] == ["ролик Б"]
+
+
+def test_subtitles_missing_after_success_is_an_error(monkeypatch, tmp_path: Path) -> None:
+    """Чужой файл в каталоге не выдаётся за скачанный."""
+    (tmp_path / "captions.en.vtt").write_text(_VTT.format(text="video A"), encoding="utf-8")
+    _writing_yt_dlp(monkeypatch, [{}])
+    with pytest.raises(fetching.FetchError, match="файла субтитров"):
+        fetching.fetch_subtitles(_video("ru"), tmp_path, languages=("ru",))
+
+
+@pytest.mark.parametrize("previous", ["audio.m4a", "audio.webm"])
+def test_audio_is_the_one_just_downloaded(monkeypatch, tmp_path: Path, previous: str) -> None:
+    """В каталоге звук прошлой ссылки: вернуть надо новый.
+
+    До правки другой формат проигрывал по алфавиту (`m4a` < `webm`), а тот же
+    формат yt-dlp не перезаписывал — «has already been downloaded».
+    """
+    (tmp_path / previous).write_text("ролик А", encoding="utf-8")
+    _writing_yt_dlp(monkeypatch, [{"webm": "ролик Б"}])
+    path = fetching.fetch_audio("https://youtu.be/b", tmp_path)
+    assert path == tmp_path / "audio.webm"
+    assert path.read_text(encoding="utf-8") == "ролик Б"
+
+
+def _channel_with_tabs() -> dict:
+    """Ссылка на канал без вкладки: yt-dlp 2026.8.19 отдаёт плейлист из вкладок.
+
+    `extractor/youtube/_tab.py`: при вкладках Shorts или Live каждая
+    извлекается во вложенный плейлист с `webpage_url` вкладки — ролики даже
+    при `--flat-playlist` лежат внутри.
+    """
+    return {
+        "_type": "playlist",
+        "title": "Канал",
+        "entries": [
+            {
+                "_type": "playlist",
+                "webpage_url": "https://www.youtube.com/@chan/videos",
+                "entries": [
+                    {"_type": "url", "url": "https://www.youtube.com/watch?v=V1"},
+                    {"_type": "url", "url": "https://www.youtube.com/watch?v=V2"},
+                ],
+            },
+            {
+                "_type": "playlist",
+                "webpage_url": "https://www.youtube.com/@chan/shorts",
+                "entries": [{"_type": "url", "url": "https://www.youtube.com/shorts/S1"}],
+            },
+        ],
+    }
+
+
+def test_channel_tabs_expand_to_videos_not_tab_links(yt_dlp) -> None:
+    """До правки наружу уходили адреса вкладок `/videos` и `/shorts`."""
+    yt_dlp(stdout=json.dumps(_channel_with_tabs()))
+    assert fetching.expand_playlist("https://www.youtube.com/@chan") == [
+        "https://www.youtube.com/watch?v=V1",
+        "https://www.youtube.com/watch?v=V2",
+        "https://www.youtube.com/shorts/S1",
+    ]
+
+
+def test_playlist_limit_counts_videos_across_tabs(yt_dlp) -> None:
+    yt_dlp(stdout=json.dumps(_channel_with_tabs()))
+    assert fetching.expand_playlist("https://www.youtube.com/@chan", limit=2) == [
+        "https://www.youtube.com/watch?v=V1",
+        "https://www.youtube.com/watch?v=V2",
+    ]
+
+
+def test_nested_playlist_without_entries_is_not_taken_for_a_video(yt_dlp) -> None:
+    payload = {
+        "_type": "playlist",
+        "entries": [
+            {"_type": "playlist", "webpage_url": "https://www.youtube.com/@chan/streams"},
+            {"_type": "url", "url": "https://www.youtube.com/watch?v=V1"},
+        ],
+    }
+    yt_dlp(stdout=json.dumps(payload))
+    assert fetching.expand_playlist("https://www.youtube.com/@chan") == [
+        "https://www.youtube.com/watch?v=V1"
+    ]
+
+
+def test_playlist_link_without_flag_is_refused_with_a_hint(yt_dlp) -> None:
+    """Ссылка на плейлист без `--playlist`: `--no-playlist` без id ролика не
+    действует, и до правки yt-dlp извлекал каждый ролик целиком — у большого
+    плейлиста упор в срок 300 с, у малого расшифровка одного файла под
+    названием плейлиста.
+    """
+    payload = {
+        "_type": "playlist",
+        "title": "Курс",
+        "entries": [{"_type": "url", "url": f"https://www.youtube.com/watch?v={n}"} for n in "abc"],
+    }
+    calls = yt_dlp(stdout=json.dumps(payload))
+    with pytest.raises(fetching.FetchError, match=r"роликов: 3.*--playlist"):
+        fetching.probe_remote("https://www.youtube.com/playlist?list=PL1")
+    assert "--flat-playlist" in calls[0] and "--no-playlist" in calls[0]
+
+
+def test_channel_link_without_flag_counts_videos_not_tabs(yt_dlp) -> None:
+    calls = yt_dlp(stdout=json.dumps(_channel_with_tabs()))
+    with pytest.raises(fetching.FetchError, match=r"роликов: 3.*--playlist"):
+        fetching.probe_remote("https://www.youtube.com/@chan")
+    assert len(calls) == 1
+
+
+def test_single_video_probe_is_flat_safe(yt_dlp) -> None:
+    """`--flat-playlist` на одиночный ролик не влияет: он извлекается целиком."""
+    calls = yt_dlp(stdout=json.dumps({"_type": "video", "title": "Ролик", "duration": 60}))
+    media = fetching.probe_remote("https://www.youtube.com/watch?v=a&list=PL1")
+    assert media.title == "Ролик" and media.duration_seconds == 60
+    assert "--flat-playlist" in calls[0]
+
+
+def test_playlist_of_one_is_its_video(monkeypatch) -> None:
+    """Плейлист из одного ролика (пост с одним видео) раньше расшифровывался —
+    пусть и под названием плейлиста. Отказывать тут незачем: берём сам ролик.
+    """
+    answers = [
+        {"_type": "playlist", "title": "Пост", "entries": [{"_type": "url", "url": "https://vk.com/video-1_2"}]},
+        {"title": "Ролик", "duration": 30, "extractor_key": "VK"},
+    ]
+    calls: list[list[str]] = []
+    monkeypatch.setattr(fetching, "require_yt_dlp", lambda: "yt-dlp")
+    monkeypatch.setattr(fetching, "yt_dlp_status", lambda today=None: {"stale": False})
+
+    def fake_execute(command, **kwargs):
+        calls.append(command)
+        return CompletedProcess(command, 0, json.dumps(answers[len(calls) - 1]), "")
+
+    monkeypatch.setattr(fetching, "_execute", fake_execute)
+    media = fetching.probe_remote("https://vk.com/wall-1_2")
+    assert media.title == "Ролик"
+    assert media.url == "https://vk.com/video-1_2"
+    assert calls[1][-1] == "https://vk.com/video-1_2"
+
+
+def test_probe_keeps_chapters_and_a_short_description(yt_dlp) -> None:
+    """yt-dlp и так отдаёт описание и главы — раньше они выбрасывались."""
+    payload = {
+        "title": "Доклад",
+        "duration": 3600,
+        "upload_date": "20261001",
+        "description": "Слайды: https://example.com\n" + "х" * 5000,
+        "chapters": [
+            {"start_time": 0.0, "end_time": 95.0, "title": "Вступление"},
+            {"start_time": 95.0, "end_time": 3600.0, "title": "Архитектура"},
+        ],
+    }
+    yt_dlp(stdout=json.dumps(payload))
+    media = fetching.probe_remote("https://www.youtube.com/watch?v=a")
+    assert media.chapters == (
+        {"start": 0.0, "title": "Вступление"},
+        {"start": 95.0, "title": "Архитектура"},
+    )
+    assert media.description.startswith("Слайды: https://example.com\n")
+    assert len(media.description) <= fetching.DESCRIPTION_LIMIT + 1
+    assert media.description.endswith("…")
+    assert "chapters" not in media.summary(), "опрос остаётся компактным"
+
+
+def test_probe_without_chapters_or_description(yt_dlp) -> None:
+    yt_dlp(stdout=json.dumps({"title": "Ролик", "chapters": None, "description": ""}))
+    media = fetching.probe_remote("https://www.youtube.com/watch?v=a")
+    assert media.chapters == () and media.description is None
+
+
+def _local(**fields):
+    from audio_transcription.models import MediaInfo
+
+    return MediaInfo(Path("/tmp/transcriber-download-x/audio.webm"), 60.0, "opus", 48000, 1, **fields)
+
+
+def test_remote_source_carries_date_description_and_chapters() -> None:
+    """В `manifest.source` по ссылке: адрес без хвостов, дата выпуска, описание, главы."""
+    remote = RemoteMedia(
+        url="https://www.youtube.com/watch?v=a&si=share",
+        title="Доклад",
+        duration_seconds=60.0,
+        extractor="Youtube",
+        tracks=(),
+        upload_date="2026-10-01",
+        description="Описание",
+        chapters=({"start": 0.0, "title": "Вступление"},),
+    )
+    media = fetching.with_remote_source(
+        _local(recorded_at="2026-10-16T12:00:00+03:00", recorded_at_source="file_mtime"), remote
+    )
+    source = media.to_dict()
+    assert source["origin"] == "https://www.youtube.com/watch?v=a"
+    assert (source["recorded_at"], source["recorded_at_source"]) == ("2026-10-01", "upload_date")
+    assert source["description"] == "Описание"
+    assert source["chapters"] == [{"start": 0.0, "title": "Вступление"}]
+
+
+def test_remote_source_never_dates_by_the_downloaded_file() -> None:
+    """Время изменения скачанного файла — момент загрузки (или заголовок
+    сервера), а не записи. Без даты выпуска остаётся только метка контейнера."""
+    remote = RemoteMedia("https://example.com/a.mp3", "Запись", 60.0, "generic", ())
+    mtime = fetching.with_remote_source(
+        _local(recorded_at="2026-10-16T12:00:00+03:00", recorded_at_source="file_mtime"), remote
+    )
+    assert (mtime.recorded_at, mtime.recorded_at_source) == (None, None)
+    assert mtime.chapters is None and mtime.description is None
+    container = fetching.with_remote_source(
+        _local(recorded_at="2026-09-30T10:00:00Z", recorded_at_source="container"), remote
+    )
+    assert (container.recorded_at, container.recorded_at_source) == ("2026-09-30T10:00:00Z", "container")

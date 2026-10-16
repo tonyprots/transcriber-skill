@@ -160,3 +160,29 @@ def test_captions_header_names_the_copy_and_the_proof() -> None:
     assert "копии на YouTube" in text
     assert "watch?v=x" in text
     assert "сдвиг -86.7 с" in text
+
+
+def test_copy_with_only_auto_captions_is_rejected_under_no_auto(monkeypatch, tmp_path: Path) -> None:
+    """`--no-auto` действует и на копию: автосубтитры YouTube не берутся."""
+    copy = RemoteMedia(
+        url="https://www.youtube.com/watch?v=ru",
+        title="Митап",
+        duration_seconds=1000.0,
+        extractor="Youtube",
+        tracks=(SubtitleTrack("ru", True),),
+        language="ru",
+    )
+    monkeypatch.setattr(mirror, "probe_remote", lambda url: copy)
+    monkeypatch.setattr(
+        mirror, "fetch_subtitles", lambda *a, **k: (_ for _ in ()).throw(AssertionError("не качать"))
+    )
+    found, rejected = mirror.find_mirror(
+        _media(),
+        "ru",
+        tmp_path,
+        _hearing(SPEECH),
+        search=lambda media: [mirror.Candidate(copy.url, copy.title, 1000.0)],
+        allow_automatic=False,
+    )
+    assert found is None
+    assert "авторских" in rejected[0]["reason"]

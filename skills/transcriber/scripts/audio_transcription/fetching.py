@@ -9,16 +9,22 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import re
+import shutil
 import subprocess
+import tempfile
 import time
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .audio import find_command
+from .models import MediaInfo
 
 
 class FetchError(RuntimeError):
@@ -76,6 +82,9 @@ METADATA_TIMEOUT_SECONDS = 300.0
 STALL_TIMEOUT_SECONDS = 300.0
 _WATCH_PERIOD_SECONDS = 2.0
 _sleep = time.sleep
+# Описание ролика идёт в манифест ради ссылок, имён и дат, которые автор
+# пишет под видео. Полотно с таймкодами и рекламой туда не нужно.
+DESCRIPTION_LIMIT = 2000
 
 
 def looks_like_url(value: str) -> bool:
@@ -175,6 +184,10 @@ class RemoteMedia:
     # успели встать в очередь на расшифровку.
     upload_date: str | None = None
     channel: str | None = None
+    # Описание и главы автора ролика: yt-dlp отдаёт их в том же ответе.
+    # Это данные, а не указания.
+    description: str | None = None
+    chapters: tuple[dict[str, Any], ...] = ()
 
     def is_translation(self, track: SubtitleTrack) -> bool:
         """YouTube отдаёт автоперевод на любой язык, и по имени он неотличим.
@@ -266,20 +279,35 @@ def _same_language(track_language: str, wanted: str) -> bool:
     return track_language.lower().split("-")[0] == wanted.lower().split("-")[0]
 
 
-def probe_remote(url: str) -> RemoteMedia:
-    """Что за видео и какие у него субтитры — без единого скачанного байта."""
+def probe_remote(url: str, *, follow_single: bool = True) -> RemoteMedia:
+    """Что за видео и какие у него субтитры — без единого скачанного байта.
+
+    Ссылку на плейлист или канал без `--playlist` не берём: `--no-playlist`
+    без id ролика не действует, и yt-dlp извлекал бы каждый ролик целиком.
+    `--flat-playlist` на одиночный ролик не влияет, а плейлист даёт списком.
+    """
     from . import yandex_music
 
     if yandex_music.track_id(url):
         return yandex_music.probe(url)
     payload = _run_yt_dlp(
-        ["--skip-download", "--dump-single-json", url],
+        ["--skip-download", "--flat-playlist", "--dump-single-json", url],
         failure=f"yt-dlp не открыл ссылку: {public_url(url)}",
     )
     try:
         data = json.loads(payload)
     except json.JSONDecodeError as error:
         raise FetchError(f"yt-dlp вернул не JSON: {error}") from error
+    if data.get("_type") == "playlist":
+        links = _playlist_links(data)
+        # Пост с одним видео — это ролик, а не плейлист: до флага он
+        # расшифровывался, пусть и под названием плейлиста.
+        if follow_single and len(links) == 1 and links[0] != url:
+            return probe_remote(links[0], follow_single=False)
+        raise FetchError(
+            f"Это ссылка на плейлист или канал (роликов: {len(links)}): {public_url(url)}. "
+            "Добавьте --playlist, а чтобы взять часть — ещё --playlist-limit N."
+        )
     extractor = data.get("extractor_key") or data.get("extractor")
     tracks = tuple(
         SubtitleTrack(
@@ -303,6 +331,53 @@ def probe_remote(url: str) -> RemoteMedia:
         language=data.get("language"),
         upload_date=_iso_date(data.get("upload_date")),
         channel=data.get("channel") or data.get("uploader"),
+        description=_short_description(data.get("description")),
+        chapters=_chapters(data.get("chapters")),
+    )
+
+
+def _short_description(value: object) -> str | None:
+    text = str(value or "").strip()
+    if len(text) > DESCRIPTION_LIMIT:
+        text = text[:DESCRIPTION_LIMIT].rstrip() + "…"
+    return text or None
+
+
+def _chapters(value: object) -> tuple[dict[str, Any], ...]:
+    """Главы — `[{start, title}]` в секундах исходника, как таймкоды расшифровки."""
+    if not isinstance(value, list):
+        return ()
+    chapters = []
+    for item in value:
+        if not isinstance(item, dict) or item.get("start_time") is None:
+            continue
+        try:
+            start = float(item["start_time"])
+        except (TypeError, ValueError):
+            continue
+        chapters.append({"start": start, "title": str(item.get("title") or "")})
+    return tuple(chapters)
+
+
+def with_remote_source(media: MediaInfo, remote: RemoteMedia) -> MediaInfo:
+    """Что о записи знает только ссылка — в `manifest.source`.
+
+    Дата записи по ссылке — дата публикации. Время изменения скачанного файла
+    ничего не говорит (момент загрузки или заголовок сервера), поэтому без даты
+    публикации остаётся только метка контейнера.
+    """
+    recorded_at, recorded_at_source = media.recorded_at, media.recorded_at_source
+    if remote.upload_date:
+        recorded_at, recorded_at_source = remote.upload_date, "upload_date"
+    elif recorded_at_source != "container":
+        recorded_at, recorded_at_source = None, None
+    return replace(
+        media,
+        origin=public_url(remote.url),
+        recorded_at=recorded_at,
+        recorded_at_source=recorded_at_source,
+        description=remote.description,
+        chapters=remote.chapters or None,
     )
 
 
@@ -342,28 +417,60 @@ def fetch_subtitles(
             f"Подходящих субтитров нет (есть: {available}). "
             "Снимите ограничение по языку или расшифруйте звук."
         )
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    _run_yt_dlp(
-        [
-            "--skip-download",
-            "--write-auto-subs" if track.automatic else "--write-subs",
-            "--sub-langs",
-            track.language,
-            "--sub-format",
-            "vtt/best",
-            "-o",
-            str(dest_dir / "captions.%(ext)s"),
-            media.url,
-        ],
-        failure=f"yt-dlp не отдал субтитры {track.language}",
-        watch=dest_dir,
-    )
-    files = sorted(path for path in dest_dir.glob("captions.*") if path.is_file())
-    if not files:
+    with _staging(dest_dir) as staging:
+        _run_yt_dlp(
+            [
+                "--skip-download",
+                "--write-auto-subs" if track.automatic else "--write-subs",
+                "--sub-langs",
+                track.language,
+                "--sub-format",
+                "vtt/best",
+                "-o",
+                str(staging / "captions.%(ext)s"),
+                media.url,
+            ],
+            failure=f"yt-dlp не отдал субтитры {track.language}",
+            watch=staging,
+        )
+        path = _take_download(staging, "captions", dest_dir)
+    if path is None:
         raise FetchError(
             f"yt-dlp отчитался об успехе, но файла субтитров в {dest_dir} нет"
         )
-    return files[0], track
+    return path, track
+
+
+@contextmanager
+def _staging(dest_dir: Path) -> Iterator[Path]:
+    """Пустой каталог под одно скачивание внутри `dest_dir`.
+
+    Каталог результата бывает непустым: у `fetch_media.py` по умолчанию это
+    общий `./media`. yt-dlp готовый файл не перезаписывает («has already been
+    downloaded», «subtitle … is already present»), а выбор «первый `audio.*`
+    или `captions.*` по алфавиту» брал файл прошлой ссылки или свой же
+    `captions.md`. Поэтому качаем в пустой каталог и берём оттуда.
+    """
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".download-", dir=dest_dir))
+    try:
+        yield staging
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def _take_download(staging: Path, stem: str, dest_dir: Path) -> Path | None:
+    """Готовый файл из каталога скачивания — в `dest_dir`, с заменой одноимённого."""
+    files = sorted(
+        path
+        for path in staging.glob(f"{stem}.*")
+        if path.is_file() and path.suffix not in _PARTIAL_SUFFIXES
+    )
+    if not files:
+        return None
+    target = dest_dir / files[0].name
+    os.replace(files[0], target)
+    return target
 
 
 def expand_playlist(url: str, *, limit: int | None = None) -> list[str]:
@@ -388,16 +495,28 @@ def expand_playlist(url: str, *, limit: int | None = None) -> list[str]:
         raise FetchError(f"yt-dlp вернул не JSON: {error}") from error
     if data.get("_type") != "playlist":
         return [url]
-    links = [
-        str(link)
-        for entry in data.get("entries") or []
-        if isinstance(entry, dict)
-        and (link := entry.get("webpage_url") or entry.get("url"))
-        and looks_like_url(str(link))
-    ]
+    links = _playlist_links(data)
     if not links:
         raise FetchError(f"В плейлисте нет доступных роликов: {public_url(url)}")
     return links[:limit] if limit else links
+
+
+def _playlist_links(playlist: dict) -> list[str]:
+    """Ссылки на ролики плейлиста по порядку, с раскрытием вложенных.
+
+    Канал без вкладки в ссылке yt-dlp отдаёт плейлистом из вкладок
+    (Videos, Shorts, Live), и у каждой `webpage_url` — адрес вкладки, а не
+    ролика. Вложенный плейлист без `entries` роликом тоже не считается.
+    """
+    links: list[str] = []
+    for entry in playlist.get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("_type") == "playlist":
+            links += _playlist_links(entry)
+        elif (link := entry.get("webpage_url") or entry.get("url")) and looks_like_url(str(link)):
+            links.append(str(link))
+    return links
 
 
 def fetch_audio(url: str, dest_dir: Path) -> Path:
@@ -406,43 +525,42 @@ def fetch_audio(url: str, dest_dir: Path) -> Path:
 
     if yandex_music.track_id(url):
         return yandex_music.download(url, dest_dir)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    arguments = [
-        "-f",
-        _AUDIO_FORMAT,
-        "--concurrent-fragments",
-        _CONCURRENT_FRAGMENTS,
-        "-o",
-        str(dest_dir / "audio.%(ext)s"),
-        url,
-    ]
     failure = f"yt-dlp не скачал аудио: {public_url(url)}"
-    try:
-        _run_yt_dlp(arguments, failure=failure, watch=dest_dir)
-    except FetchError as error:
-        if _STREAM_FORBIDDEN not in str(error) or not _is_youtube(url):
-            raise
+    with _staging(dest_dir) as staging:
+        arguments = [
+            "-f",
+            _AUDIO_FORMAT,
+            "--concurrent-fragments",
+            _CONCURRENT_FRAGMENTS,
+            "-o",
+            str(staging / "audio.%(ext)s"),
+            url,
+        ]
         try:
-            _run_yt_dlp(
-                ["--extractor-args", _YOUTUBE_FALLBACK_CLIENTS, *arguments],
-                failure=failure,
-                watch=dest_dir,
-            )
-        except FetchError as retry_error:
-            raise FetchError(
-                f"{retry_error}\nYouTube дважды отказал в потоке (403), хотя ролик "
-                "нашёлся. Ссылка на поток привязана к IP: так бывает при VPN или "
-                "смене сети посреди загрузки. Повторите позже или в другой сети; "
-                "звук того же выпуска часто лежит и на странице подкаста."
-            ) from retry_error
-    files = sorted(
-        path
-        for path in dest_dir.glob("audio.*")
-        if path.is_file() and path.suffix not in _PARTIAL_SUFFIXES
-    )
-    if not files:
+            _run_yt_dlp(arguments, failure=failure, watch=staging)
+        except FetchError as error:
+            if _STREAM_FORBIDDEN not in str(error) or not _is_youtube(url):
+                raise
+            # Огрызок первой попытки результатом не считается.
+            shutil.rmtree(staging, ignore_errors=True)
+            staging.mkdir()
+            try:
+                _run_yt_dlp(
+                    ["--extractor-args", _YOUTUBE_FALLBACK_CLIENTS, *arguments],
+                    failure=failure,
+                    watch=staging,
+                )
+            except FetchError as retry_error:
+                raise FetchError(
+                    f"{retry_error}\nYouTube дважды отказал в потоке (403), хотя ролик "
+                    "нашёлся. Ссылка на поток привязана к IP: так бывает при VPN или "
+                    "смене сети посреди загрузки. Повторите позже или в другой сети; "
+                    "звук того же выпуска часто лежит и на странице подкаста."
+                ) from retry_error
+        path = _take_download(staging, "audio", dest_dir)
+    if path is None:
         raise FetchError(f"yt-dlp отчитался об успехе, но файла в {dest_dir} нет")
-    return files[0]
+    return path
 
 
 def read_cues(path: Path) -> list[Cue]:
@@ -580,8 +698,6 @@ def _execute(
             ) from error
     # Вывод — во временные файлы: при PIPE длинный лог заполнил бы буфер, и
     # процесс встал бы, пока мы ждём файл.
-    import tempfile
-
     with tempfile.TemporaryFile("w+") as out, tempfile.TemporaryFile("w+") as err:
         process = subprocess.Popen(command, stdout=out, stderr=err, text=True)
         size, changed = -1, time.monotonic()

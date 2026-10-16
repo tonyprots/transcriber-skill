@@ -447,7 +447,7 @@ def write_bundle(
         if diarization is not None:
             files.append("speakers.json")
         manifest = {
-            "schema_version": 8,
+            "schema_version": 9,
             "generator": generator,
             "created_at": datetime.now().astimezone().isoformat(),
             "mode": mode,

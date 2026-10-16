@@ -110,7 +110,7 @@ def test_pipeline_writes_full_contract(tmp_path: Path, spoken_audio: Path, monke
     }
 
     manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == 8
+    assert manifest["schema_version"] == 9
     assert manifest["mode"] == "max"
     assert manifest["glossary"]["learning"] is True
     assert manifest["glossary"]["store"].endswith("glossary.yaml")
@@ -588,3 +588,48 @@ def test_working_alias_is_not_taken_for_an_ordinary_word(
     assert "PostgreSQL" in (output / "readable.md").read_text(encoding="utf-8")
     (entry,) = cli.entries_of(cli.load_document(store))
     assert entry.aliases == ("постгрес",)
+
+
+@requires_speech
+def test_link_metadata_reaches_manifest_and_not_the_text(
+    tmp_path: Path, spoken_audio: Path, monkeypatch
+) -> None:
+    """Дата публикации, описание и главы ссылки — в `manifest.source`.
+
+    Тот же звук своим файлом и по ссылке даёт побайтово тот же текст: поля
+    манифеста на расшифровку не влияют.
+    """
+    from audio_transcription.fetching import RemoteMedia
+
+    monkeypatch.setattr(cli, "run_isolated_backend", fake_backend)
+    remote = RemoteMedia(
+        url="https://www.youtube.com/watch?v=abc&si=share",
+        title="Отчёт",
+        duration_seconds=3.0,
+        extractor="Youtube",
+        tracks=(),
+        upload_date="2026-10-01",
+        description="Слайды по ссылке в описании",
+        chapters=({"start": 0.0, "title": "Бюджет"},),
+    )
+    monkeypatch.setattr(cli, "probe_remote", lambda url: remote)
+
+    def fetch_audio(url: str, dest: Path) -> Path:
+        dest.mkdir(parents=True, exist_ok=True)
+        return Path(shutil.copy2(spoken_audio, dest / "audio.aiff"))
+
+    monkeypatch.setattr(cli, "fetch_audio", fetch_audio)
+    common = ["--mode", "fast", "--language", "ru", "--no-cache", "--no-glossary", "--quiet"]
+    local = cli.run(cli.build_parser().parse_args([str(spoken_audio), "--output", str(tmp_path / "local"), *common]))
+    linked = cli.run(cli.build_parser().parse_args([remote.url, "--output", str(tmp_path / "link"), *common]))
+
+    for name in ("readable.md", "verbatim.md", "subtitles.srt", "segments.json"):
+        assert (local / name).read_bytes() == (linked / name).read_bytes(), name
+    source = json.loads((linked / "manifest.json").read_text(encoding="utf-8"))["source"]
+    assert source["origin"] == "https://www.youtube.com/watch?v=abc"
+    assert (source["recorded_at"], source["recorded_at_source"]) == ("2026-10-01", "upload_date")
+    assert source["description"] == "Слайды по ссылке в описании"
+    assert source["chapters"] == [{"start": 0.0, "title": "Бюджет"}]
+    own = json.loads((local / "manifest.json").read_text(encoding="utf-8"))["source"]
+    assert own["recorded_at_source"] in {"container", "file_mtime"}
+    assert own["chapters"] is None and own["description"] is None

@@ -27,7 +27,7 @@ from .fetching import (
     fetch_audio,
     looks_like_url,
     probe_remote,
-    public_url,
+    with_remote_source,
 )
 from .machine_lock import machine_slot
 from .backends import BackendMissing, BackendUnavailable
@@ -1250,7 +1250,7 @@ def _transcribe(
         report.stage(f"Подготовка аудио: {source.name}{scope}")
         prepared, media = prepare_audio(source, work_dir, section)
         if remote is not None:
-            media = replace(media, origin=public_url(remote.url))
+            media = with_remote_source(media, remote)
         # Кэш гипотез ключуется исходником. У фрагмента тот же SHA-256, что у
         # всей записи, и без границ в ключе два куска одного ролика получили
         # бы общий кэш.

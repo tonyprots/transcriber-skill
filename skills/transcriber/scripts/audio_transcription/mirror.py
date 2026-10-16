@@ -213,22 +213,30 @@ def find_mirror(
     *,
     search: Callable[[RemoteMedia], list[Candidate]] = search_youtube,
     limit: int = 3,
+    allow_automatic: bool = True,
 ) -> tuple[MirrorFound | None, list[dict[str, object]]]:
     """Первая копия, прошедшая проверку, и причины отказа остальным.
 
     Дорожка копии должна быть на языке речи: автоперевод YouTube с чужого
     языка — не субтитры, а перевод распознавания, и сверка по звуку его
-    всё равно не пропустит.
+    всё равно не пропустит. `allow_automatic=False` (`--no-auto`) — только
+    авторские дорожки копии.
     """
     rejected: list[dict[str, object]] = []
+    wanted = f"{'' if allow_automatic else 'авторских '}субтитров `{language}`"
     for candidate in search(media)[:limit]:
         try:
             copy = probe_remote(candidate.url)
-            track = copy.track_for((language,))
+            track = copy.track_for((language,), allow_automatic=allow_automatic)
             if track is None or copy.is_translation(track) or not _same(track, language):
-                rejected.append({"url": candidate.url, "reason": f"нет субтитров `{language}`"})
+                rejected.append({"url": candidate.url, "reason": f"нет {wanted}"})
                 continue
-            raw, track = fetch_subtitles(copy, dest_dir / "mirror" / candidate.url.rsplit("=", 1)[-1], languages=(language,))
+            raw, track = fetch_subtitles(
+                copy,
+                dest_dir / "mirror" / candidate.url.rsplit("=", 1)[-1],
+                languages=(language,),
+                allow_automatic=allow_automatic,
+            )
         except FetchError as error:
             rejected.append({"url": candidate.url, "reason": str(error)})
             continue
