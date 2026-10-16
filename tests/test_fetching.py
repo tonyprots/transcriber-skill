@@ -549,3 +549,63 @@ def test_audio_is_the_one_just_downloaded(monkeypatch, tmp_path: Path, previous:
     path = fetching.fetch_audio("https://youtu.be/b", tmp_path)
     assert path == tmp_path / "audio.webm"
     assert path.read_text(encoding="utf-8") == "ролик Б"
+
+
+def _channel_with_tabs() -> dict:
+    """Ссылка на канал без вкладки: yt-dlp 2026.8.19 отдаёт плейлист из вкладок.
+
+    `extractor/youtube/_tab.py`: при вкладках Shorts или Live каждая
+    извлекается во вложенный плейлист с `webpage_url` вкладки — ролики даже
+    при `--flat-playlist` лежат внутри.
+    """
+    return {
+        "_type": "playlist",
+        "title": "Канал",
+        "entries": [
+            {
+                "_type": "playlist",
+                "webpage_url": "https://www.youtube.com/@chan/videos",
+                "entries": [
+                    {"_type": "url", "url": "https://www.youtube.com/watch?v=V1"},
+                    {"_type": "url", "url": "https://www.youtube.com/watch?v=V2"},
+                ],
+            },
+            {
+                "_type": "playlist",
+                "webpage_url": "https://www.youtube.com/@chan/shorts",
+                "entries": [{"_type": "url", "url": "https://www.youtube.com/shorts/S1"}],
+            },
+        ],
+    }
+
+
+def test_channel_tabs_expand_to_videos_not_tab_links(yt_dlp) -> None:
+    """До правки наружу уходили адреса вкладок `/videos` и `/shorts`."""
+    yt_dlp(stdout=json.dumps(_channel_with_tabs()))
+    assert fetching.expand_playlist("https://www.youtube.com/@chan") == [
+        "https://www.youtube.com/watch?v=V1",
+        "https://www.youtube.com/watch?v=V2",
+        "https://www.youtube.com/shorts/S1",
+    ]
+
+
+def test_playlist_limit_counts_videos_across_tabs(yt_dlp) -> None:
+    yt_dlp(stdout=json.dumps(_channel_with_tabs()))
+    assert fetching.expand_playlist("https://www.youtube.com/@chan", limit=2) == [
+        "https://www.youtube.com/watch?v=V1",
+        "https://www.youtube.com/watch?v=V2",
+    ]
+
+
+def test_nested_playlist_without_entries_is_not_taken_for_a_video(yt_dlp) -> None:
+    payload = {
+        "_type": "playlist",
+        "entries": [
+            {"_type": "playlist", "webpage_url": "https://www.youtube.com/@chan/streams"},
+            {"_type": "url", "url": "https://www.youtube.com/watch?v=V1"},
+        ],
+    }
+    yt_dlp(stdout=json.dumps(payload))
+    assert fetching.expand_playlist("https://www.youtube.com/@chan") == [
+        "https://www.youtube.com/watch?v=V1"
+    ]

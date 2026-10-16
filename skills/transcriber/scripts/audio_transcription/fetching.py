@@ -424,16 +424,28 @@ def expand_playlist(url: str, *, limit: int | None = None) -> list[str]:
         raise FetchError(f"yt-dlp вернул не JSON: {error}") from error
     if data.get("_type") != "playlist":
         return [url]
-    links = [
-        str(link)
-        for entry in data.get("entries") or []
-        if isinstance(entry, dict)
-        and (link := entry.get("webpage_url") or entry.get("url"))
-        and looks_like_url(str(link))
-    ]
+    links = _playlist_links(data)
     if not links:
         raise FetchError(f"В плейлисте нет доступных роликов: {public_url(url)}")
     return links[:limit] if limit else links
+
+
+def _playlist_links(playlist: dict) -> list[str]:
+    """Ссылки на ролики плейлиста по порядку, с раскрытием вложенных.
+
+    Канал без вкладки в ссылке yt-dlp отдаёт плейлистом из вкладок
+    (Videos, Shorts, Live), и у каждой `webpage_url` — адрес вкладки, а не
+    ролика. Вложенный плейлист без `entries` роликом тоже не считается.
+    """
+    links: list[str] = []
+    for entry in playlist.get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("_type") == "playlist":
+            links += _playlist_links(entry)
+        elif (link := entry.get("webpage_url") or entry.get("url")) and looks_like_url(str(link)):
+            links.append(str(link))
+    return links
 
 
 def fetch_audio(url: str, dest_dir: Path) -> Path:
