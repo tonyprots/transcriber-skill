@@ -21,6 +21,8 @@ _SENTENCE_END = ".!?…"
 # фразы, а «Да!» э, потом — уже новое предложение.
 _CLOSING_QUOTES = '»"”'
 _OWN_SENTENCE = re.compile(r"[.!?…]+\s*")
+# «5 мм» — миллиметры, а не мычание: после числа «мм» остаётся в тексте.
+_NUMBER_BEFORE = re.compile(r"\d\s?$")
 _TAIL = re.compile(r"[,;:]?\s*")
 
 # GigaAM E2E приклеивает тире и кавычки к слову: «пункт— про», «тракет—2»,
@@ -64,8 +66,11 @@ def strip_fillers(text: str) -> tuple[str, int]:
         match = _TOKEN.search(out, position)
         if match is None:
             break
-        removed += 1
         start, end = match.span()
+        if match.group().casefold() == "мм" and _NUMBER_BEFORE.search(out, 0, start):
+            position = end
+            continue
+        removed += 1
         before = out[:start].rstrip()
         sentence_end = _OWN_SENTENCE.match(out, end)
         at_sentence_start = not before or _ends_sentence(before)

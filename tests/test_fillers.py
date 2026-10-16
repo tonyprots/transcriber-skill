@@ -72,3 +72,11 @@ def test_filler_inside_sentence_keeps_the_sentence_end() -> None:
 def test_closing_quote_does_not_start_a_sentence() -> None:
     assert strip_fillers("Он сказал «да» э, потом ушёл") == ("Он сказал «да» потом ушёл", 1)
     assert strip_fillers("Он сказал «Да!» э, потом ушёл") == ("Он сказал «Да!» Потом ушёл", 1)
+
+
+def test_millimetres_after_a_number_are_not_a_filler() -> None:
+    assert strip_fillers("Толщина 5 мм. Дальше идём.") == ("Толщина 5 мм. Дальше идём.", 0)
+    assert strip_fillers("Диаметр 10 мм, длина 3 м.") == ("Диаметр 10 мм, длина 3 м.", 0)
+    assert strip_fillers("Зазор 2мм, ммм, хватит") == ("Зазор 2мм, хватит", 1)
+    assert strip_fillers("Ммм, давай") == ("Давай", 1)
+    assert strip_fillers("Ну мм, давай") == ("Ну давай", 1)
