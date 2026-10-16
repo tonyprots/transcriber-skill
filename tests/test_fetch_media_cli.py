@@ -46,3 +46,35 @@ def test_single_url_keeps_the_plain_payload(monkeypatch, capsys) -> None:
     monkeypatch.setattr(fetch_media, "probe_remote", _media)
     assert fetch_media.main(["https://youtu.be/v1"]) == 0
     assert "results" not in json.loads(capsys.readouterr().out)
+
+
+def test_repeated_subtitles_into_the_same_folder_keep_the_text(monkeypatch, tmp_path, capsys) -> None:
+    """Повтор `--subtitles --language ru` в тот же каталог (по умолчанию ./media).
+
+    До правки второй прогон брал свой же `captions.md` как сырые субтитры:
+    0 реплик, и файл перезаписывался одной шапкой.
+    """
+    from pathlib import Path
+    from subprocess import CompletedProcess
+
+    from audio_transcription import fetching
+
+    monkeypatch.setattr(fetch_media, "probe_remote", _media)
+    monkeypatch.setattr(fetching, "require_yt_dlp", lambda: "yt-dlp")
+    monkeypatch.setattr(fetching, "yt_dlp_status", lambda today=None: {"stale": False})
+
+    def fake_execute(command, **kwargs):
+        template = command[command.index("-o") + 1]
+        Path(template.replace("%(ext)s", "ru.vtt")).write_text(
+            "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nпривет\n", encoding="utf-8"
+        )
+        return CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(fetching, "_execute", fake_execute)
+    argv = ["https://youtu.be/v1", "--subtitles", "--language", "ru", "--output", str(tmp_path)]
+    for _ in range(2):
+        assert fetch_media.main(argv) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["raw"].endswith("captions.ru.vtt")
+        assert payload["cues"] == 1
+    assert "привет" in (tmp_path / "captions.md").read_text(encoding="utf-8")

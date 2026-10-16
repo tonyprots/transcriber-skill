@@ -9,10 +9,14 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import re
+import shutil
 import subprocess
+import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -342,28 +346,60 @@ def fetch_subtitles(
             f"Подходящих субтитров нет (есть: {available}). "
             "Снимите ограничение по языку или расшифруйте звук."
         )
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    _run_yt_dlp(
-        [
-            "--skip-download",
-            "--write-auto-subs" if track.automatic else "--write-subs",
-            "--sub-langs",
-            track.language,
-            "--sub-format",
-            "vtt/best",
-            "-o",
-            str(dest_dir / "captions.%(ext)s"),
-            media.url,
-        ],
-        failure=f"yt-dlp не отдал субтитры {track.language}",
-        watch=dest_dir,
-    )
-    files = sorted(path for path in dest_dir.glob("captions.*") if path.is_file())
-    if not files:
+    with _staging(dest_dir) as staging:
+        _run_yt_dlp(
+            [
+                "--skip-download",
+                "--write-auto-subs" if track.automatic else "--write-subs",
+                "--sub-langs",
+                track.language,
+                "--sub-format",
+                "vtt/best",
+                "-o",
+                str(staging / "captions.%(ext)s"),
+                media.url,
+            ],
+            failure=f"yt-dlp не отдал субтитры {track.language}",
+            watch=staging,
+        )
+        path = _take_download(staging, "captions", dest_dir)
+    if path is None:
         raise FetchError(
             f"yt-dlp отчитался об успехе, но файла субтитров в {dest_dir} нет"
         )
-    return files[0], track
+    return path, track
+
+
+@contextmanager
+def _staging(dest_dir: Path) -> Iterator[Path]:
+    """Пустой каталог под одно скачивание внутри `dest_dir`.
+
+    Каталог результата бывает непустым: у `fetch_media.py` по умолчанию это
+    общий `./media`. yt-dlp готовый файл не перезаписывает («has already been
+    downloaded», «subtitle … is already present»), а выбор «первый `audio.*`
+    или `captions.*` по алфавиту» брал файл прошлой ссылки или свой же
+    `captions.md`. Поэтому качаем в пустой каталог и берём оттуда.
+    """
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".download-", dir=dest_dir))
+    try:
+        yield staging
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def _take_download(staging: Path, stem: str, dest_dir: Path) -> Path | None:
+    """Готовый файл из каталога скачивания — в `dest_dir`, с заменой одноимённого."""
+    files = sorted(
+        path
+        for path in staging.glob(f"{stem}.*")
+        if path.is_file() and path.suffix not in _PARTIAL_SUFFIXES
+    )
+    if not files:
+        return None
+    target = dest_dir / files[0].name
+    os.replace(files[0], target)
+    return target
 
 
 def expand_playlist(url: str, *, limit: int | None = None) -> list[str]:
@@ -580,8 +616,6 @@ def _execute(
             ) from error
     # Вывод — во временные файлы: при PIPE длинный лог заполнил бы буфер, и
     # процесс встал бы, пока мы ждём файл.
-    import tempfile
-
     with tempfile.TemporaryFile("w+") as out, tempfile.TemporaryFile("w+") as err:
         process = subprocess.Popen(command, stdout=out, stderr=err, text=True)
         size, changed = -1, time.monotonic()

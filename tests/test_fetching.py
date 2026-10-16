@@ -456,3 +456,77 @@ def test_stalled_download_is_stopped_but_slow_one_is_not(tmp_path: Path, monkeyp
     monkeypatch.setattr(fetching, "require_yt_dlp", lambda: stuck)
     with pytest.raises(fetching.FetchError, match="без новых данных"):
         fetching._run_yt_dlp(["x"], failure="f", watch=target)
+
+
+_VTT = "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n{text}\n"
+
+
+def _writing_yt_dlp(monkeypatch, outputs: list[dict[str, str]]) -> list[list[str]]:
+    """yt-dlp, который пишет файлы по шаблону `-o`: вызов N берёт outputs[N].
+
+    Ключ — то, что yt-dlp подставит вместо `%(ext)s` (у субтитров `ru.vtt`).
+    Готовый файл yt-dlp не перезаписывает («has already been downloaded»,
+    «subtitle … is already present»), и подмена ведёт себя так же.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(fetching, "require_yt_dlp", lambda: "yt-dlp")
+    monkeypatch.setattr(fetching, "yt_dlp_status", lambda today=None: {"stale": False})
+
+    def fake_execute(command, **kwargs):
+        written = outputs[len(calls)]
+        calls.append(command)
+        template = command[command.index("-o") + 1]
+        for ext, body in written.items():
+            target = Path(template.replace("%(ext)s", ext))
+            if not target.exists():
+                target.write_text(body, encoding="utf-8")
+        return CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(fetching, "_execute", fake_execute)
+    return calls
+
+
+def _video(*languages: str) -> RemoteMedia:
+    return RemoteMedia(
+        url="https://www.youtube.com/watch?v=b",
+        title="Ролик Б",
+        duration_seconds=60.0,
+        extractor="Youtube",
+        tracks=tuple(SubtitleTrack(language, True) for language in languages),
+        language=languages[0],
+    )
+
+
+def test_subtitles_ignore_other_files_in_the_folder(monkeypatch, tmp_path: Path) -> None:
+    """Каталог по умолчанию общий (./media): там лежат свой `captions.md`
+    и субтитры прошлых роликов. Брать надо только то, что скачано сейчас.
+
+    До правки при `ru` первым по алфавиту оказывался `captions.md` (0 реплик,
+    и он перезаписывался пустой шапкой), а `captions.en.vtt` чужого ролика
+    уходил под шапкой нового.
+    """
+    (tmp_path / "captions.md").write_text("# Ролик Б\n\n[00:00:01] прошлый прогон\n", encoding="utf-8")
+    (tmp_path / "captions.en.vtt").write_text(_VTT.format(text="video A"), encoding="utf-8")
+    _writing_yt_dlp(monkeypatch, [{"ru.vtt": _VTT.format(text="ролик Б")}])
+    raw, track = fetching.fetch_subtitles(_video("ru"), tmp_path, languages=("ru",))
+    assert raw == tmp_path / "captions.ru.vtt"
+    assert [cue.text for cue in fetching.read_cues(raw)] == ["ролик Б"]
+    assert track.language == "ru"
+    assert not [path.name for path in tmp_path.iterdir() if path.name.startswith(".")]
+
+
+def test_subtitles_replace_the_same_language_from_a_previous_video(
+    monkeypatch, tmp_path: Path
+) -> None:
+    (tmp_path / "captions.ru.vtt").write_text(_VTT.format(text="ролик А"), encoding="utf-8")
+    _writing_yt_dlp(monkeypatch, [{"ru.vtt": _VTT.format(text="ролик Б")}])
+    raw, _ = fetching.fetch_subtitles(_video("ru"), tmp_path, languages=("ru",))
+    assert [cue.text for cue in fetching.read_cues(raw)] == ["ролик Б"]
+
+
+def test_subtitles_missing_after_success_is_an_error(monkeypatch, tmp_path: Path) -> None:
+    """Чужой файл в каталоге не выдаётся за скачанный."""
+    (tmp_path / "captions.en.vtt").write_text(_VTT.format(text="video A"), encoding="utf-8")
+    _writing_yt_dlp(monkeypatch, [{}])
+    with pytest.raises(fetching.FetchError, match="файла субтитров"):
+        fetching.fetch_subtitles(_video("ru"), tmp_path, languages=("ru",))
