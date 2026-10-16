@@ -82,10 +82,14 @@ def test_ordinary_word_never_starts_being_replaced(tmp_path: Path) -> None:
 
 
 def test_pair_that_does_not_sound_alike_is_not_promoted(tmp_path: Path) -> None:
-    """«значит» против «GPT» — совпадение в очереди, а не ослышка."""
+    """«стакан» против «GPT» — совпадение в очереди, а не ослышка.
+
+    Пара «значит / GPT» до словаря больше не доходит: паразиты и служебные
+    слова отсекает уже отбор кандидатов.
+    """
     store = tmp_path / "glossary.yaml"
     for source in ("rec1", "rec2", "rec3", "rec4"):
-        entries, _ = update_from_run(store, _run("значит", "GPT"), source=source)
+        entries, _ = update_from_run(store, _run("стакан", "GPT"), source=source)
 
     assert entries[0].auto_apply is False
     assert "звучит не как" in load_document(store)["entries"][0]["learned"]["held_back"]
@@ -179,15 +183,15 @@ def _promote_threads(store: Path) -> None:
 
 
 def test_switched_on_entry_does_not_pick_up_an_unsafe_alias(tmp_path: Path) -> None:
-    """После повышения запись копит варианты дальше; «в» в них попасть не должно."""
+    """После повышения запись копит варианты дальше; короткое «тре» в замену попасть не должно."""
     store = tmp_path / "glossary.yaml"
     _promote_threads(store)
 
-    entries, _ = update_from_run(store, _run("в", "Threads"), source="rec4")
+    entries, _ = update_from_run(store, _run("тре", "Threads"), source="rec4")
 
     assert entries[0].auto_apply is True
     assert entries[0].aliases == ("трэц",)
-    assert load_document(store)["entries"][0]["learned"]["held_aliases"] == ["в"]
+    assert load_document(store)["entries"][0]["learned"]["held_aliases"] == ["тре"]
 
 
 def test_switched_on_entry_is_switched_off_when_its_alias_turns_out_ordinary(

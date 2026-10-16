@@ -17,9 +17,10 @@ import re
 from collections import OrderedDict
 from typing import Any
 
+from .fillers import _TOKEN as _FILLER_TOKEN
 from .models import ReviewItem, Segment
 from .phonetic import phonetic_similarity
-from .reconcile import normalize_text
+from .reconcile import FILLERS, FUNCTION_WORDS, MINOR_KINDS, normalize_text
 
 _LATIN = re.compile(r"[A-Za-z]")
 _CYRILLIC = re.compile(r"[А-Яа-яЁё]")
@@ -135,6 +136,17 @@ def _latin_candidate(heard: str, verifier: str) -> tuple[bool, bool]:
     return heard[:1].isupper() and verifier[:1].isupper(), False
 
 
+def _not_a_term(heard: str) -> bool:
+    """Услышанное — паразит или служебное слово: термином такое место не станет.
+
+    Проверяющая на «хмм» и «вот» пишет что придётся («Addicts», «What»), и
+    без этой отсечки словарь заводил записи на звуках, которые readable.md
+    всё равно убирает.
+    """
+    key = normalize_text(heard)
+    return not key or key in FILLERS or key in FUNCTION_WORDS or bool(_FILLER_TOKEN.fullmatch(key))
+
+
 def _verifier_spelling(verifier: str, item: dict[str, Any]) -> str:
     """Написание проверяющей в исходном регистре.
 
@@ -169,6 +181,10 @@ def collect_candidates(
     latin_route = language != "ru"
     seen: "OrderedDict[tuple[str, str], dict]" = OrderedDict()
     for item in review_items:
+        if item.get("kind") in MINOR_KINDS:
+            # Паразиты, повторы, число словом и цифрой, выдумки проверяющей:
+            # очередь сама считает это мелочью, словарю тут учиться нечему.
+            continue
         for pair in item.get("differing_tokens", []):
             if " / " not in pair:
                 continue
@@ -177,7 +193,7 @@ def collect_candidates(
                 continue
             for heard, verifier in aligned_words(left, right):
                 heard, verifier = clean_token(heard), clean_token(verifier)
-                if not heard or not verifier:
+                if not heard or not verifier or _not_a_term(heard):
                     continue
                 # `known` нормализован, а токены — в исходном регистре: без
                 # нормализации «Backlog» проходил мимо записи «backlog».

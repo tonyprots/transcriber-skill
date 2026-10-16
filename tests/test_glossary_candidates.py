@@ -156,3 +156,19 @@ def test_canonical_keeps_the_verifier_spelling_not_a_neighbour() -> None:
     old = {"start": 1.0, "end": 3.0, "comparison_text": "про Notion сегодня",
            "differing_tokens": ["нотион / notion"]}
     assert collect_candidates([old], known=set())[0]["canonical"] == "Notion"
+
+
+def test_fillers_and_function_words_do_not_become_terms() -> None:
+    """«Addicts ← Хмм», «What ← Вот» — такие записи словарь завёл на живых прогонах."""
+    junk = [
+        _item("Хмм", "Addicts"),
+        _item("Вот", "What"),
+        _item("э-э-э", "Monday"),
+        _item("и-и-и", "AI"),
+        _item("для", "For"),
+    ]
+    assert collect_candidates(junk, known=set()) == []
+    # Место, которое очередь сама считает мелочью, кандидатом тоже не будет.
+    minor = {**_item("нотион", "Notion"), "kind": "filler"}
+    assert collect_candidates([minor], known=set()) == []
+    assert [c["canonical"] for c in collect_candidates([_item("нотион", "Notion")], known=set())] == ["Notion"]
