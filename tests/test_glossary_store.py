@@ -10,6 +10,7 @@ import yaml
 
 from audio_transcription.glossary import GlossaryEntry, merge_glossaries
 from audio_transcription.glossary_store import (
+    HEADER,
     load_document,
     record_fingerprint,
     save_document,
@@ -319,6 +320,26 @@ def test_pruned_term_is_not_learned_again(tmp_path: Path) -> None:
     )
     entries, report = update_from_run(store, _run("зон", "Zon"), source="rec1")
     assert not any(entry.canonical == "Zon" for entry in entries)
+
+
+def test_header_advice_matches_what_learn_respects(tmp_path: Path) -> None:
+    """Шапка советовала «удалить и прогнать с --no-learn» — термин возвращался.
+
+    Работает перенос в pruned, и хватает canonical с причиной, без вариантов.
+    """
+    assert "--no-learn этого не меняет" in HEADER
+    assert "pruned (canonical и reason)" in HEADER
+    store = tmp_path / "glossary.yaml"
+    update_from_run(store, _run("макросов", "Microsoft"), source="rec1")
+    document = load_document(store)
+    document["pruned"] = [{"canonical": "Microsoft", "reason": "снято человеком"}]
+    document["entries"] = []
+    save_document(store, document)
+
+    entries, report = update_from_run(store, _run("макросов", "Microsoft"), source="rec2")
+
+    assert entries == [] and report.added == []
+    assert load_document(store)["entries"] == []
 
 
 def test_verifier_spelling_of_a_hand_term_reinforces_it(tmp_path: Path) -> None:
