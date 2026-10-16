@@ -5,8 +5,6 @@ import hashlib
 import json
 import platform
 import re
-import shutil
-import subprocess
 import sys
 import tempfile
 import threading
@@ -32,6 +30,7 @@ from .fetching import (
     public_url,
 )
 from .machine_lock import machine_slot
+from .scratch import ORPHAN_AGE_HOURS, mark_owner, remove_detached, sweep_orphans
 from .backends import BackendMissing, BackendUnavailable
 from .catalog import (
     FASTER_WHISPER_FALLBACK,
@@ -1245,22 +1244,16 @@ def scratch_dir(prefix: str) -> Iterator[Path]:
     десяти минут после готового результата (`.memory/defender-slow-temp-cleanup.md`).
     Всё это время stdout молчал, Handy не получал текст, а следующая запись
     пачки ждала. Удаление уходит отдельному процессу вне нашей сессии: он
-    переживает выход интерпретатора и никого не задерживает.
+    переживает выход интерпретатора и никого не задерживает. Метка владельца
+    бережёт каталог от уборки осиротевших (`scratch.sweep_orphans`), пока
+    прогон жив.
     """
     path = Path(tempfile.mkdtemp(prefix=prefix))
+    mark_owner(path)
     try:
         yield path
     finally:
-        try:
-            subprocess.Popen(
-                ["rm", "-rf", str(path)],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-        except OSError:
-            shutil.rmtree(path, ignore_errors=True)
+        remove_detached(path)
 
 
 def write_plain_text(path: Path, segments: list[Any]) -> None:
@@ -1325,6 +1318,17 @@ def _transcribe(
             report.stage(
                 f"Кэш: убрано записей старше {args.cache_max_age_days:g} дн.: {swept.files}"
             )
+
+    # Остатки убитых прогонов — копии записей в $TMPDIR. Уборка тоже побочная.
+    try:
+        orphans = sweep_orphans()
+    except OSError:
+        orphans = []
+    if orphans:
+        report.stage(
+            f"Временные каталоги старше {ORPHAN_AGE_HOURS:g} ч без владельца, "
+            f"убрано осиротевших: {len(orphans)}"
+        )
 
     # Скачивание в total не входит: это сеть, а не расшифровка, и по total
     # сравнивают скорость прогонов между собой.
