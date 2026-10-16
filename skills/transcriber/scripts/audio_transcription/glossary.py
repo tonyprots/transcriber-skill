@@ -8,9 +8,10 @@ from typing import Any
 
 import yaml
 
+from .fillers import strip_fillers
 from .models import Correction, ReviewItem, Segment
 from .phonetic import phonetic_similarity
-from .reconcile import normalize_text
+from .reconcile import _CONTEXT_WORDS, normalize_text
 
 # libyaml разбирает словарь на 127 КБ за 0,04 с против 0,26 с у чистого Python,
 # а читается он дважды за прогон. Без libyaml остаётся безопасный загрузчик.
@@ -288,6 +289,77 @@ def _best_piece(words: list[str], canonical: str) -> tuple[int, int, float]:
     return best
 
 
+def _context_keys(words: list[str]) -> list[str]:
+    """Слова для сверки контекста: без пунктуации и паразитов.
+
+    Очередь собирается по тексту до уборки паразитов, а правится текст уже
+    без них: «э-э» в контексте места не должно сбивать сверку.
+    """
+    keys: list[str] = []
+    for word in words:
+        keys.extend(normalize_text(strip_fillers(word)[0]).split())
+    return keys
+
+
+def _item_context(item: ReviewItem, start: int, end: int) -> tuple[list[str], list[str]] | None:
+    """Слова до и после куска `primary_span[start:end]` по контексту места.
+
+    `readable_text` — фрагмент с соседями (`reconcile._with_context`): «…»
+    в начале значит, что слева ровно `_CONTEXT_WORDS` слов, в конце — что
+    справа столько же. По ним кусок находится в контексте однозначно, даже
+    если то же слово стоит среди соседей. None — однозначно не находится.
+    """
+    tokens = item.readable_text.split()
+    lead = bool(tokens) and tokens[0] == "…"
+    tokens = tokens[1:] if lead else tokens
+    trail = bool(tokens) and tokens[-1] == "…"
+    tokens = tokens[:-1] if trail else tokens
+    span = item.primary_span.split()
+    if lead:
+        positions = [_CONTEXT_WORDS]
+    elif trail:
+        positions = [len(tokens) - len(span) - _CONTEXT_WORDS]
+    else:
+        positions = list(range(len(tokens)))
+    positions = [p for p in positions if p >= 0 and tokens[p : p + len(span)] == span]
+    if len(positions) != 1:
+        return None
+    at = positions[0]
+    before = tokens[:at] + span[:start]
+    after = span[end:] + tokens[at + len(span) :]
+    return _context_keys(before), _context_keys(after)
+
+
+def _disputed_match(
+    text: str, piece: str, context: tuple[list[str], list[str]] | None
+) -> re.Match[str] | None:
+    """Вхождение куска, о котором спорили, а не первое попавшееся.
+
+    Ослышка бывает частым словом («так» против Docs), и то же слово стоит в
+    сегменте раньше спорного места. Одно вхождение — оно и есть. Несколько —
+    выбираем по совпадению соседей с контекстом места; ничья или ни одного
+    совпадения — None: лучше оставить место человеку, чем испортить верное.
+    """
+    matches = list(re.finditer(_pattern(piece), text))
+    if len(matches) <= 1:
+        return matches[0] if matches else None
+    if context is None:
+        return None
+    before, after = context
+
+    def score(match: re.Match[str]) -> int:
+        left = _context_keys(text[: match.start()].split())
+        right = _context_keys(text[match.end() :].split())
+        return sum(a == b for a, b in zip(reversed(before), reversed(left))) + sum(
+            a == b for a, b in zip(after, right)
+        )
+
+    ranked = sorted(((score(match), index) for index, match in enumerate(matches)), reverse=True)
+    if ranked[0][0] == 0 or ranked[0][0] == ranked[1][0]:
+        return None
+    return matches[ranked[0][1]]
+
+
 def take_verifier_canonicals(
     segments: list[Segment],
     review_items: list[ReviewItem],
@@ -339,10 +411,10 @@ def take_verifier_canonicals(
                 if normalize_text(piece) in known:
                     continue
                 if fix is None or score > fix[2]:
-                    fix = (entry, piece, score)
-        index = None
+                    fix = (entry, piece, score, start, end)
+        index = match = None
         if fix is not None:
-            entry, piece, _ = fix
+            entry, piece, _, start, end = fix
             index = next(
                 (
                     i
@@ -352,10 +424,12 @@ def take_verifier_canonicals(
                 ),
                 None,
             )
-        if fix is None or index is None:
+        if index is not None:
+            match = _disputed_match(texts[index], piece, _item_context(item, start, end))
+        if fix is None or index is None or match is None:
             items.append(item)
             continue
-        texts[index] = re.sub(_pattern(piece), lambda _: entry.canonical, texts[index], count=1)
+        texts[index] = texts[index][: match.start()] + entry.canonical + texts[index][match.end() :]
         taken.append(
             Correction(
                 start=segments[index].start,
