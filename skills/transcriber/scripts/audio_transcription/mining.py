@@ -26,6 +26,14 @@ _LATIN = re.compile(r"[A-Za-z]")
 _CYRILLIC = re.compile(r"[А-Яа-яЁё]")
 _LETTER = re.compile(r"[A-Za-zА-Яа-яЁё]")
 
+# Виды мест, на которых словарю учиться нечему: паразиты, число словом и
+# цифрой, выдумки проверяющей. «Повтор или обрыв» (`disfluency`) сюда не
+# входит, хотя очередь и считает его мелочью: этим видом она зовёт и название,
+# сказанное дважды рядом («нотион, да, нотион / Notion, да, Notion»), — его
+# слова есть среди соседних. Настоящее заикание («мы мы / мы») отсекают и без
+# этого вида: у одной стороны пусто, а служебное слово не термин.
+NOTHING_TO_LEARN = MINOR_KINDS - {"disfluency"}
+
 # Строже порога подсказок в очереди: там ошибка стоит одной лишней строки, а
 # здесь склейка двух разных терминов испортит готовую запись словаря.
 MERGE_THRESHOLD = 0.8
@@ -181,9 +189,7 @@ def collect_candidates(
     latin_route = language != "ru"
     seen: "OrderedDict[tuple[str, str], dict]" = OrderedDict()
     for item in review_items:
-        if item.get("kind") in MINOR_KINDS:
-            # Паразиты, повторы, число словом и цифрой, выдумки проверяющей:
-            # очередь сама считает это мелочью, словарю тут учиться нечему.
+        if item.get("kind") in NOTHING_TO_LEARN:
             continue
         for pair in item.get("differing_tokens", []):
             if " / " not in pair:

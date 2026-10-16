@@ -172,3 +172,41 @@ def test_fillers_and_function_words_do_not_become_terms() -> None:
     minor = {**_item("нотион", "Notion"), "kind": "filler"}
     assert collect_candidates([minor], known=set()) == []
     assert [c["canonical"] for c in collect_candidates([_item("нотион", "Notion")], known=set())] == ["Notion"]
+
+
+def _queue(primary: str, verifier: str) -> list[dict]:
+    """Очередь одного окна так, как её собирает пайплайн."""
+    from dataclasses import asdict
+
+    from audio_transcription.models import Hypothesis, Segment
+    from audio_transcription.reconcile import find_review_items
+
+    items = find_review_items(
+        Hypothesis("primary", "ru", 0.0, [Segment(0.0, 5.0, primary)]),
+        Hypothesis("verifier", "ru", 0.0, [Segment(0.0, 5.0, verifier)]),
+    )
+    return [asdict(item) for item in items]
+
+
+def test_term_repeated_nearby_still_becomes_candidate() -> None:
+    """Термин, сказанный дважды рядом, очередь зовёт повтором, но словарю он нужен.
+
+    Каждое «нотион / Notion» здесь — вид `disfluency`: слова расхождения есть
+    среди четырёх соседних. Если отсекать этот вид целиком, название, которое
+    повторили через одно-два слова, мимо словаря уходит совсем.
+    """
+    queue = _queue("мы открыли нотион, да, нотион вчера", "мы открыли Notion, да, Notion вчера")
+    assert {item["kind"] for item in queue} == {"disfluency"}
+
+    (candidate,) = collect_candidates(queue, known=set())
+    assert (candidate["heard"], candidate["canonical"], candidate["count"]) == ("нотион", "Notion", 2)
+
+
+def test_plain_repetition_is_still_not_a_candidate() -> None:
+    """Настоящее заикание отсекается и без отказа от вида `disfluency`."""
+    for primary, verifier in (
+        ("мы мы пошли домой", "мы пошли домой"),
+        ("ну это это самое", "ну это самое"),
+        ("it's it's there", "it's there"),
+    ):
+        assert collect_candidates(_queue(primary, verifier), known=set(), min_count=1) == []
