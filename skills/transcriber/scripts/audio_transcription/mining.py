@@ -17,7 +17,7 @@ import re
 from collections import OrderedDict
 from typing import Any
 
-from .fillers import _TOKEN as _FILLER_TOKEN
+from .fillers import is_filler_token
 from .models import ReviewItem, Segment
 from .phonetic import phonetic_similarity
 from .reconcile import FILLERS, FUNCTION_WORDS, MINOR_KINDS, normalize_text
@@ -152,7 +152,7 @@ def not_a_term(heard: str) -> bool:
     всё равно убирает.
     """
     key = normalize_text(heard)
-    return not key or key in FILLERS or key in FUNCTION_WORDS or bool(_FILLER_TOKEN.fullmatch(key))
+    return not key or key in FILLERS or key in FUNCTION_WORDS or is_filler_token(key)
 
 
 def _verifier_spelling(verifier: str, item: dict[str, Any]) -> str:
