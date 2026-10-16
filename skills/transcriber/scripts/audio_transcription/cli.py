@@ -11,6 +11,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 from contextlib import ExitStack, contextmanager
 from collections.abc import Iterator
 from dataclasses import replace
@@ -1058,7 +1059,9 @@ def run_batch(args: argparse.Namespace) -> list[dict[str, Any]]:
     report = ProgressReporter(enabled=not args.quiet)
     results: list[dict[str, Any]] = []
     plan: list[tuple[str, RemoteMedia | None, Path | None, list[tuple[Section | None, Path]]]] = []
-    taken: set[Path] = set()
+    # Ключи, а не пути: APFS не различает регистр и форму Unicode, и Meeting с
+    # meeting сталкивались только при записи результата, после всей расшифровки.
+    taken: set[str] = set()
     for raw in args.input:
         try:
             remote, source = _resolve_input(raw)
@@ -1072,13 +1075,13 @@ def run_batch(args: argparse.Namespace) -> list[dict[str, Any]]:
             candidate, attempt = base / name, 2
             # С --skip-done каталог с чужим манифестом занят, даже если имя
             # совпало: запись ищет свой готовый каталог или первый свободный.
-            while candidate in taken or (
+            while _name_key(candidate) in taken or (
                 args.skip_done
                 and (candidate / "manifest.json").is_file()
                 and not _is_done(candidate, remote, source)
             ):
                 candidate, attempt = base / f"{name}-{attempt}", attempt + 1
-            taken.add(candidate)
+            taken.add(_name_key(candidate))
             if args.skip_done and _is_done(candidate, remote, source):
                 report.stage(f"Уже расшифровано, пропускаю: {candidate.name}")
                 results.append({"input": raw, "skipped": True, **summarize(candidate)})
@@ -1127,6 +1130,10 @@ def run_batch(args: argparse.Namespace) -> list[dict[str, Any]]:
                     results.append({"input": raw, **summarize(path)})
                 download_seconds = None
     return results
+
+
+def _name_key(path: Path) -> str:
+    return unicodedata.normalize("NFC", str(path)).casefold()
 
 
 def _is_done(

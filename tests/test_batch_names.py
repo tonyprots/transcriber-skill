@@ -134,3 +134,19 @@ def test_skip_done_recognizes_moved_file_by_sha256(tmp_path: Path, monkeypatch) 
     assert results["talk.wav"]["skipped"] is True
     assert results["talk.wav"]["output"] == str(output.resolve())
     assert [Path(name).name for name, _ in calls] == ["other.wav"]
+
+
+def test_batch_directory_names_differ_beyond_letter_case(tmp_path: Path, monkeypatch) -> None:
+    # APFS не различает регистр: Meeting и meeting — один каталог, и вторая
+    # запись падала только при записи результата, после всей расшифровки.
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    first, second = tmp_path / "a" / "Meeting.wav", tmp_path / "b" / "meeting.wav"
+    first.write_bytes(b"1")
+    second.write_bytes(b"2")
+    calls: list = []
+    monkeypatch.setattr(cli, "_transcribe", _fake_transcribe(calls))
+    args = cli.build_parser().parse_args([str(first), str(second), "--output", str(tmp_path / "out"), "--quiet"])
+    cli.run_batch(args)
+    names = [output.name for _, output in calls]
+    assert len({name.casefold() for name in names}) == 2, names
