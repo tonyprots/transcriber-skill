@@ -123,3 +123,90 @@ def test_hub_fallback_waits_out_a_real_download(monkeypatch) -> None:
     )
     assert result == "model-from-hub"
     assert backends.os.environ.get("HF_HUB_OFFLINE") == "0"
+
+
+def _restore_hub_state(monkeypatch) -> None:
+    """Переключение офлайна глобально для процесса: вернуть как было после теста."""
+    import huggingface_hub.constants as constants
+
+    for name in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(constants, "HF_HUB_OFFLINE", constants.HF_HUB_OFFLINE)
+    monkeypatch.setattr(backends, "_ORIGINAL_HUB_ENV", None, raising=False)
+
+
+def test_hub_fallback_does_not_build_model_twice(monkeypatch, tmp_path: Path) -> None:
+    """Веса уже найдены, а сборка из кэша дольше срока: ждём её, а не строим вторую копию.
+
+    Срок нужен сетевой части. Раньше под него попадала и сборка: после 45 с
+    офлайн-попытка строила ещё одну модель параллельно первой, а флаг офлайна
+    оставался в окружении и уходил во все воркеры прогона.
+    """
+    import threading
+    import time
+
+    from audio_transcription import catalog, weights
+
+    _restore_hub_state(monkeypatch)
+    snapshot = tmp_path / "models--x" / "snapshots" / catalog.GIGAAM_RUSSIAN.revision
+    snapshot.mkdir(parents=True)
+    lock = threading.Lock()
+    state = {"calls": 0, "active": 0, "peak": 0}
+
+    def load():
+        weights.fetch(catalog.GIGAAM_RUSSIAN, download=lambda repo, **kwargs: str(snapshot))
+        with lock:
+            state["calls"] += 1
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+        time.sleep(0.5)
+        with lock:
+            state["active"] -= 1
+        return "model"
+
+    assert backends.load_with_hub_fallback(load, offline=False, label="x", stall_seconds=0.1) == "model"
+    assert (state["calls"], state["peak"]) == (1, 1)
+    assert backends.os.environ.get("HF_HUB_OFFLINE") != "1"
+
+
+def test_workers_do_not_inherit_forced_offline(monkeypatch, tmp_path: Path) -> None:
+    """Офлайн, в который ушёл главный процесс, не наследуется воркерами.
+
+    Иначе воркер с ещё не скачанной моделью падал сразу: и онлайн-, и
+    офлайн-попытка видели HF_HUB_OFFLINE=1.
+    """
+    import pytest
+
+    from audio_transcription import isolated
+
+    _restore_hub_state(monkeypatch)
+    captured: list[dict[str, str]] = []
+
+    class Done:
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    def popen(command, **kwargs):
+        # Только флаги офлайна: всё окружение в отчёте pytest — это и токены.
+        captured.append({name: kwargs["env"].get(name) for name in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")})
+        return Done()
+
+    monkeypatch.setattr(isolated.subprocess, "Popen", popen)
+    backends.force_hub_offline()
+    with pytest.raises(backends.BackendUnavailable):
+        isolated._run_worker("x", "x", {}, tmp_path, stall_timeout_seconds=1.0)
+    assert captured[0] == {"HF_HUB_OFFLINE": None, "TRANSFORMERS_OFFLINE": None}
+
+    # Офлайн, который пользователь задал сам, воркеры получают как есть.
+    _restore_hub_state(monkeypatch)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    backends.force_hub_offline()
+    backends._set_hub_offline(False)
+    with pytest.raises(backends.BackendUnavailable):
+        isolated._run_worker("x", "x", {}, tmp_path, stall_timeout_seconds=1.0)
+    assert captured[1]["HF_HUB_OFFLINE"] == "1"

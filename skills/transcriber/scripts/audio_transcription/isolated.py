@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from .backends import BackendMissing, BackendUnavailable
+from .backends import BackendMissing, BackendUnavailable, child_hub_environment
 from .models import AudioChunk, Diarization, Hypothesis
 
 
@@ -129,7 +129,7 @@ def _run_worker(
         encoding="utf-8",
     )
     scripts_dir = Path(__file__).resolve().parents[1]
-    environment = os.environ.copy()
+    environment = child_hub_environment(os.environ.copy())
     environment["PYTHONPATH"] = os.pathsep.join(
         [str(scripts_dir), environment.get("PYTHONPATH", "")]
     ).rstrip(os.pathsep)

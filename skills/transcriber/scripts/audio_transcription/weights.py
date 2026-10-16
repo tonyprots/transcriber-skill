@@ -190,7 +190,15 @@ def fetch(
             )
             path = Path(download(entry.repo, allow_patterns=patterns))
     revision = path.name if path.parent.name == "snapshots" else None
+    # Сетевая часть загрузки позади: `load_with_hub_fallback` дождётся сборки
+    # модели в этом потоке, а не начнёт вторую офлайн.
+    threading.current_thread().weights_resolved = True  # type: ignore[attr-defined]
     return Weights(path, revision, bool(entry.revision) and revision == entry.revision)
+
+
+def resolved_in(thread: threading.Thread) -> bool:
+    """Нашёл ли поток закреплённые веса (`fetch` вернулся без ошибки)."""
+    return bool(getattr(thread, "weights_resolved", False))
 
 
 def weights_for(model: str, quantization: str | None = None) -> Weights | None:
