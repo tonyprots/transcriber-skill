@@ -27,6 +27,7 @@ from .fetching import (
     fetch_audio,
     looks_like_url,
     probe_remote,
+    public_url,
     with_remote_source,
 )
 from .machine_lock import machine_slot
