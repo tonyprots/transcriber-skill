@@ -107,7 +107,10 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def run(args: argparse.Namespace, url: str, destination: Path) -> dict[str, object]:
+def run(
+    args: argparse.Namespace, url: str, destination: Path, taken: set[str] | None = None
+) -> dict[str, object]:
+    """`taken` — имена каталогов, уже занятых в этом пакете."""
     languages = tuple(args.language or ())
     media = probe_remote(url)
     if not (args.subtitles or args.audio):
@@ -118,7 +121,7 @@ def run(args: argparse.Namespace, url: str, destination: Path) -> dict[str, obje
         }
 
     if len(args.url) > 1:
-        destination = destination / _slug(media.title)
+        destination = destination / _batch_folder(media.title, set() if taken is None else taken)
     if args.audio:
         path = fetch_audio(media.url, destination)
         return {
@@ -234,6 +237,19 @@ def _slug(title: str) -> str:
     return re.sub(r"[^\w]+", "-", title.lower()).strip("-")[:60] or "video"
 
 
+def _batch_folder(title: str, taken: set[str]) -> str:
+    """Каталог ролика в пакете: у серии выпусков название бывает общим.
+
+    Без суффикса второй выпуск ложился в каталог первого. Порядок ссылок тот
+    же — и при повторе пакета имена те же, как у `transcribe.py`.
+    """
+    name, attempt = _slug(title), 2
+    while name in taken:
+        name, attempt = f"{_slug(title)}-{attempt}", attempt + 1
+    taken.add(name)
+    return name
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     destination = (args.output or Path("media")).expanduser().resolve()
@@ -260,12 +276,13 @@ def main(argv: list[str] | None = None) -> int:
     # Пакет: отказ одной ссылки не останавливает остальные, а ролик без
     # субтитров не теряется — он получает `error` и идёт в transcribe.py.
     results: list[dict[str, object]] = []
+    taken: set[str] = set()
     for index, url in enumerate(args.url):
         if index:
             _sleep(BATCH_PAUSE_SECONDS)
         print(f"Пакет {index + 1}/{len(args.url)}: {public_url(url)}", file=sys.stderr)
         try:
-            results.append({"input": url, **run(args, url, destination)})
+            results.append({"input": url, **run(args, url, destination, taken)})
         except FetchError as error:
             results.append({"input": url, "error": str(error)})
     print(json.dumps({"results": results}, ensure_ascii=False, indent=2))

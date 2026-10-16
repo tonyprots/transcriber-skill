@@ -218,14 +218,13 @@ def test_distant_repetition_survives(tmp_path: Path) -> None:
     assert [cue.text for cue in fetching.read_cues(source)].count("да") == 2
 
 
-def test_audio_prefers_light_track_in_parallel(yt_dlp, tmp_path: Path) -> None:
+def test_audio_prefers_light_track_in_parallel(monkeypatch, tmp_path: Path) -> None:
     """ВК отдавал 128 МБ по фрагменту: 100 минут на 68-минутный ролик.
 
     Лёгкая дорожка в восемь потоков — 30 секунд. Нижняя граница 64 кбит/с
     держит YouTube на прежней opus 103k вместо HE-AAC 49k.
     """
-    calls = yt_dlp()
-    (tmp_path / "audio.m4a").write_bytes(b"x")
+    calls = _writing_yt_dlp(monkeypatch, [{"m4a": "x"}])
     fetching.fetch_audio("https://vkvideo.ru/video-1_2", tmp_path)
     command = calls[0]
     selector = command[command.index("-f") + 1].split("/")
@@ -233,13 +232,12 @@ def test_audio_prefers_light_track_in_parallel(yt_dlp, tmp_path: Path) -> None:
     assert command[command.index("--concurrent-fragments") + 1] == "8"
 
 
-def test_audio_prefers_original_over_auto_dub(yt_dlp, tmp_path: Path) -> None:
+def test_audio_prefers_original_over_auto_dub(monkeypatch, tmp_path: Path) -> None:
     """С автодубляжем оригинал шёл на 62k, фильтр 64–96 взял тамильский.
 
     Полтора часа Whisper распознавал дубляж как английский (2026-10-06).
     """
-    calls = yt_dlp()
-    (tmp_path / "audio.webm").write_bytes(b"x")
+    calls = _writing_yt_dlp(monkeypatch, [{"webm": "x"}])
     fetching.fetch_audio("https://youtu.be/PkoX6R5sn8Y", tmp_path)
     selector = calls[0][calls[0].index("-f") + 1].split("/")
     light = selector.index("bestaudio[abr>=64][abr<=96]")
@@ -257,15 +255,21 @@ def test_rate_limit_is_retried_then_reported(yt_dlp, monkeypatch) -> None:
     assert len(calls) == 3 and pauses == list(fetching._RETRY_PAUSES_SECONDS)
 
 
-def _scripted_yt_dlp(monkeypatch, results: list[tuple[int, str]]) -> list[list[str]]:
-    """Каждый вызов берёт следующий (returncode, stderr) из списка."""
+def _scripted_yt_dlp(monkeypatch, results: list[tuple]) -> list[list[str]]:
+    """Каждый вызов берёт следующий (returncode, stderr[, файлы]) из списка.
+
+    Файлы — {то, что встанет вместо `%(ext)s`: содержимое} по шаблону `-o`.
+    """
     calls: list[list[str]] = []
     monkeypatch.setattr(fetching, "require_yt_dlp", lambda: "yt-dlp")
     monkeypatch.setattr(fetching, "yt_dlp_status", lambda today=None: {"stale": False})
 
     def fake_execute(command, **kwargs):
-        returncode, stderr = results[len(calls)]
+        returncode, stderr, *written = results[len(calls)]
         calls.append(command)
+        template = command[command.index("-o") + 1] if "-o" in command else ""
+        for ext, body in (written[0] if written else {}).items():
+            Path(template.replace("%(ext)s", ext)).write_text(body, encoding="utf-8")
         return CompletedProcess(command, returncode, "", stderr)
 
     monkeypatch.setattr(fetching, "_execute", fake_execute)
@@ -281,11 +285,12 @@ def test_youtube_stream_403_falls_back_to_other_clients(monkeypatch, tmp_path: P
     Повтор идёт свежим извлечением через android и mweb — они отдают ролик
     360p целиком. Огрызок первой попытки файлом результата не считается.
     """
-    calls = _scripted_yt_dlp(monkeypatch, [(1, _STREAM_403), (0, "")])
-    (tmp_path / "audio.webm.part").write_bytes(b"x")
-    (tmp_path / "audio.mp4").write_bytes(b"x")
+    calls = _scripted_yt_dlp(
+        monkeypatch, [(1, _STREAM_403, {"webm.part": "x"}), (0, "", {"mp4": "360p"})]
+    )
     path = fetching.fetch_audio("https://youtu.be/MM-C3JqCXBk", tmp_path)
-    assert path.name == "audio.mp4"
+    assert path == tmp_path / "audio.mp4" and path.read_text(encoding="utf-8") == "360p"
+    assert sorted(item.name for item in tmp_path.iterdir()) == ["audio.mp4"]
     assert len(calls) == 2 and "--extractor-args" not in calls[0]
     retry = calls[1]
     assert retry[retry.index("--extractor-args") + 1] == fetching._YOUTUBE_FALLBACK_CLIENTS
@@ -530,3 +535,17 @@ def test_subtitles_missing_after_success_is_an_error(monkeypatch, tmp_path: Path
     _writing_yt_dlp(monkeypatch, [{}])
     with pytest.raises(fetching.FetchError, match="файла субтитров"):
         fetching.fetch_subtitles(_video("ru"), tmp_path, languages=("ru",))
+
+
+@pytest.mark.parametrize("previous", ["audio.m4a", "audio.webm"])
+def test_audio_is_the_one_just_downloaded(monkeypatch, tmp_path: Path, previous: str) -> None:
+    """В каталоге звук прошлой ссылки: вернуть надо новый.
+
+    До правки другой формат проигрывал по алфавиту (`m4a` < `webm`), а тот же
+    формат yt-dlp не перезаписывал — «has already been downloaded».
+    """
+    (tmp_path / previous).write_text("ролик А", encoding="utf-8")
+    _writing_yt_dlp(monkeypatch, [{"webm": "ролик Б"}])
+    path = fetching.fetch_audio("https://youtu.be/b", tmp_path)
+    assert path == tmp_path / "audio.webm"
+    assert path.read_text(encoding="utf-8") == "ролик Б"

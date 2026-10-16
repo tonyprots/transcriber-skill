@@ -442,43 +442,42 @@ def fetch_audio(url: str, dest_dir: Path) -> Path:
 
     if yandex_music.track_id(url):
         return yandex_music.download(url, dest_dir)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    arguments = [
-        "-f",
-        _AUDIO_FORMAT,
-        "--concurrent-fragments",
-        _CONCURRENT_FRAGMENTS,
-        "-o",
-        str(dest_dir / "audio.%(ext)s"),
-        url,
-    ]
     failure = f"yt-dlp не скачал аудио: {public_url(url)}"
-    try:
-        _run_yt_dlp(arguments, failure=failure, watch=dest_dir)
-    except FetchError as error:
-        if _STREAM_FORBIDDEN not in str(error) or not _is_youtube(url):
-            raise
+    with _staging(dest_dir) as staging:
+        arguments = [
+            "-f",
+            _AUDIO_FORMAT,
+            "--concurrent-fragments",
+            _CONCURRENT_FRAGMENTS,
+            "-o",
+            str(staging / "audio.%(ext)s"),
+            url,
+        ]
         try:
-            _run_yt_dlp(
-                ["--extractor-args", _YOUTUBE_FALLBACK_CLIENTS, *arguments],
-                failure=failure,
-                watch=dest_dir,
-            )
-        except FetchError as retry_error:
-            raise FetchError(
-                f"{retry_error}\nYouTube дважды отказал в потоке (403), хотя ролик "
-                "нашёлся. Ссылка на поток привязана к IP: так бывает при VPN или "
-                "смене сети посреди загрузки. Повторите позже или в другой сети; "
-                "звук того же выпуска часто лежит и на странице подкаста."
-            ) from retry_error
-    files = sorted(
-        path
-        for path in dest_dir.glob("audio.*")
-        if path.is_file() and path.suffix not in _PARTIAL_SUFFIXES
-    )
-    if not files:
+            _run_yt_dlp(arguments, failure=failure, watch=staging)
+        except FetchError as error:
+            if _STREAM_FORBIDDEN not in str(error) or not _is_youtube(url):
+                raise
+            # Огрызок первой попытки результатом не считается.
+            for leftover in staging.iterdir():
+                leftover.unlink()
+            try:
+                _run_yt_dlp(
+                    ["--extractor-args", _YOUTUBE_FALLBACK_CLIENTS, *arguments],
+                    failure=failure,
+                    watch=staging,
+                )
+            except FetchError as retry_error:
+                raise FetchError(
+                    f"{retry_error}\nYouTube дважды отказал в потоке (403), хотя ролик "
+                    "нашёлся. Ссылка на поток привязана к IP: так бывает при VPN или "
+                    "смене сети посреди загрузки. Повторите позже или в другой сети; "
+                    "звук того же выпуска часто лежит и на странице подкаста."
+                ) from retry_error
+        path = _take_download(staging, "audio", dest_dir)
+    if path is None:
         raise FetchError(f"yt-dlp отчитался об успехе, но файла в {dest_dir} нет")
-    return files[0]
+    return path
 
 
 def read_cues(path: Path) -> list[Cue]:

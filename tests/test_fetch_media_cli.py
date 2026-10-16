@@ -78,3 +78,30 @@ def test_repeated_subtitles_into_the_same_folder_keep_the_text(monkeypatch, tmp_
         assert payload["raw"].endswith("captions.ru.vtt")
         assert payload["cues"] == 1
     assert "привет" in (tmp_path / "captions.md").read_text(encoding="utf-8")
+
+
+def test_batch_videos_with_the_same_title_get_their_own_folders(monkeypatch, tmp_path, capsys) -> None:
+    """В пакете каталог — по названию; у серии выпусков оно бывает общим.
+
+    До правки второй ролик ложился в каталог первого, и его звук получал
+    тот, кто читал первый результат.
+    """
+    from dataclasses import replace
+    from pathlib import Path
+
+    monkeypatch.setattr(fetch_media, "_sleep", lambda _: None)
+    monkeypatch.setattr(fetch_media, "probe_remote", lambda url: replace(_media(url), title="Выпуск"))
+
+    def fetch_audio(url: str, dest: Path) -> Path:
+        dest.mkdir(parents=True, exist_ok=True)
+        target = dest / "audio.webm"
+        target.write_text(url, encoding="utf-8")
+        return target
+
+    monkeypatch.setattr(fetch_media, "fetch_audio", fetch_audio)
+    urls = ["https://youtu.be/v1", "https://youtu.be/v2", "https://youtu.be/v3"]
+    assert fetch_media.main([*urls, "--audio", "--output", str(tmp_path)]) == 0
+    results = json.loads(capsys.readouterr().out)["results"]
+    folders = [Path(item["audio"]).parent.name for item in results]
+    assert folders == ["выпуск", "выпуск-2", "выпуск-3"]
+    assert [Path(item["audio"]).read_text(encoding="utf-8") for item in results] == urls
