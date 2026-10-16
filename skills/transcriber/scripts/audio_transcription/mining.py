@@ -136,7 +136,7 @@ def _latin_candidate(heard: str, verifier: str) -> tuple[bool, bool]:
     return heard[:1].isupper() and verifier[:1].isupper(), False
 
 
-def _not_a_term(heard: str) -> bool:
+def not_a_term(heard: str) -> bool:
     """Услышанное — паразит или служебное слово: термином такое место не станет.
 
     Проверяющая на «хмм» и «вот» пишет что придётся («Addicts», «What»), и
@@ -193,7 +193,7 @@ def collect_candidates(
                 continue
             for heard, verifier in aligned_words(left, right):
                 heard, verifier = clean_token(heard), clean_token(verifier)
-                if not heard or not verifier or _not_a_term(heard):
+                if not heard or not verifier or not_a_term(heard):
                     continue
                 # `known` нормализован, а токены — в исходном регистре: без
                 # нормализации «Backlog» проходил мимо записи «backlog».

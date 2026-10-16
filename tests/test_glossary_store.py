@@ -15,6 +15,7 @@ from audio_transcription.glossary_store import (
     record_fingerprint,
     save_document,
     store_path,
+    unpromotable_terms,
     update_from_run,
 )
 from audio_transcription.mining import undisputed_words
@@ -398,6 +399,29 @@ def test_broken_learned_field_is_rejected_on_read(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="learned.held_aliases"):
         load_document(store)
+
+
+def test_unpromotable_learned_terms_are_named() -> None:
+    """Вариант короче порога и встречен вне спора — запись не включится никогда."""
+
+    def learned(canonical: str, aliases: list[str], **extra) -> dict:
+        return {
+            "canonical": canonical,
+            "aliases": aliases,
+            "auto_apply": extra.pop("auto_apply", False),
+            "learned": {"auto_apply_written": extra.pop("written", False), **extra},
+        }
+
+    document = {
+        "entries": [
+            learned("What", ["вот"], seen_as_word=True),
+            learned("Threads", ["трэц"], seen_as_word=True),  # вариант длинный — может ещё пригодиться
+            learned("SEO", ["сео"]),  # вне спора не встречался
+            learned("AI", ["ай"], seen_as_word=True, auto_apply=True, written=True),
+            {"canonical": "ROI", "aliases": ["рои"], "learned": {"seen_as_word": True}},  # ручная
+        ]
+    }
+    assert unpromotable_terms(document) == {"What"}
 
 
 def test_verifier_spelling_of_a_hand_term_reinforces_it(tmp_path: Path) -> None:

@@ -45,6 +45,28 @@ def test_disputed_words_come_from_the_primary_side() -> None:
     assert cli.disputed_primary_words([item]) == {"трец", "когда"}
 
 
+def test_disputed_words_skip_fillers_and_minor_places() -> None:
+    """«вот → What» и «хмм → Addicts» были пятой частью строк подсказок."""
+
+    def item(pair: str, kind: str) -> ReviewItem:
+        return ReviewItem(
+            start=0.0, end=1.0, readable_text="", comparison_text="", similarity=0.5,
+            differing_tokens=(pair,), reason="", kind=kind,
+        )
+
+    items = [
+        item("Вот трец / What threads", "substantive"),
+        item("хмм / Addicts", "spelling"),
+        item("э-э-э / Monday", "window"),
+        item("нотион / Notion", "filler"),
+        item("макросов / Microsoft", "verifier_canonical"),
+        item("тэгэстат / TGStat", "verifier_only"),
+        # Ослышка в повторённом названии очередь считает повтором.
+        item("Амбинти. / Амбиенти,", "disfluency"),
+    ]
+    assert cli.disputed_primary_words(items) == {"трец", "тэгэстат", "амбинти"}
+
+
 def test_plain_text_joins_windows_until_sentence_end(tmp_path: Path) -> None:
     """Окно режет фразу посередине — склеиваем до точки, дальше абзац."""
     target = tmp_path / "sub" / "early.txt"

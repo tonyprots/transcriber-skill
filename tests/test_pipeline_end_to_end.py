@@ -649,3 +649,45 @@ def test_broken_store_warns_and_is_left_alone(
     assert manifest["glossary"]["learning"] is False
     # Файл не перезаписан: правку человека вместе с опечаткой чинит человек.
     assert store.read_text(encoding="utf-8") == broken
+
+
+@requires_speech
+def test_unpromotable_learned_entry_does_not_suggest(
+    tmp_path: Path, spoken_audio: Path, monkeypatch
+) -> None:
+    """Выученная запись, которой автозамена не светит, подсказок не даёт.
+
+    «Postgres ← пг» встречен вне спора и короче порога: подсказка
+    «PostgreSQL → Postgres» была бы того же сорта, что «вот → What».
+    Соседняя запись с полноценным вариантом подсказывает как прежде.
+    """
+    monkeypatch.setattr(cli, "run_isolated_backend", fake_backend)
+    store = tmp_path / "glossary.yaml"
+    monkeypatch.setenv("TRANSCRIBER_GLOSSARY_STORE", str(store))
+    store.write_text(
+        "version: 1\nentries:\n"
+        "  - canonical: Postgres\n    aliases: [пг]\n    auto_apply: false\n"
+        "    learned:\n      auto_apply_written: false\n      seen_as_word: true\n"
+        "  - canonical: PostgreSQL Pro\n    aliases: [постгрес про]\n    auto_apply: false\n"
+        "    learned:\n      auto_apply_written: false\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "result"
+
+    cli.run(
+        cli.build_parser().parse_args(
+            [
+                str(spoken_audio), "--output", str(output), "--mode", "max",
+                "--language", "ru", "--no-cache", "--quiet",
+                "--verifier-window-seconds", "0",
+                # Без обучения: уборка после прогона сняла бы «пг» как
+                # вариант короче трёх знаков, и проверять было бы нечего.
+                "--no-learn",
+            ]
+        )
+    )
+
+    audit = json.loads((output / "glossary-audit.json").read_text(encoding="utf-8"))
+    suggested = {item["canonical"] for item in audit["suggestions"]}
+    assert "Postgres" not in suggested
+    assert "PostgreSQL Pro" in suggested

@@ -67,10 +67,11 @@ from .glossary_store import (
     profile_path,
     record_fingerprint,
     store_path,
+    unpromotable_terms,
     update_from_run,
 )
 from .fillers import strip_filler_segments
-from .mining import LEARNING_LANGUAGES, undisputed_words
+from .mining import LEARNING_LANGUAGES, not_a_term, undisputed_words
 from .models import AudioChunk, Diarization, Hypothesis, ReviewItem, Section
 from .packing import PackedWindow, build_packed_windows, unpack_hypothesis
 from .isolated import run_isolated_backend, run_isolated_diarization
@@ -1191,12 +1192,32 @@ def write_plain_text(path: Path, segments: list[Any]) -> None:
     temporary.replace(path)
 
 
+# Виды мест, где модели спорят о слове. Паразиты, число словом и цифрой,
+# выдумки проверяющей и место, где канон уже встал из проверяющей, подсказкам
+# термина не нужны. «Повтор или обрыв» остаётся: ослышка в повторённом
+# названии попадает туда же («Амбинти / Амбиенти» — верная подсказка
+# Ambienti, замер 2026-10-17 на 56 записях max: 9 верных и 44 ложных против
+# 9 и 89 до отбора).
+SUGGESTION_KINDS = frozenset({"substantive", "spelling", "window", "verifier_only", "disfluency"})
+
+
 def disputed_primary_words(review_items: list[ReviewItem]) -> set[str]:
-    """Слова основной модели, на которых проверяющая с ней разошлась."""
+    """Слова основной модели, на которых проверяющая с ней разошлась.
+
+    Паразиты и служебные слова в поиск не идут: «вот → What» и «хмм →
+    Addicts» были пятой частью строк подсказок и ни разу не оказались
+    термином.
+    """
     words: set[str] = set()
     for item in review_items:
+        if item.kind not in SUGGESTION_KINDS:
+            continue
         for pair in item.differing_tokens:
-            words.update(normalize_text(pair.split(" / ", 1)[0]).split())
+            words.update(
+                word
+                for word in normalize_text(pair.split(" / ", 1)[0]).split()
+                if not not_a_term(word)
+            )
     return words
 
 
@@ -1418,9 +1439,13 @@ def _transcribe(
             else store_path(args.glossary_store, args.glossary_profile, route.language)
         )
         learned_now: list[GlossaryEntry] = []
+        # Выученные записи, которые не подсказывают (`unpromotable_terms`).
+        quiet: set[str] = set()
         if learned_path is not None:
             try:
-                learned_now = entries_of(load_document(learned_path))
+                learned_document = load_document(learned_path)
+                learned_now = entries_of(learned_document)
+                quiet = unpromotable_terms(learned_document)
             except (OSError, ValueError, yaml.YAMLError) as error:
                 # Опечатка в ручной правке своего словаря роняла каждый прогон,
                 # в том числе быстрый текст Handy. Прогон идёт без выученного
@@ -1680,6 +1705,7 @@ def _transcribe(
                 # термин, добравший порог на этой записи, правит уже её текст,
                 # а не только следующую.
                 glossary = merge_glossaries(curated, learned_entries)
+                learned_now = learned_entries
             except (OSError, ValueError, TypeError, yaml.YAMLError) as error:
                 # Недоступный или испорченный словарь не повод терять
                 # расшифровку: она уже посчитана, и без пополнения останется
@@ -1703,7 +1729,11 @@ def _transcribe(
             )
         suggestions = suggest_glossary_matches(
             readable_segments,
-            glossary,
+            merge_glossaries(
+                curated, [entry for entry in learned_now if entry.canonical not in quiet]
+            )
+            if quiet
+            else glossary,
             only_words=disputed_primary_words(review_items) if verifier_ran else None,
         )
         timed("glossary", mark)

@@ -261,6 +261,28 @@ def entries_of(document: dict[str, Any]) -> list[GlossaryEntry]:
     return parse_entries(document.get("entries", []))
 
 
+def unpromotable_terms(document: dict[str, Any]) -> set[str]:
+    """Каноны выученных записей, которым автозамена не светит никогда.
+
+    Вариант встречался вне спора и короче порога («M ← м-м-м», «What ←
+    вот»): включить такую запись порог не даст, а фонетическая подсказка по
+    ней сватала термин к обычному слову. На 56 записях max это 35 ложных
+    подсказок из 89 и ни одной верной. Сама запись остаётся: уборка и
+    человек решают её судьбу, здесь она только не подсказывает.
+    """
+    quiet: set[str] = set()
+    for item in document.get("entries", []):
+        learned = item.get("learned")
+        if not isinstance(learned, dict) or _edited_by_hand(item) or item.get("auto_apply"):
+            continue
+        if learned.get("seen_as_word") and all(
+            _alias_letters(str(alias)) < PROMOTE_MIN_ALIAS_LETTERS
+            for alias in item.get("aliases", [])
+        ):
+            quiet.add(str(item.get("canonical", "")))
+    return quiet
+
+
 # Сколько отпечатков записей помнить на термин. Нужны они только чтобы отличить
 # новую запись от повторного прогона старой, поэтому храним хвост, а не всё.
 SOURCE_MEMORY = 12
