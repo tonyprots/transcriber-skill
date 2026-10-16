@@ -216,8 +216,18 @@ def bundled_binary(skill_dir: Path | None = None) -> Path:
     return skill_dir / "bin" / "macos-arm64" / "fluidaudiocli"
 
 
-def ensure_binary(skill_dir: Path | None = None, *, offline: bool = False, opener=urllib.request.urlopen) -> Path:
-    """Поставочный fluidaudiocli: уже на месте или скачанный и сверенный по SHA-256."""
+def ensure_binary(
+    skill_dir: Path | None = None,
+    *,
+    offline: bool = False,
+    opener=urllib.request.urlopen,
+    progress=None,
+) -> Path:
+    """Поставочный fluidaudiocli: уже на месте или скачанный и сверенный по SHA-256.
+
+    `progress(байты)` зовётся на каждый пришедший блок: воркер пишет по нему
+    признак жизни для сторожа зависаний.
+    """
     target = bundled_binary(skill_dir)
     if target.is_file() and os.access(target, os.X_OK):
         return target
@@ -238,6 +248,8 @@ def ensure_binary(skill_dir: Path | None = None, *, offline: bool = False, opene
             for block in iter(lambda: response.read(1 << 20), b""):
                 digest.update(block)
                 handle.write(block)
+                if progress is not None:
+                    progress(len(block))
     except OSError as error:
         part.unlink(missing_ok=True)
         raise ModelsUnavailable(f"fluidaudiocli не скачался: {error}") from error

@@ -8,7 +8,7 @@ import tempfile
 import time
 import wave
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .backends import BackendMissing, _PinnedLoad, load_with_hub_fallback
 from .catalog import bundled_binary_problem
@@ -45,7 +45,7 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
         raise
 
 
-def _fluid_binary(config: dict[str, Any]) -> Path:
+def _fluid_binary(config: dict[str, Any], progress: Callable[[float], None] | None = None) -> Path:
     """Бинарник выбрал родитель (`catalog.choose_fluidaudio_binary`): не
     поставочный приходит путём и берётся как есть, поставочный — None, его
     здесь докачиваем и сверяем с опубликованной суммой."""
@@ -55,7 +55,7 @@ def _fluid_binary(config: dict[str, Any]) -> Path:
             raise FileNotFoundError(f"fluidaudiocli не найден или не исполняемый: {path}")
         return path
     try:
-        path = ensure_fluid_binary(offline=bool(config.get("offline", False)))
+        path = ensure_fluid_binary(offline=bool(config.get("offline", False)), progress=progress)
     except ModelsUnavailable as error:
         raise BackendMissing(str(error)) from error
     problem = bundled_binary_problem(path)
@@ -184,11 +184,19 @@ def _run_fluidaudio(
     progress_path: Path,
     result_path: Path,
 ) -> Diarization:
-    binary = _fluid_binary(config)
+    # Признак жизни — до поиска бинарника: первая докачка fluidaudiocli
+    # (около 20 МБ) иначе шла молча, и сторож родителя убивал воркер.
+    _write_json(progress_path, {"stage": "loading", "completed": 0})
+    binary = _fluid_binary(
+        config,
+        DownloadHeartbeat(
+            lambda stage: _write_json(progress_path, {"stage": stage, "completed": 0, "total": None}),
+            "загрузка fluidaudiocli",
+        ),
+    )
     output_path = result_path.with_name("fluidaudio-output.json")
     threshold = float(config.get("threshold", 0.7))
     started = time.monotonic()
-    _write_json(progress_path, {"stage": "loading", "completed": 0})
     # Модели ставим сами и с закреплённой ревизии в каталог, который читает
     # бинарник: иначе он скачал бы последний коммит репозитория, а мерили мы
     # конкретный.

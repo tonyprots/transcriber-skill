@@ -77,7 +77,7 @@ def _fake_fluid(monkeypatch, tmp_path: Path, returncodes: tuple[int, ...] = ()) 
             return self.returncode
 
     _silence(tmp_path / "audio.wav")
-    monkeypatch.setattr(diarization_worker, "_fluid_binary", lambda _config: tmp_path / "fluidaudiocli")
+    monkeypatch.setattr(diarization_worker, "_fluid_binary", lambda _config, *_rest: tmp_path / "fluidaudiocli")
     monkeypatch.setattr(diarization_worker, "ensure_fluid_models", lambda **_kwargs: "ready")
     monkeypatch.setattr(diarization_worker.subprocess, "Popen", FakeProcess)
     # Ни песочницы, ни настоящего каталога моделей в тестах.
@@ -207,7 +207,7 @@ def test_no_network_command_probes_sandbox(monkeypatch) -> None:
 
 
 def test_missing_models_offline_is_backend_missing(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(diarization_worker, "_fluid_binary", lambda _config: tmp_path / "fluidaudiocli")
+    monkeypatch.setattr(diarization_worker, "_fluid_binary", lambda _config, *_rest: tmp_path / "fluidaudiocli")
 
     def unavailable(**_kwargs):
         raise fluid_models.ModelsUnavailable("нет моделей")
@@ -398,7 +398,7 @@ def _script_fluid(monkeypatch, tmp_path: Path, body: str) -> Path:
         encoding="utf-8",
     )
     script.chmod(0o755)
-    monkeypatch.setattr(diarization_worker, "_fluid_binary", lambda _config: script)
+    monkeypatch.setattr(diarization_worker, "_fluid_binary", lambda _config, *_rest: script)
     monkeypatch.setattr(diarization_worker, "ensure_fluid_models", lambda **_kwargs: "ready")
     monkeypatch.setattr(diarization_worker, "no_network_command", lambda command: list(command))
     monkeypatch.setattr(fluid_models, "default_target", lambda: tmp_path / "models")
@@ -630,3 +630,46 @@ def test_models_download_quietly_in_worker(monkeypatch, tmp_path: Path) -> None:
     fluid_models.ensure(tmp_path / "loud")
     assert calls[0]["tqdm_class"].__name__ == "Silent"
     assert "tqdm_class" not in calls[1]  # prefetch и setup показывают полосу
+
+
+class _Blocks(_Response):
+    def __init__(self, blocks: list[bytes]) -> None:
+        self._payload = [*blocks, b""]
+
+
+def test_binary_download_reports_each_block(tmp_path: Path) -> None:
+    # 20 МБ на медленной сети шли молча, и сторож родителя убивал воркер.
+    blocks = [b"a" * 10, b"b" * 10, b"c" * 5]
+    skill = _skill(tmp_path, b"".join(blocks))
+    heard: list[int] = []
+    path = fluid_models.ensure_binary(skill, opener=lambda url, timeout: _Blocks(list(blocks)), progress=heard.append)
+    assert heard == [10, 10, 5]
+    assert path.read_bytes() == b"".join(blocks)
+
+
+def test_fluidaudio_reports_loading_before_binary(monkeypatch, tmp_path: Path) -> None:
+    _fake_fluid(monkeypatch, tmp_path)
+    seen: list[dict] = []
+
+    def binary(_config, progress=None):
+        seen.append(json.loads((tmp_path / "progress.json").read_text(encoding="utf-8")))
+        progress(2_000_000)
+        seen.append(json.loads((tmp_path / "progress.json").read_text(encoding="utf-8")))
+        return tmp_path / "fluidaudiocli"
+
+    monkeypatch.setattr(diarization_worker, "_fluid_binary", binary)
+    diarization_worker._run_fluidaudio(tmp_path / "audio.wav", {}, tmp_path / "progress.json", tmp_path / "result.json")
+    assert seen[0]["stage"] == "loading"
+    assert seen[1]["stage"] == "загрузка fluidaudiocli: 2 МБ"
+
+
+def test_worker_passes_progress_to_binary_download(monkeypatch, tmp_path: Path) -> None:
+    calls: list[dict] = []
+    bundled = tmp_path / "bundled"
+    bundled.write_text("#!/bin/sh\n", encoding="utf-8")
+    bundled.chmod(0o755)
+    monkeypatch.setattr(diarization_worker, "ensure_fluid_binary", lambda **kwargs: calls.append(kwargs) or bundled)
+    monkeypatch.setattr(diarization_worker, "bundled_binary_problem", lambda _path: None)
+    marker = object()
+    diarization_worker._fluid_binary({}, marker)
+    assert calls[0]["progress"] is marker
