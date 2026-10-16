@@ -196,6 +196,10 @@ def rebalance_boundaries(
     «лишнее» в соседнем. Здесь на каждом стыке пробуется перенести одно-два
     крайних слова проверяющей через границу; перенос принимается, только если
     совпадений с основной на паре окон становится строго больше.
+
+    Окно без слов проверяющей тоже принимает перенос: раскладка больше не
+    копирует в него крайние слова соседей, и слово, которое Whisper сдвинул
+    к соседу, возвращается сюда.
     """
     result = list(pairs)
     for index in range(len(result) - 1):
@@ -203,12 +207,13 @@ def rebalance_boundaries(
             result[index],
             result[index + 1],
         )
-        if left_verifier is None or right_verifier is None:
+        donor = left_verifier or right_verifier
+        if donor is None:
             continue
         if right_primary.start - left_primary.end > _BOUNDARY_GAP_SECONDS:
             continue
-        left_words = left_verifier.text.split()
-        right_words = right_verifier.text.split()
+        left_words = left_verifier.text.split() if left_verifier else []
+        right_words = right_verifier.text.split() if right_verifier else []
 
         def score(left: list[str], right: list[str]) -> int:
             return _matched_words(left_primary.text, " ".join(left)) + _matched_words(
@@ -232,15 +237,23 @@ def rebalance_boundaries(
         if left is not left_words:
             # Окно может остаться без слов проверяющей: всё, что Whisper в нём
             # «услышал», оказалось словом соседа («М-м.» против «Классный»).
-            result[index] = (
-                left_primary,
-                replace(left_verifier, text=" ".join(left)) if left else None,
-            )
+            result[index] = (left_primary, _moved(left_verifier, donor, left_primary, left))
             result[index + 1] = (
                 right_primary,
-                replace(right_verifier, text=" ".join(right)) if right else None,
+                _moved(right_verifier, donor, right_primary, right),
             )
     return result
+
+
+def _moved(
+    verifier: Segment | None, donor: Segment, primary: Segment, words: list[str]
+) -> Segment | None:
+    if not words:
+        return None
+    if verifier is None:
+        # Пустое окно получает слова соседа: границы — свои, уверенность — его.
+        return replace(donor, start=primary.start, end=primary.end, text=" ".join(words))
+    return replace(verifier, text=" ".join(words))
 
 
 @dataclass(frozen=True)

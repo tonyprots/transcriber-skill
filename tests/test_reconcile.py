@@ -227,6 +227,24 @@ def test_short_reply_between_neighbours_is_not_a_review_item() -> None:
     assert find_review_items(primary, verifier) == []
 
 
+def test_boundary_word_returns_to_an_empty_window() -> None:
+    """Whisper сдвинул слово к соседу, и окно, где его слышала основная, пусто.
+
+    Раньше раскладка копировала слово соседа в пустое окно, и спор гасился
+    случайно. Теперь копий нет, и слово переносит сам перенос через стык.
+    """
+    primary = [
+        Segment(0.0, 2.0, "Мне нравится одна передача, то есть"),
+        Segment(2.1, 2.6, "Режим."),
+    ]
+    verifier = [Segment(0.0, 2.0, "мне нравится одна передача то есть режим")]
+    items = find_review_items(
+        Hypothesis("primary", "ru", 0.0, primary, {}),
+        Hypothesis("verifier", "ru", 0.0, verifier, {}),
+    )
+    assert items == []
+
+
 def kinds(left: str, right: str) -> list[str]:
     from audio_transcription.reconcile import disagreements
 
