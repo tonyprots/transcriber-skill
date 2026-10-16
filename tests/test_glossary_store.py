@@ -431,3 +431,48 @@ def test_unknown_language_learns_nothing(tmp_path: Path) -> None:
     store = tmp_path / "glossary.de.yaml"
     entries, _ = update_from_run(store, _run("Chatsubiti", "ChatGPT"), source="rec1", language="de")
     assert entries == []
+
+
+def test_held_alias_does_not_return_with_the_next_reinforcement(tmp_path: Path) -> None:
+    """Отложенный вариант остаётся отложенным, даже когда расхождение повторилось.
+
+    Ревью 2026-10-12: «кодекс» у Codex уходил в held_aliases, а следующий
+    прогон с тем же местом дописывал его обратно в aliases — и «Уголовный
+    кодекс» становился «Уголовный Codex».
+    """
+    from audio_transcription.glossary import apply_glossary
+    from audio_transcription.glossary_store import entries_of
+
+    store = tmp_path / "glossary.yaml"
+    save_document(
+        store,
+        {
+            "version": 1,
+            "entries": [
+                {
+                    "canonical": "Codex",
+                    "aliases": ["кодэкс", "кодекс"],
+                    "auto_apply": True,
+                    "learned": {
+                        "auto_apply_written": True,
+                        "latin": True,
+                        "windows": 6,
+                        "sources": ["rec1", "rec2", "rec3"],
+                    },
+                }
+            ],
+            "pending": [],
+        },
+    )
+    update_from_run(store, _run("кодекс", "Codex"), blocked={"кодекс"}, source="rec4")
+    learned = load_document(store)["entries"][0]
+    assert learned["aliases"] == ["кодэкс"] and learned["learned"]["held_aliases"] == ["кодекс"]
+
+    entries, _ = update_from_run(store, _run("кодекс", "Codex"), source="rec5")
+
+    document = load_document(store)
+    assert "кодекс" not in document["entries"][0]["aliases"]
+    assert document["entries"][0]["learned"]["held_aliases"] == ["кодекс"]
+    segments, _ = apply_glossary([Segment(0, 1, "Уголовный кодекс РФ запрещает это")], entries_of(document))
+    assert segments[0].text == "Уголовный кодекс РФ запрещает это"
+    assert entries[0].auto_apply is True and entries[0].aliases == ("кодэкс",)

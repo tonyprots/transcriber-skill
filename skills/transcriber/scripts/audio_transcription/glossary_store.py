@@ -469,7 +469,14 @@ def learn(
             report.added.append(canonical)
         else:
             learned = entry.setdefault("learned", {})
-            dropped = {normalize_text(str(item)) for item in learned.get("pruned_aliases", [])}
+            # Отложенное не возвращается подкреплением: блок обычных слов
+            # считается по тексту с автозаменами, и вернувшийся вариант в нём
+            # уже не появился бы — «кодекс» у Codex отложился бы ровно на один
+            # прогон. Вернуть вариант в замену может только человек.
+            dropped = {
+                normalize_text(str(item))
+                for item in (*learned.get("pruned_aliases", []), *learned.get("held_aliases", []))
+            }
             for alias in aliases:
                 if normalize_text(alias) in dropped:
                     continue
