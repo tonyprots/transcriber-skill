@@ -204,3 +204,35 @@ def test_fillers_that_readable_drops_are_fillers_in_the_queue_too() -> None:
         ("uhh we did it", "we did it"),
     ):
         assert kinds(left, right) == ["filler"], (left, right)
+
+
+def test_units_and_letters_are_dropped_only_next_to_a_number() -> None:
+    """«рублей / долларов» и «А / Б» — не «то же число записано иначе».
+
+    Единица и отдельная буква выбрасывались из сравнения всегда, и такие места
+    сворачивались в мелочь с подписью про числа.
+    """
+    for left, right in (
+        ("цена 100 долларов", "цена 100 рублей"),
+        ("выросло на 5 процентов", "выросло на 5 рублей"),
+        ("вариант А", "вариант Б"),
+        ("plan A", "plan B"),
+        ("пошли в магазин", "пошли к магазину"),
+        ("я сказал", "сказал"),
+        ("S-O-U-R-C-E", "X Y Z"),
+    ):
+        assert "equivalent" not in kinds(left, right), (left, right)
+
+
+def test_same_number_and_spelled_letters_stay_equivalent() -> None:
+    for left, right in (
+        ("95%", "ninety five percent"),
+        ("на 5%", "на 5 процентов"),
+        ("n 95", "95"),
+        ("S-O-U-R-C-E", "S O U R C E"),
+        ("и-и-и", "и"),
+        ("Да-а, точно", "Да, точно"),
+    ):
+        assert kinds(left, right) == ["equivalent"], (left, right)
+    # Протянутый звук через дефис — паразит, а не «то же число».
+    assert kinds("Он, э-э, пришёл", "Он пришёл") == ["filler"]
