@@ -623,6 +623,7 @@ def run_route_backend(
             on_progress=report.windows(
                 f"GigaAM {spec.model}" if spec.family == "gigaam" else spec.model
             ),
+            label=spec.model,
         )
     else:
         raise ValueError(f"Неизвестное семейство ASR: {spec.family}")

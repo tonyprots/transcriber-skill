@@ -201,12 +201,19 @@ def run_isolated_backend(
     config: dict[str, Any],
     stall_timeout_seconds: float,
     on_progress: Callable[[dict[str, Any]], None] | None = None,
+    label: str | None = None,
 ) -> Hypothesis:
-    """Запускает один ASR-бэкенд в дочернем процессе с watchdog по прогрессу."""
+    """Запускает один ASR-бэкенд в дочернем процессе с watchdog по прогрессу.
+
+    `label` — как называть модель в сообщениях сторожа и в имени каталога
+    задания: один воркер `gigaam` поднимает и GigaAM, и Vosk, и Parakeet.
+    """
+    # Слэш из имени репозитория увёл бы каталог задания вглубь work_dir.
+    label = (label or backend).replace("/", "-")
     try:
         payload = _run_worker(
             "audio_transcription.worker",
-            backend,
+            label,
             {
                 "schema": 1,
                 "backend": backend,
@@ -221,7 +228,7 @@ def run_isolated_backend(
         return Hypothesis.from_dict(payload)
     except (KeyError, TypeError, ValueError) as error:
         raise BackendUnavailable(
-            f"Изолированный {backend} не вернул корректный результат: {error}"
+            f"Изолированный {label} не вернул корректный результат: {error}"
         ) from error
 
 
