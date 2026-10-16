@@ -168,7 +168,8 @@ def run(args: argparse.Namespace) -> int:
     out = output_dir_for(wav, args.output_root)
     early = early_text_path(out)
     marker = running_marker_path(out)
-    deadline = time.monotonic() + args.timeout
+    started = time.monotonic()
+    deadline = started + args.timeout
     if marker.exists() and not marker_alive(marker):
         marker.unlink()  # след упавшего прогона
     job: subprocess.Popen | None = None
@@ -184,6 +185,10 @@ def run(args: argparse.Namespace) -> int:
             if job.poll() is not None:
                 if (full if args.full else early).exists():
                     return report(wav, out, waited_for, clipboard=True)
+                if args.full and early.exists():
+                    # Свой прогон умер после основной модели: текст этой
+                    # попытки есть, как и в ветке без своего прогона ниже.
+                    return report(wav, out, "полный набор не досчитан, только текст", clipboard=True)
                 break
         elif marker_alive(marker):
             waited_for = "дождался прогона наблюдателя"
@@ -205,7 +210,8 @@ def run(args: argparse.Namespace) -> int:
 
     log = run_log(out)
     tail = log.read_text(encoding="utf-8").strip().splitlines()[-5:] if log.exists() else []
-    print(f"Текста нет за {args.timeout:.0f} с: {out}", file=sys.stderr)
+    # Свой прогон мог умереть сразу: время ожидания — фактическое, а не --timeout.
+    print(f"Текста нет за {time.monotonic() - started:.0f} с: {out}", file=sys.stderr)
     for line in tail:
         print(f"  {line}", file=sys.stderr)
     return 1
