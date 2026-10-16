@@ -23,6 +23,7 @@ import tempfile
 import threading
 import time
 import unittest
+import wave
 from pathlib import Path
 from unittest import mock
 
@@ -448,6 +449,29 @@ class PauseMarkFailureTest(_Folder):
         self.check(_disk_full)
 
 
+# Подставной mlx_audio.vad для diarization_worker: Sortformer без весов и MLX.
+# Каждый чанк отмечается в журнале рядом со звуком в момент, когда воркер его
+# попросил.
+SORTFORMER_STUB = """
+from pathlib import Path
+from types import SimpleNamespace
+
+
+class Model:
+    def generate_stream(self, audio_path, **_options):
+        journal = Path(audio_path).with_name("chunks.log")
+        for index in range(1, 4):
+            with journal.open("a", encoding="utf-8") as handle:
+                handle.write(f"chunk-{index}\\n")
+            turn = SimpleNamespace(start=float(index - 1), end=float(index), speaker=index % 2)
+            yield SimpleNamespace(segments=[turn])
+
+
+def load(_name):
+    return Model()
+"""
+
+
 class WorkerPauseTest(_Folder):
     HOLD = (
         "import sys; from pathlib import Path; "
@@ -497,6 +521,54 @@ class WorkerPauseTest(_Folder):
         _, errors = worker.communicate(timeout=60)
         self.assertEqual(worker.returncode, 2)
         self.assertIn("Неизвестный ASR-бэкенд", errors)
+
+    def test_sortformer_worker_stops_after_its_chunk(self) -> None:
+        # Настоящий diarization_worker.py с подставным mlx_audio: модель
+        # отдаёт чанки по одному и отмечает в журнале каждый. После первого
+        # воркер обязан встать на точке паузы, а не просить следующий.
+        stub = self.dir / "stub" / "mlx_audio"
+        stub.mkdir(parents=True)
+        (stub / "__init__.py").write_text("", encoding="utf-8")
+        (stub / "vad.py").write_text(SORTFORMER_STUB, encoding="utf-8")
+        job = self.dir / "job"
+        job.mkdir()
+        audio = job / "prepared.wav"
+        with wave.open(str(audio), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(16000)
+            handle.writeframes(b"\0\0" * 16000)
+        (job / "request.json").write_text(json.dumps({
+            "backend": "sortformer", "audio_path": str(audio),
+            "config": {"model_name": "stub/sortformer", "offline": True},
+        }), encoding="utf-8")
+        (job / "pause").write_text(str(os.getpid()), encoding="utf-8")
+        environment = _environment()
+        environment["PYTHONPATH"] = os.pathsep.join([str(stub.parent), environment["PYTHONPATH"]])
+        worker = subprocess.Popen(
+            [sys.executable, "-m", "audio_transcription.diarization_worker",
+             str(job / "request.json"), str(job / "result.json"), str(job / "progress.json")],
+            env=environment, stderr=subprocess.PIPE, text=True,
+        )
+        self.processes.append(worker)
+        chunks = job / "chunks.log"
+
+        def at_first_chunk() -> bool:
+            try:
+                return json.loads((job / "progress.json").read_text(encoding="utf-8")).get("completed") == 1
+            except (OSError, ValueError):
+                return False
+
+        _wait_for(at_first_chunk, what="воркер отметил первый чанк")
+        time.sleep(0.3)
+        self.assertIsNone(worker.poll(), "на точке паузы воркер стоит")
+        self.assertEqual(chunks.read_text(encoding="utf-8").split(), ["chunk-1"],
+                         "следующий чанк воркер просит только после паузы")
+        (job / "pause").unlink()
+        _, errors = worker.communicate(timeout=60)
+        self.assertEqual(worker.returncode, 0, errors)
+        self.assertEqual(chunks.read_text(encoding="utf-8").split(), ["chunk-1", "chunk-2", "chunk-3"])
+        self.assertEqual(len(json.loads((job / "result.json").read_text(encoding="utf-8"))["turns"]), 3)
 
     def test_empty_pause_is_not_a_pause(self) -> None:
         # Такую метку оставлял сбой записи на полном диске: родитель машину не
