@@ -11,6 +11,7 @@ unittest` гоняет файл и без conftest.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import subprocess
@@ -422,6 +423,21 @@ class PriorityFlagTest(unittest.TestCase):
         args = handy_watch.parse_args(["--python", "py", "--transcribe", "t.py", "--output-root", "out"])
         with mock.patch.object(handy_watch.subprocess, "Popen") as popen:
             handy_watch.transcribe(Path("handy-1.wav"), Path("out/x"), Path("out/x.txt"), args, None)
+        self.assertIn("--priority", popen.call_args.args[0])
+
+    def test_agent_own_run_runs_with_priority(self) -> None:
+        # Наблюдатель запись не взял, и handy_result.py считает её сам: агент
+        # ждёт этот текст сейчас, как ждут текст диктовки.
+        import handy_result
+
+        args = argparse.Namespace(python="py", transcribe="t.py", mode="max", language="ru")
+        with tempfile.TemporaryDirectory() as folder:
+            out = Path(folder) / "2026-10-17-1200-handy-1"
+            with mock.patch.object(handy_result.subprocess, "Popen") as popen, \
+                    mock.patch.object(handy_result, "write_marker"), \
+                    mock.patch.object(handy_result, "run_log", lambda _out: Path(folder) / "run.log"):
+                handy_result.start_own_run(Path("handy-1.wav"), out, args)
+            popen.call_args.kwargs["stdout"].close()
         self.assertIn("--priority", popen.call_args.args[0])
 
 

@@ -145,12 +145,15 @@ def start_own_run(wav: Path, out: Path, args: argparse.Namespace) -> subprocess.
     marker = running_marker_path(out)
     log = run_log(out).open("w", encoding="utf-8")
     # Оболочка снимает метку, когда прогон кончится: мы выходим раньше, на тексте.
+    # `--priority`, как у наблюдателя: этот текст агент ждёт сейчас, и пакет на
+    # машине должен пропустить запись вперёд.
     job = subprocess.Popen(
         [
             "/bin/sh", "-c", '"$@"; rc=$?; rm -f "$0"; exit $rc', str(marker),
             args.python, args.transcribe, str(wav),
             "--mode", args.mode, "--language", args.language,
-            "--output", str(out), "--early-text", str(early_text_path(out)), "--quiet",
+            "--output", str(out), "--early-text", str(early_text_path(out)),
+            "--priority", "--quiet",
         ],
         stdout=log, stderr=subprocess.STDOUT,
         # Своя сессия: прогон досчитывает проверку после нашего выхода.
