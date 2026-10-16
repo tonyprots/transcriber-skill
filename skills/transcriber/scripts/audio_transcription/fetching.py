@@ -270,20 +270,35 @@ def _same_language(track_language: str, wanted: str) -> bool:
     return track_language.lower().split("-")[0] == wanted.lower().split("-")[0]
 
 
-def probe_remote(url: str) -> RemoteMedia:
-    """Что за видео и какие у него субтитры — без единого скачанного байта."""
+def probe_remote(url: str, *, follow_single: bool = True) -> RemoteMedia:
+    """Что за видео и какие у него субтитры — без единого скачанного байта.
+
+    Ссылку на плейлист или канал без `--playlist` не берём: `--no-playlist`
+    без id ролика не действует, и yt-dlp извлекал бы каждый ролик целиком.
+    `--flat-playlist` на одиночный ролик не влияет, а плейлист даёт списком.
+    """
     from . import yandex_music
 
     if yandex_music.track_id(url):
         return yandex_music.probe(url)
     payload = _run_yt_dlp(
-        ["--skip-download", "--dump-single-json", url],
+        ["--skip-download", "--flat-playlist", "--dump-single-json", url],
         failure=f"yt-dlp не открыл ссылку: {public_url(url)}",
     )
     try:
         data = json.loads(payload)
     except json.JSONDecodeError as error:
         raise FetchError(f"yt-dlp вернул не JSON: {error}") from error
+    if data.get("_type") == "playlist":
+        links = _playlist_links(data)
+        # Пост с одним видео — это ролик, а не плейлист: до флага он
+        # расшифровывался, пусть и под названием плейлиста.
+        if follow_single and len(links) == 1 and links[0] != url:
+            return probe_remote(links[0], follow_single=False)
+        raise FetchError(
+            f"Это ссылка на плейлист или канал (роликов: {len(links)}): {public_url(url)}. "
+            "Добавьте --playlist, а чтобы взять часть — ещё --playlist-limit N."
+        )
     extractor = data.get("extractor_key") or data.get("extractor")
     tracks = tuple(
         SubtitleTrack(

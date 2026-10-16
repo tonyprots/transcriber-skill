@@ -609,3 +609,58 @@ def test_nested_playlist_without_entries_is_not_taken_for_a_video(yt_dlp) -> Non
     assert fetching.expand_playlist("https://www.youtube.com/@chan") == [
         "https://www.youtube.com/watch?v=V1"
     ]
+
+
+def test_playlist_link_without_flag_is_refused_with_a_hint(yt_dlp) -> None:
+    """Ссылка на плейлист без `--playlist`: `--no-playlist` без id ролика не
+    действует, и до правки yt-dlp извлекал каждый ролик целиком — у большого
+    плейлиста упор в срок 300 с, у малого расшифровка одного файла под
+    названием плейлиста.
+    """
+    payload = {
+        "_type": "playlist",
+        "title": "Курс",
+        "entries": [{"_type": "url", "url": f"https://www.youtube.com/watch?v={n}"} for n in "abc"],
+    }
+    calls = yt_dlp(stdout=json.dumps(payload))
+    with pytest.raises(fetching.FetchError, match=r"роликов: 3.*--playlist"):
+        fetching.probe_remote("https://www.youtube.com/playlist?list=PL1")
+    assert "--flat-playlist" in calls[0] and "--no-playlist" in calls[0]
+
+
+def test_channel_link_without_flag_counts_videos_not_tabs(yt_dlp) -> None:
+    calls = yt_dlp(stdout=json.dumps(_channel_with_tabs()))
+    with pytest.raises(fetching.FetchError, match=r"роликов: 3.*--playlist"):
+        fetching.probe_remote("https://www.youtube.com/@chan")
+    assert len(calls) == 1
+
+
+def test_single_video_probe_is_flat_safe(yt_dlp) -> None:
+    """`--flat-playlist` на одиночный ролик не влияет: он извлекается целиком."""
+    calls = yt_dlp(stdout=json.dumps({"_type": "video", "title": "Ролик", "duration": 60}))
+    media = fetching.probe_remote("https://www.youtube.com/watch?v=a&list=PL1")
+    assert media.title == "Ролик" and media.duration_seconds == 60
+    assert "--flat-playlist" in calls[0]
+
+
+def test_playlist_of_one_is_its_video(monkeypatch) -> None:
+    """Плейлист из одного ролика (пост с одним видео) раньше расшифровывался —
+    пусть и под названием плейлиста. Отказывать тут незачем: берём сам ролик.
+    """
+    answers = [
+        {"_type": "playlist", "title": "Пост", "entries": [{"_type": "url", "url": "https://vk.com/video-1_2"}]},
+        {"title": "Ролик", "duration": 30, "extractor_key": "VK"},
+    ]
+    calls: list[list[str]] = []
+    monkeypatch.setattr(fetching, "require_yt_dlp", lambda: "yt-dlp")
+    monkeypatch.setattr(fetching, "yt_dlp_status", lambda today=None: {"stale": False})
+
+    def fake_execute(command, **kwargs):
+        calls.append(command)
+        return CompletedProcess(command, 0, json.dumps(answers[len(calls) - 1]), "")
+
+    monkeypatch.setattr(fetching, "_execute", fake_execute)
+    media = fetching.probe_remote("https://vk.com/wall-1_2")
+    assert media.title == "Ролик"
+    assert media.url == "https://vk.com/video-1_2"
+    assert calls[1][-1] == "https://vk.com/video-1_2"
