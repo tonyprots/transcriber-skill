@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from audio_transcription.exiting import exit_after_flush
+from audio_transcription.exiting import run_entry_point
 from audio_transcription.fetching import (
     FetchError,
     expand_playlist,
@@ -273,4 +273,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    exit_after_flush(main())
+    run_entry_point(main)

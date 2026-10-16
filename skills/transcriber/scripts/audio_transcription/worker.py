@@ -9,7 +9,7 @@ from typing import Any
 
 from .backends import BackendMissing, BackendUnavailable, GigaAMBackend, MLXWhisperBackend, WhisperBackend
 from .models import AudioChunk, Hypothesis
-from .exiting import exit_after_flush
+from .exiting import run_entry_point
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -119,4 +119,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    exit_after_flush(main())
+    run_entry_point(main, watch_parent_process=True)

@@ -15,7 +15,7 @@ from .catalog import bundled_binary_problem, fluidaudio_binary_path
 from .diarization import partition_turns
 from .fluid_models import ModelsUnavailable, ensure as ensure_fluid_models, ensure_binary as ensure_fluid_binary
 from .models import Diarization, SpeakerTurn
-from .exiting import exit_after_flush
+from .exiting import run_entry_point
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -248,4 +248,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    exit_after_flush(main())
+    run_entry_point(main, watch_parent_process=True)
