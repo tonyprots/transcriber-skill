@@ -168,7 +168,8 @@ JSON-результате есть `update_available`, вышла новая в�
 лезли в чужие записи; `--no-learn` — только для замеров, в рабочих пачках не
 ставь. Кэш гипотез (`~/.cache/transcriber`) хранит текст записи 90 дней: для
 конфиденциальной записи ставь `--no-cache`, а забыть уже расшифрованную —
-`scripts/manage_cache.py forget ФАЙЛ`. Полный список — `transcribe.py --help`.
+`scripts/manage_cache.py forget ФАЙЛ`; у записи по ссылке файла нет — вместо
+него `source.sha256` из её `manifest.json`. Полный список — `transcribe.py --help`.
 
 ### Диаризация
 

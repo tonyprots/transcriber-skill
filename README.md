@@ -281,8 +281,10 @@ stderr, в stdout только JSON с путём результата.
   (`--cache-max-age-days`, 0 — не убирать);
 - `--no-cache` не читает и не пишет кэш вовсе — для записей, текст которых не
   должен оставаться на диске;
-- `scripts/manage_cache.py stats | prune --older-than 30 | forget <файл> | clear`
+- `scripts/manage_cache.py stats | prune --older-than 30 | forget <файл|sha256> | clear`
   — ручное управление: размер, уборка по сроку, забыть одну запись, очистить.
+  У записи по ссылке файла нет: `forget` принимает `source.sha256` из её
+  `manifest.json`.
 
 В `manifest.json` адрес источника пишется без логина, пароля, якоря и
 параметров запроса, кроме нужных самой ссылке (`v` и `list` у YouTube, `z` у

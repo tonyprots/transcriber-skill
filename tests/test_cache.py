@@ -166,3 +166,26 @@ def test_manage_cache_script_reports_and_forgets(tmp_path, capsys) -> None:
     assert module.main(["--cache-dir", str(cache_dir), "forget", str(recording)]) == 0
     assert "записей 1" in capsys.readouterr().out
     assert cache.cache_stats(cache_dir)["files"] == 0
+
+
+def test_manage_cache_forgets_link_record_by_manifest_sha256(tmp_path, capsys) -> None:
+    # У записи по ссылке файла нет: SKILL.md велит взять `source.sha256` из
+    # manifest.json. Регистр не важен, фрагменты записи уходят вместе с ней.
+    import importlib.util
+    from pathlib import Path
+
+    from audio_transcription import cache
+
+    script = Path(__file__).resolve().parents[1] / "skills" / "transcriber" / "scripts" / "manage_cache.py"
+    spec = importlib.util.spec_from_file_location("manage_cache", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    sha = "c" * 64
+    cache_dir = tmp_path / "cache"
+    cache.save_hypothesis(cache_dir, "whole", _hypothesis(), sha)
+    cache.save_hypothesis(cache_dir, "part", _hypothesis(), f"{sha}@10.000-20.000")
+    cache.save_hypothesis(cache_dir, "other", _hypothesis(), "d" * 64)
+    assert module.main(["--cache-dir", str(cache_dir), "forget", sha.upper()]) == 0
+    assert "записей 2" in capsys.readouterr().out
+    assert cache.cache_stats(cache_dir)["files"] == 1
