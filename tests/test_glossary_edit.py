@@ -121,6 +121,15 @@ def test_guard_catches_human_mistakes() -> None:
     assert "вариантом у «Астра»" in remember_problem(taken, "астра", "Astra")
 
 
+def test_doubled_letter_is_a_spelling_fix_not_a_case_form() -> None:
+    """«тинькоф → Тинькофф» — ослышка: удвоенная согласная падежом не бывает."""
+    empty: dict = {"entries": []}
+    assert remember_problem(empty, "тинькоф", "Тинькофф") is None
+    assert remember_problem(empty, "грамм", "грам") is None
+    assert "падеж" in remember_problem(empty, "Яндекс", "Яндекса")
+    assert "падеж" in remember_problem(empty, "Сбер", "Сбера")
+
+
 def test_named_learned_entry_becomes_hand_and_keeps_only_safe_aliases() -> None:
     document = {
         "entries": [_learned("Threads", ["трэц", "тре"], held_aliases=["трэдс"], pruned_aliases=["трэдс"])],

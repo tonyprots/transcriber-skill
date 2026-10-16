@@ -762,10 +762,14 @@ def _case_forms(heard: str, written: str) -> bool:
 
     Замена литеральная: такая пара сломала бы падеж везде, где сказано
     «Яндексу». Признак — общая основа и разные короткие кириллические хвосты.
+    Удвоенная последняя буква основы — не окончание, а написание: «тинькоф →
+    Тинькофф» исправляет ослышку, падежа в ней нет.
     """
     left, right = heard.casefold(), written.casefold()
     stem = len(os.path.commonprefix([left, right]))
     tails = (left[stem:], right[stem:])
+    if "" in tails and "".join(tails) == left[stem - 1 : stem]:
+        return False
     return stem >= 3 and all(
         len(tail) <= 2 and all(_CYRILLIC_LETTER.fullmatch(char) for char in tail) for tail in tails
     )
