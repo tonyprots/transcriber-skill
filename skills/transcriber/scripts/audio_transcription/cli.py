@@ -933,6 +933,15 @@ def _validate(args: argparse.Namespace) -> None:
         raise ValueError("--early-text пишет один файл и годится только для одной записи")
     if args.glossary_profile:
         profile_path(args.glossary_profile)  # плохое имя — до часа расшифровки, а не после
+    if not args.no_glossary:
+        # Имя из TRANSCRIBER_GLOSSARY_PROFILE и сам --glossary читались только
+        # после VAD и диаризации, а в пачке отказ повторялся на каждой записи.
+        store_path(args.glossary_store, args.glossary_profile, None)
+        if args.glossary:
+            try:
+                load_glossary(args.glossary)
+            except (OSError, ValueError, yaml.YAMLError) as error:
+                raise ValueError(f"--glossary {args.glossary}: {error}") from error
     if not 0 <= args.review_threshold <= 1:
         raise ValueError("--review-threshold должен быть в диапазоне [0, 1]")
     if args.verifier_window_seconds < 0:
