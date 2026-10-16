@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import shutil
 import subprocess
 import sys
@@ -125,3 +127,44 @@ def test_old_early_text_is_not_taken_for_new_one(tmp_path: Path, monkeypatch) ->
     assert handy_watch.run_job(wav, out, 60.0, args).startswith("done")
     assert clipboard == ["новый текст"]
     assert titles == ["Расшифровка готова"]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root может послать сигнал любому процессу")
+def test_marker_of_other_users_process_is_dead(tmp_path: Path) -> None:
+    # pid 1 принадлежит root: os.kill отвечает EPERM. Прогон наблюдателя всегда
+    # свой, так что метку с таким pid оставил процесс, которого уже нет.
+    marker = tmp_path / "x.running"
+    marker.write_text(json.dumps({"pid": 1}), encoding="utf-8")
+    assert not handy_watch.marker_alive(marker)
+
+
+def test_marker_with_reused_pid_is_dead(tmp_path: Path) -> None:
+    marker = tmp_path / "x.running"
+    marker.write_text(
+        json.dumps({"pid": os.getpid(), "started": "Thu Jan  1 00:00:00 1970"}), encoding="utf-8"
+    )
+    assert not handy_watch.marker_alive(marker)
+
+
+def test_marker_written_for_live_process_is_alive(tmp_path: Path) -> None:
+    marker = tmp_path / "x.running"
+    handy_watch.write_marker(marker, os.getpid(), "handy-1790899241.wav")
+    assert json.loads(marker.read_text(encoding="utf-8"))["started"]
+    assert handy_watch.marker_alive(marker)
+
+
+def test_marker_fingerprint_does_not_depend_on_reader_locale(tmp_path: Path, monkeypatch) -> None:
+    # Метку пишет агент launchd без локали, читает handy_result из оболочки
+    # с русской локалью и своим часовым поясом.
+    marker = tmp_path / "x.running"
+    handy_watch.write_marker(marker, os.getpid(), "handy-1790899241.wav")
+    monkeypatch.setenv("LC_ALL", "ru_RU.UTF-8")
+    monkeypatch.setenv("TZ", "Asia/Vladivostok")
+    assert handy_watch.marker_alive(marker)
+
+
+def test_marker_without_fingerprint_still_counts_by_pid(tmp_path: Path) -> None:
+    # Метки, записанные до отпечатка времени запуска.
+    marker = tmp_path / "x.running"
+    marker.write_text(json.dumps({"pid": os.getpid()}), encoding="utf-8")
+    assert handy_watch.marker_alive(marker)

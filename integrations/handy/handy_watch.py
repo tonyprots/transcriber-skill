@@ -127,16 +127,48 @@ def running_marker_path(out: Path) -> Path:
     return out.with_name(f"{out.name}.running")
 
 
-def marker_alive(marker: Path) -> bool:
-    """Метка с живым pid; метка упавшего процесса не считается."""
+def process_started(pid: int) -> str | None:
+    """Время запуска процесса по `ps`, None — узнать не вышло.
+
+    Метку пишет агент launchd без локали, а читает handy_result из оболочки
+    со своей: формат даты и пояс заданы явно, иначе отпечатки не совпадут.
+    """
     try:
-        pid = int(json.loads(marker.read_text(encoding="utf-8"))["pid"])
+        result = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True, text=True, check=False,
+            env={**os.environ, "LC_ALL": "C", "TZ": "UTC"},
+        )
+    except OSError:
+        return None
+    return result.stdout.strip() or None
+
+
+def write_marker(marker: Path, pid: int, wav_name: str) -> None:
+    marker.write_text(
+        json.dumps({"pid": pid, "started": process_started(pid), "wav": wav_name}), encoding="utf-8"
+    )
+
+
+def marker_alive(marker: Path) -> bool:
+    """Метка живого прогона; метка упавшего процесса не считается.
+
+    Убитый по SIGKILL или SIGTERM (выход из сессии, перезагрузка) наблюдатель
+    метку не снимает, а его pid потом достаётся другому процессу. Чужой по
+    пользователю процесс (EPERM) — точно не наш прогон; свой проверяем по
+    времени запуска. Метка без него (до отпечатка) судится по одному pid.
+    """
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+        pid = int(data["pid"])
         os.kill(pid, 0)
-    except (FileNotFoundError, ValueError, KeyError, TypeError, ProcessLookupError):
+    except (FileNotFoundError, ValueError, KeyError, TypeError, ProcessLookupError, PermissionError):
         return False
-    except PermissionError:
+    recorded = data.get("started")
+    if not recorded:
         return True
-    return True
+    current = process_started(pid)
+    return current is None or current == recorded
 
 
 def transcribe(
@@ -188,7 +220,7 @@ def process(wav: Path, args: argparse.Namespace) -> str:
         return f"exists {out.name}"
     args.output_root.mkdir(parents=True, exist_ok=True)
     log(f"{wav.name}: {seconds:.0f} с → {out}")
-    marker.write_text(json.dumps({"pid": os.getpid(), "wav": wav.name}), encoding="utf-8")
+    write_marker(marker, os.getpid(), wav.name)
     try:
         return run_job(wav, out, seconds, args)
     finally:

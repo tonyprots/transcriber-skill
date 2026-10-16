@@ -36,6 +36,7 @@ from handy_watch import (  # noqa: E402
     output_dir_for,
     running_marker_path,
     to_clipboard,
+    write_marker,
 )
 
 PLIST = Path.home() / "Library/LaunchAgents/ru.tonyprots.handy-transcriber.plist"
@@ -155,7 +156,7 @@ def start_own_run(wav: Path, out: Path, args: argparse.Namespace) -> subprocess.
         # Своя сессия: прогон досчитывает проверку после нашего выхода.
         start_new_session=True,
     )
-    marker.write_text(json.dumps({"pid": job.pid, "wav": wav.name}), encoding="utf-8")
+    write_marker(marker, job.pid, wav.name)
     return job
 
 
