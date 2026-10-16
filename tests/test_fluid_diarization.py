@@ -573,3 +573,21 @@ def test_fluidaudio_metadata_names_binary(monkeypatch, tmp_path: Path) -> None:
         tmp_path / "result.json",
     )
     assert result.metadata["binary"] == {"source": "explicit", "sha256": "abcdef012345"}
+
+
+def test_diarization_pipeline_moves_with_worker_command(monkeypatch, tmp_path: Path) -> None:
+    """Сменилась команда бинарника — меняется и `pipeline` ключа кэша.
+
+    0.24 начал передавать `--num-speakers`, а ключ остался прежним: разметка 0.23
+    без подсказки возвращалась из кэша ещё 90 дней. Снимок связывает одно с
+    другим: правка команды без смены `pipeline` ломает этот тест.
+    """
+    from audio_transcription import cli
+
+    commands = _fake_fluid(monkeypatch, tmp_path)
+    diarization_worker._run_fluidaudio(
+        tmp_path / "audio.wav", {"num_speakers": 2}, tmp_path / "progress.json", tmp_path / "result.json"
+    )
+    flags = [part for part in commands[0] if part.startswith("--")]
+    payload = cli.diarization_cache_payload(_diarize_args(tmp_path), "fluidaudio", 0.7, "sha", None)
+    assert (payload["pipeline"], flags) == ("0.6", ["--mode", "--threshold", "--output", "--num-speakers"])

@@ -556,10 +556,13 @@ def diarization_cache_payload(
 
     `binary` — отпечаток fluidaudiocli: своя сборка или новый поставочный
     бинарник дают свою разметку, и под ключом прежнего её не отдать.
+    `pipeline` меняется вместе с командой воркера: 0.6 — FluidAudio получает
+    `--num-speakers` (с 0.24), а разметка 0.23 без подсказки лежала под тем же
+    ключом.
     """
     model, revision = diarization_weights(kind, args.diarization_model)
     return {
-        "pipeline": "0.5",
+        "pipeline": "0.6",
         "source_sha256": source_identity,
         "backend": kind,
         "model": model,
