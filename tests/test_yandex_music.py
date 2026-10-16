@@ -107,3 +107,46 @@ def test_api_shape_failure_suggests_manual_download(monkeypatch) -> None:
     monkeypatch.setattr(yandex_music, "_get", lambda url: b"<html>")
     with pytest.raises(FetchError, match="скачайте выпуск вручную"):
         yandex_music.probe("https://music.yandex.ru/album/1/track/2")
+
+
+class _Response(io.BytesIO):
+    """Ответ сервера: заголовки плюс тело, которое может оборваться."""
+
+    def __init__(self, body: bytes, length: int | None) -> None:
+        super().__init__(body)
+        self.headers = {} if length is None else {"Content-Length": str(length)}
+
+
+def _api_with_file(monkeypatch, response) -> None:
+    def fake_open(url: str):
+        if url.endswith("/download-info"):
+            return io.BytesIO(json.dumps({"result": [
+                {"codec": "mp3", "preview": False, "bitrateInKbps": 64, "downloadInfoUrl": "https://info/2"},
+            ]}).encode())
+        if url.startswith("https://api.music.yandex.net/tracks/"):
+            return io.BytesIO(json.dumps({"result": [TRACK]}).encode())
+        if url.startswith("https://info/"):
+            return io.BytesIO(INFO_XML.encode())
+        return response()
+
+    monkeypatch.setattr(yandex_music, "_open", fake_open)
+
+
+def test_truncated_download_is_an_error_not_a_short_file(monkeypatch, tmp_path: Path) -> None:
+    """Обрыв посреди передачи: `read()` отдаёт b'' без исключения.
+
+    До правки усечённый audio.mp3 уходил в конвейер, и расшифровка молча
+    кончалась на месте обрыва.
+    """
+    _api_with_file(monkeypatch, lambda: _Response(b"ID3-", length=10))
+    with pytest.raises(FetchError, match="не целиком"):
+        fetching.fetch_audio("https://music.yandex.ru/album/1/track/140105021", tmp_path)
+    assert not any(tmp_path.iterdir())
+
+
+def test_complete_download_matches_its_length(monkeypatch, tmp_path: Path) -> None:
+    _api_with_file(monkeypatch, lambda: _Response(b"ID3-audio!", length=10))
+    path = fetching.fetch_audio("https://music.yandex.ru/album/1/track/140105021", tmp_path)
+    assert path == tmp_path / "audio.mp3" and path.read_bytes() == b"ID3-audio!"
+    assert sorted(item.name for item in tmp_path.iterdir()) == ["audio.mp3"]
+
