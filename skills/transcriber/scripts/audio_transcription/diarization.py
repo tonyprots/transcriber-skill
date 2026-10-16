@@ -191,11 +191,24 @@ def split_chunks_by_diarization(
             boundaries.add(min(chunk.end, turn.end))
         ordered = sorted(boundaries)
         raw_intervals = []
+        # Кусок короче min_seconds на смене голосов (перекрытие или пауза в
+        # кадр) отдельным окном не идёт, но и не выбрасывается — иначе его звук
+        # не попал бы ни в одно окно: приклеиваем к предыдущему куску, а в
+        # начале окна — к следующему.
+        carry: float | None = None
         for start, end in zip(ordered, ordered[1:]):
             if end - start < min_seconds:
+                if raw_intervals:
+                    previous_start, _, previous_speakers = raw_intervals[-1]
+                    raw_intervals[-1] = (previous_start, end, previous_speakers)
+                elif carry is None:
+                    carry = start
                 continue
             speakers = _speakers_for_interval(start, end, turns)
-            raw_intervals.append((start, end, speakers))
+            raw_intervals.append((start if carry is None else carry, end, speakers))
+            carry = None
+        if carry is not None:  # окно целиком из коротких кусков: оставляем как есть
+            raw_intervals.append((carry, ordered[-1], _speakers_for_interval(carry, ordered[-1], turns)))
         for start, end, speakers in _fill_unassigned(raw_intervals, turns):
             if (
                 intervals
