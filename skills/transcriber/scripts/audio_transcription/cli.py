@@ -1832,7 +1832,10 @@ def main(argv: list[str] | None = None) -> int:
     except FAILURES as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
         return 2
-    batch = len(args.input) * len(_sections(args)) > 1
+    # Плейлист — пачка и тогда, когда развернулся в один ролик: --output у него
+    # родитель каталогов, а не каталог результата, иначе прошлые ролики канала
+    # уехали бы в архив вместе с ним.
+    batch = args.playlist or len(args.input) * len(_sections(args)) > 1
     update_check.start(offline=args.offline)
     try:
         if not batch:
