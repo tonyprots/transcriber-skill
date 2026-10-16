@@ -80,6 +80,13 @@ _MEASURE_WORDS = {
     "dollars": "$", "dollar": "$", "долларов": "$", "рублей": "₽",
 }
 
+# Порядок числа в любом падеже: «миллиона», «миллиардов», «тысячи».
+_SCALE_STEMS = {
+    "тысяч": "k", "thousand": "k", "миллион": "m", "million": "m",
+    "миллиард": "b", "billion": "b", "триллион": "t", "trillion": "t",
+}
+_SCALE_STEM = re.compile("^(" + "|".join(_SCALE_STEMS) + ")")
+
 # Сколько слов контекста показывать по краям расхождения. Четыре — столько,
 # чтобы понять фразу, и не столько, чтобы снова читать всё окно.
 _CONTEXT_WORDS = 4
@@ -371,6 +378,20 @@ def _equivalent(left: str, right: str, *, near_number: bool = False) -> bool:
     return canonical(left_words) == canonical(right_words)
 
 
+def _number_signature(text: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Числа фрагмента: группы цифр и порядки («миллиона» → m).
+
+    Посимвольно «3,5%» и «35%», «миллиона» и «миллиарда» почти одинаковы, но
+    это разные числа: такое место — слушать, а не «то же слово записано иначе».
+    """
+    scales = []
+    for word in text.split():
+        match = _SCALE_STEM.match(word)
+        if match:
+            scales.append(_SCALE_STEMS[match.group(1)])
+    return tuple(re.findall(r"\d+", text)), tuple(scales)
+
+
 def _content_words(text: str) -> set[str]:
     return {word for word in text.split() if word not in FUNCTION_WORDS}
 
@@ -442,8 +463,11 @@ def disagreements(left: str, right: str) -> list[Disagreement]:
             # there» рядом со словом «there» — это заикание, а не спорное
             # место. Новой информации здесь нет ни с одной стороны.
             kind = "disfluency"
-        elif left_content and right_content and (
-            SequenceMatcher(None, left_content, right_content).ratio() >= _SPELLING_SIMILARITY
+        elif (
+            left_content
+            and right_content
+            and _number_signature(left_content) == _number_signature(right_content)
+            and SequenceMatcher(None, left_content, right_content).ratio() >= _SPELLING_SIMILARITY
         ):
             kind = "spelling"
         else:

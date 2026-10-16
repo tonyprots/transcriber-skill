@@ -236,3 +236,27 @@ def test_same_number_and_spelled_letters_stay_equivalent() -> None:
         assert kinds(left, right) == ["equivalent"], (left, right)
     # Протянутый звук через дефис — паразит, а не «то же число».
     assert kinds("Он, э-э, пришёл", "Он пришёл") == ["filler"]
+
+
+def test_different_numbers_are_not_a_spelling_difference() -> None:
+    """«3,5% / 35%» и «миллиона / миллиарда» — не «слушать нечего».
+
+    Посимвольно такие пары похожи, и они уходили в «То же слово записано
+    иначе», где отчёт прямо говорит, что слушать нечего.
+    """
+    for left, right in (
+        ("выросли на 3,5% за год", "выросли на 35% за год"),
+        ("это 3 миллиона", "это 3 миллиарда"),
+        ("около 2,5 процента", "около 25 процентов"),
+        ("в 2021 году", "в 2012 году"),
+    ):
+        assert kinds(left, right) == ["substantive"], (left, right)
+
+
+def test_same_number_in_a_term_is_still_a_spelling_difference() -> None:
+    for left, right in (
+        ("мы пишем в Airtable", "мы пишем в Air Table"),
+        ("модель GPT-4 вышла", "модель GPT4 вышла"),
+        ("сегмент B2B растёт", "сегмент B2 B растёт"),
+    ):
+        assert kinds(left, right) == ["spelling"], (left, right)
