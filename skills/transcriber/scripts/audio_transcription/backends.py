@@ -187,6 +187,21 @@ def _confidence(item: Any) -> float | None:
     return None
 
 
+def _segment_metrics(phrase: Any) -> dict[str, Any]:
+    """Признаки декодирования фразы Whisper — в raw.json, на текст не влияют.
+
+    `temperature` — с какой попытки фраза принята: 0 — с первой, 0,2–0,8 —
+    после повторов по порогам logprob и сжатия. Без неё вопрос о температурных
+    повторах не решить дёшево: удачные повторы в кэше не видны.
+    """
+    return {
+        "avg_logprob": _value(phrase, "avg_logprob"),
+        "compression_ratio": _value(phrase, "compression_ratio"),
+        "no_speech_prob": _value(phrase, "no_speech_prob"),
+        "temperature": _value(phrase, "temperature"),
+    }
+
+
 def _segments(items: Iterable[Any]) -> list[Segment]:
     result: list[Segment] = []
     for item in items:
@@ -366,10 +381,12 @@ class WhisperBackend:
                 text_parts: list[str] = []
                 words_meta: list[dict[str, Any]] = []
                 confidences: list[float] = []
+                segment_metrics: list[dict[str, Any]] = []
                 for phrase in raw_segments:
                     phrase_text = str(getattr(phrase, "text", "")).strip()
                     if phrase_text:
                         text_parts.append(phrase_text)
+                    segment_metrics.append(_segment_metrics(phrase))
                     for word in getattr(phrase, "words", None) or []:
                         word_text = str(getattr(word, "word", "")).strip()
                         if not word_text:
@@ -388,6 +405,7 @@ class WhisperBackend:
                 return {
                     "text": " ".join(text_parts).strip(),
                     "words": words_meta,
+                    "segment_metrics": segment_metrics,
                     "confidence": (
                         sum(confidences) / len(confidences) if confidences else None
                     ),
@@ -566,13 +584,7 @@ class MLXWhisperBackend:
                                 "confidence": confidence,
                             }
                         )
-                    segment_metrics.append(
-                        {
-                            "avg_logprob": _value(phrase, "avg_logprob"),
-                            "compression_ratio": _value(phrase, "compression_ratio"),
-                            "no_speech_prob": _value(phrase, "no_speech_prob"),
-                        }
-                    )
+                    segment_metrics.append(_segment_metrics(phrase))
                 return {
                     "text": text,
                     "words": words_meta,

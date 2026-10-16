@@ -213,3 +213,60 @@ def test_workers_do_not_inherit_forced_offline(monkeypatch, tmp_path: Path) -> N
     with pytest.raises(backends.BackendUnavailable):
         isolated._run_worker("x", "x", {}, tmp_path, stall_timeout_seconds=1.0)
     assert captured[1]["HF_HUB_OFFLINE"] == "1"
+
+
+def _prepared(tmp_path: Path) -> Path:
+    import wave
+
+    prepared = tmp_path / "prepared.wav"
+    with wave.open(str(prepared), "wb") as target:
+        target.setnchannels(1)
+        target.setsampwidth(2)
+        target.setframerate(16_000)
+        target.writeframes(b"\0\0" * 32_000)
+    return prepared
+
+
+def test_mlx_whisper_keeps_decoding_temperature(monkeypatch, tmp_path: Path) -> None:
+    """Температура удачной попытки декодирования — рядом с avg_logprob в raw.json.
+
+    Без неё не видно, сколько окон Whisper вытянул повтором на 0,2–0,8.
+    """
+    answer = {
+        "text": "привет",
+        "language": "ru",
+        "segments": [
+            {"words": [], "avg_logprob": -0.2, "compression_ratio": 1.1, "no_speech_prob": 0.01, "temperature": 0.4}
+        ],
+    }
+    monkeypatch.setitem(
+        sys.modules, "mlx_audio.stt.generate", SimpleNamespace(generate_transcription=lambda **_kwargs: answer)
+    )
+    monkeypatch.setitem(sys.modules, "mlx_audio.stt.utils", SimpleNamespace(load_model=lambda _path: object()))
+    monkeypatch.setattr(backends, "weights_for", lambda model, quantization=None: None)
+    hypothesis = backends.MLXWhisperBackend().transcribe_chunks([AudioChunk(0, _prepared(tmp_path), 0.0, 1.0)], "ru")
+    assert hypothesis.text == "привет"
+    assert hypothesis.metadata["chunks"][0]["segment_metrics"] == [
+        {"avg_logprob": -0.2, "compression_ratio": 1.1, "no_speech_prob": 0.01, "temperature": 0.4}
+    ]
+
+
+def test_faster_whisper_keeps_segment_metrics(monkeypatch, tmp_path: Path) -> None:
+    phrase = SimpleNamespace(
+        text="привет", words=[], avg_logprob=-0.3, compression_ratio=1.2, no_speech_prob=0.02, temperature=0.2
+    )
+
+    class FakeWhisper:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def transcribe(self, *_args, **_kwargs):
+            return [phrase], SimpleNamespace(language="ru")
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=FakeWhisper))
+    monkeypatch.setattr(backends, "weights_for", lambda model, quantization=None: None)
+    hypothesis = backends.WhisperBackend().transcribe_chunks([AudioChunk(0, _prepared(tmp_path), 0.0, 1.0)], "ru")
+    assert hypothesis.text == "привет"
+    assert hypothesis.metadata["chunks"][0]["segment_metrics"] == [
+        {"avg_logprob": -0.3, "compression_ratio": 1.2, "no_speech_prob": 0.02, "temperature": 0.2}
+    ]
