@@ -69,3 +69,59 @@ def test_failed_notification_is_logged(monkeypatch) -> None:
     monkeypatch.setattr(handy_watch, "log", logged.append)
     handy_watch.notify(TITLE, MESSAGE)
     assert any("ошибка -2741" in line for line in logged)
+
+
+FAILS_WITHOUT_TEXT = """
+import sys, time
+time.sleep(0.5)
+sys.exit(1)
+"""
+
+WRITES_NEW_TEXT = """
+import sys, time, pathlib
+args = sys.argv[1:]
+out = pathlib.Path(args[args.index("--output") + 1])
+early = pathlib.Path(args[args.index("--early-text") + 1])
+time.sleep(0.3)
+temporary = early.with_name(f".{early.name}.tmp")
+temporary.write_text("новый текст\\n", encoding="utf-8")
+temporary.replace(early)
+time.sleep(0.3)
+out.mkdir()
+(out / "readable.md").write_text("полный", encoding="utf-8")
+"""
+
+
+def stale_job(tmp_path: Path, monkeypatch, script: str):
+    """Повтор записи, после прошлой попытки которой остался ранний текст."""
+    fake = tmp_path / "fake_transcribe.py"
+    fake.write_text(script, encoding="utf-8")
+    wav = tmp_path / "handy-1790899241.wav"
+    out = handy_watch.output_dir_for(wav, tmp_path / "inbox")
+    out.parent.mkdir()
+    handy_watch.early_text_path(out).write_text("текст прошлой попытки\n", encoding="utf-8")
+    titles: list[str] = []
+    clipboard: list[str] = []
+    monkeypatch.setattr(handy_watch, "notify", lambda title, message: titles.append(title))
+    monkeypatch.setattr(handy_watch, "to_clipboard", clipboard.append)
+    monkeypatch.setattr(handy_watch, "from_clipboard", lambda: clipboard[-1] if clipboard else "")
+    monkeypatch.setattr(handy_watch, "log", lambda message: None)
+    args = handy_watch.parse_args([
+        "--python", sys.executable, "--transcribe", str(fake), "--output-root", str(out.parent),
+    ])
+    return wav, out, args, titles, clipboard
+
+
+def test_failed_retry_with_old_early_text_reports_failure(tmp_path: Path, monkeypatch) -> None:
+    wav, out, args, titles, clipboard = stale_job(tmp_path, monkeypatch, FAILS_WITHOUT_TEXT)
+    assert handy_watch.run_job(wav, out, 60.0, args) == "failed rc=1"
+    assert "Расшифровка готова" not in titles
+    assert "Handy → transcriber" in titles
+    assert clipboard == []
+
+
+def test_old_early_text_is_not_taken_for_new_one(tmp_path: Path, monkeypatch) -> None:
+    wav, out, args, titles, clipboard = stale_job(tmp_path, monkeypatch, WRITES_NEW_TEXT)
+    assert handy_watch.run_job(wav, out, 60.0, args).startswith("done")
+    assert clipboard == ["новый текст"]
+    assert titles == ["Расшифровка готова"]

@@ -152,13 +152,27 @@ def transcribe(
     return subprocess.Popen(command, stdout=sink, stderr=subprocess.STDOUT)
 
 
-def wait_for_text(process: subprocess.Popen, early: Path) -> bool:
-    """Ждём текст основной модели или конец прогона, смотря что раньше."""
+def text_version(early: Path) -> tuple[int, int] | None:
+    """Отпечаток файла текста: transcriber подменяет его целиком (новый inode)."""
+    try:
+        stat = early.stat()
+    except FileNotFoundError:
+        return None
+    return stat.st_ino, stat.st_mtime_ns
+
+
+def wait_for_text(process: subprocess.Popen, early: Path, before: tuple[int, int] | None = None) -> bool:
+    """Ждём текст основной модели или конец прогона, смотря что раньше.
+
+    Файл с отпечатком `before` остался от прошлой попытки и текстом этой не
+    считается: иначе повтор упавшей записи сразу сообщал «готово за 0 с»,
+    а о новом сбое молчал.
+    """
     while process.poll() is None:
-        if early.exists():
+        if text_version(early) not in (None, before):
             return True
         time.sleep(0.5)
-    return early.exists()
+    return text_version(early) not in (None, before)
 
 
 def process(wav: Path, args: argparse.Namespace) -> str:
@@ -185,9 +199,11 @@ def run_job(wav: Path, out: Path, seconds: float, args: argparse.Namespace) -> s
     started = time.monotonic()
     early = early_text_path(out)
     pasted = None
+    before = text_version(early)
     with tempfile.TemporaryFile() as sink:
         job = transcribe(wav, out, early, args, sink)
-        if wait_for_text(job, early):
+        fresh = wait_for_text(job, early, before)
+        if fresh:
             text_ready = time.monotonic() - started
             if args.clipboard:
                 pasted = early.read_text(encoding="utf-8").strip()
@@ -204,7 +220,7 @@ def run_job(wav: Path, out: Path, seconds: float, args: argparse.Namespace) -> s
             sink.seek(0)
             tail = sink.read().decode("utf-8", "replace").strip().splitlines()[-5:]
             log(f"{wav.name}: ошибка rc={job.returncode}: " + " | ".join(tail))
-            if not early.exists():
+            if not fresh:
                 notify("Handy → transcriber", f"Не вышло расшифровать {wav.name}, подробности в логе")
             return f"failed rc={job.returncode}"
     log(f"{wav.name}: проверка и словарь готовы за {elapsed:.0f} с")
