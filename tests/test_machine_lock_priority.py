@@ -12,6 +12,9 @@ unittest` гоняет файл и без conftest.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import errno
+import io
 import json
 import os
 import subprocess
@@ -348,6 +351,103 @@ class WatchdogTest(_Folder):
         self.assertFalse((self.dir / "pause").exists())
 
 
+def _denied(real_open, path, mode, *args, **kwargs):
+    raise PermissionError(errno.EACCES, "Permission denied", str(path))
+
+
+def _disk_full(real_open, path, mode, *args, **kwargs):
+    """Как на полном диске: файл создан, а запись в него падает."""
+    handle = real_open(path, mode, *args, **kwargs)
+
+    class Full:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc) -> None:
+            handle.close()
+
+        def write(self, _data):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        def close(self) -> None:
+            handle.close()
+
+    return Full()
+
+
+class PauseMarkFailureTest(_Folder):
+    """Метку паузы записать не вышло: машину не отдаём, watchdog работает.
+
+    Ревью `--priority`: при сбое записи родитель крутился вхолостую с
+    обнулённым на каждом шаге отсчётом watchdog, а полный диск оставлял
+    пустой `pause`, на котором воркер стоял, хотя машину никто не отдавал.
+    """
+
+    def wait_with_broken_pause(self, write) -> tuple[bool, list[str], str]:
+        from audio_transcription import isolated
+
+        clock = [0.0]
+        given: list[str] = []
+
+        class Process:
+            returncode = None
+            polls = 0
+
+            def poll(self):
+                # Предохранитель: холостой цикл кончается «успехом», который
+                # тест и ловит, а не висит вечно.
+                self.polls += 1
+                if self.returncode is None and self.polls > 1000:
+                    self.returncode = 0
+                return self.returncode
+
+            def terminate(self) -> None:
+                self.returncode = -15
+
+            def kill(self) -> None:
+                self.returncode = -9
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        real_open = Path.open
+
+        def broken_open(path, mode="r", *args, **kwargs):
+            if "w" not in mode:
+                return real_open(path, mode, *args, **kwargs)
+            return write(real_open, path, mode, *args, **kwargs)
+
+        def give_way() -> float:
+            given.append("give_way")
+            return 0.0
+
+        errors = io.StringIO()
+        # Голосовое ждёт всё время, прогресса нет: воркер и правда завис.
+        with mock.patch.object(isolated.time, "monotonic", lambda: clock[0]), \
+                mock.patch.object(isolated.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)), \
+                mock.patch.object(isolated.machine_lock, "priority_waiting", lambda: True), \
+                mock.patch.object(isolated.machine_lock, "give_way", give_way), \
+                mock.patch.object(Path, "open", broken_open), \
+                contextlib.redirect_stderr(errors):
+            done = isolated.wait_for_progress(Process(), self.dir / "progress.json",
+                                              stall_timeout_seconds=1.0, poll_seconds=0.1)
+        return done, given, errors.getvalue()
+
+    def check(self, write) -> None:
+        done, given, errors = self.wait_with_broken_pause(write)
+        self.assertFalse(done, "watchdog выключен, пока голосовое ждёт, а метки нет")
+        self.assertEqual(given, [], "воркер не встал — машину отдавать нельзя")
+        self.assertEqual(errors.count("Внимание"), 1, errors)
+        self.assertEqual(sorted(path.name for path in self.dir.iterdir()), [],
+                         "ни метки паузы, ни временного файла")
+
+    def test_unwritable_pause_keeps_the_machine_and_the_watchdog(self) -> None:
+        self.check(_denied)
+
+    def test_full_disk_leaves_no_empty_pause(self) -> None:
+        self.check(_disk_full)
+
+
 class WorkerPauseTest(_Folder):
     HOLD = (
         "import sys; from pathlib import Path; "
@@ -356,7 +456,7 @@ class WorkerPauseTest(_Folder):
         "hold_while_paused(Path(sys.argv[1]), poll_seconds=0.01); print('resumed')"
     )
 
-    def run_hold(self, owner: int) -> subprocess.Popen:
+    def run_hold(self, owner: int | str) -> subprocess.Popen:
         progress = self.dir / "progress.json"
         (self.dir / "pause").write_text(str(owner), encoding="utf-8")
         process = subprocess.Popen(
@@ -397,6 +497,14 @@ class WorkerPauseTest(_Folder):
         _, errors = worker.communicate(timeout=60)
         self.assertEqual(worker.returncode, 2)
         self.assertIn("Неизвестный ASR-бэкенд", errors)
+
+    def test_empty_pause_is_not_a_pause(self) -> None:
+        # Такую метку оставлял сбой записи на полном диске: родитель машину не
+        # отдавал, а воркер стоял на ней до конца ожидания.
+        worker = self.run_hold("")
+        output, _ = worker.communicate(timeout=30)
+        self.assertEqual(worker.returncode, 0)
+        self.assertIn("resumed", output)
 
     def test_orphaned_worker_exits_instead_of_waiting_forever(self) -> None:
         # В метке чужой pid — так видит её воркер, чей родитель умер.

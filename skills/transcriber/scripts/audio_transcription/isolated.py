@@ -63,13 +63,18 @@ def wait_for_progress(
     last_progress = time.monotonic()
     signature = _progress_signature(progress_path)
     activity = _activity_signature(activity_paths)
+    may_pause = True
     while process.poll() is None:
-        if machine_lock.priority_waiting():
-            _pause_and_give_way(progress_path)
-            # Простой на голосовом — не зависание: отсчёт watchdog с нуля.
-            last_progress = time.monotonic()
-            activity = _activity_signature(activity_paths)
-            continue
+        if may_pause and machine_lock.priority_waiting():
+            if _pause_and_give_way(progress_path):
+                # Простой на голосовом — не зависание: отсчёт watchdog с нуля.
+                last_progress = time.monotonic()
+                activity = _activity_signature(activity_paths)
+                continue
+            # Метку паузы не записать: воркер не встанет, машина остаётся у
+            # нас до конца этого шага. Watchdog считает как обычно — раньше
+            # здесь был холостой цикл, обнулявший отсчёт на каждом обороте.
+            may_pause = False
         current = _progress_signature(progress_path)
         current_activity = _activity_signature(activity_paths)
         if current_activity != activity:
@@ -98,7 +103,7 @@ def wait_for_progress(
 PAUSE_NAME = "pause"
 
 
-def _pause_and_give_way(progress_path: Path) -> None:
+def _pause_and_give_way(progress_path: Path) -> bool:
     """Голосовое ждёт машину: воркер встаёт после текущего окна, машина уходит
     голосовому и возвращается, когда оно закончит.
 
@@ -106,32 +111,60 @@ def _pause_and_give_way(progress_path: Path) -> None:
     который грузит или качает модель, пришлось бы минутами. Модель остаётся
     в памяти, ядра свободны. Воркер без точек паузы (бинарник FluidAudio)
     досчитывает рядом с голосовым — как до общей очереди.
+
+    False — метку паузы записать не вышло: воркер не встанет, и машину не
+    отдаём, голосовое ждёт, как до приоритета.
     """
     pause = progress_path.with_name(PAUSE_NAME)
     try:
-        pause.write_text(str(os.getpid()), encoding="utf-8")
-    except OSError:
-        return  # воркер не встанет — машину не отдаём; голосовое ждёт как раньше
+        _post_pause(pause)
+    except OSError as error:
+        print(
+            f"Внимание: метку паузы воркера не записать ({error}) — голосовому "
+            "машину не отдаю, оно подождёт конца этого шага",
+            file=sys.stderr, flush=True,
+        )
+        return False
     try:
         machine_lock.give_way()
     finally:
         pause.unlink(missing_ok=True)
+    return True
+
+
+def _post_pause(pause: Path) -> None:
+    """Метка паузы атомарно — временный файл и `os.replace`, как `priority.wait`.
+
+    Прямая запись на полном диске создавала файл, падала на записи и
+    оставляла пустой `pause`, на котором воркер стоял, хотя машину никто не
+    отдавал. Сбой — OSError, и ни метки, ни временного файла не остаётся.
+    """
+    temporary = pause.with_name(f".{pause.name}.{os.getpid()}")
+    try:
+        temporary.write_text(str(os.getpid()), encoding="utf-8")
+        os.replace(temporary, pause)
+    except OSError:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def hold_while_paused(progress_path: Path, *, poll_seconds: float = 0.5) -> None:
     """Сторона воркера: между окнами стоять, пока родитель отдал машину.
 
     Родитель умер — ждать некого: выходим сразу, иначе сирота держал бы
-    гигабайты весов вечно.
+    гигабайты весов вечно. Пустая или нечитаемая метка — не пауза: родитель
+    пишет её атомарно, и такую оставил бы только сбой, после которого он
+    машину не отдаёт.
     """
     pause = progress_path.with_name(PAUSE_NAME)
     while True:
         try:
             parent = int(pause.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return
         except (OSError, ValueError):
-            parent = os.getppid()  # метку как раз пишут — перечитаем на следующем шаге
+            return
         if os.getppid() != parent:
             os._exit(2)
         time.sleep(poll_seconds)
