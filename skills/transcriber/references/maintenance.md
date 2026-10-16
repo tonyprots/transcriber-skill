@@ -58,6 +58,9 @@
 
 - `pytest` и `ruff check skills tests` (то же делает CI на Linux и macOS);
 - `pytest -m slow` на Apple Silicon со скачанными весами — CI его не гоняет;
+  в него входит `tests/test_offline_clean_machine.py`: чистый HOME, prefetch
+  `ru --diarize` (единственный шаг с сетью, около 35 МБ) и прогон
+  `--diarize --offline` под `sandbox-exec` без сети;
 - версии в `pyproject.toml`, `audio_transcription/__init__.py` и `SKILL.md`
   совпадают (это проверяет `tests/test_docs_consistency.py`).
 
