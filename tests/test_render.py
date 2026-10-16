@@ -217,3 +217,57 @@ def test_rest_of_a_long_queue_is_named_by_minutes(tmp_path: Path) -> None:
     ]
     review = (_bundle(tmp_path, items) / "review-needed.md").read_text(encoding="utf-8")
     assert "Ещё 4 — в `segments.json` → `review_items`. Они на минутах: 2, 4, 61–62." in review
+
+
+def test_same_pair_is_one_line_with_every_timestamp() -> None:
+    """Повтор уже показанной пары тратил лимит в 25 строк: в подсказках — 45 % строк."""
+    from audio_transcription.models import ReviewItem
+    from audio_transcription.render import _review_markdown
+
+    def item(start: float, left: str, right: str, weight: int = 1, kind: str = "substantive"):
+        return ReviewItem(
+            start, start + 1, f"контекст {start:g}", "", 0.5, (f"{left} / {right}",), "r",
+            weight, kind, left, right,
+        )
+
+    items = [
+        item(10.0, "Сбор", "Сбер"),
+        item(70.0, "сбор", "Сбер,"),
+        item(130.0, "Сбор.", "сбер"),
+        item(40.0, "один", "два", weight=3),
+        item(50.0, "Постгрес", "Postgres", kind="spelling"),
+        item(90.0, "постгрес", "Postgres", kind="spelling"),
+    ]
+    suggestions = [
+        {"start": 5.0, "heard": "постгрес", "canonical": "PostgreSQL", "similarity": 0.9},
+        {"start": 95.0, "heard": "Постгрес", "canonical": "PostgreSQL", "similarity": 0.9},
+    ]
+    text = _review_markdown(items, suggestions)
+    lines = [line for line in text.splitlines() if line.startswith("- [")]
+    assert lines == [
+        "- [00:00:40.000] один / два — в контексте: контекст 40",
+        "- [00:00:10.000], [00:01:10.000], [00:02:10.000] Сбор / Сбер (×3) — в контексте: контекст 10",
+        "- [00:00:50.000], [00:01:30.000] Постгрес / Postgres (×2) — в контексте: контекст 50",
+        "- [00:00:05.000], [00:01:35.000] «постгрес» → «PostgreSQL» (сходство 90.0%) (×2)",
+    ]
+    # Заголовок считает места, а не строки.
+    assert "## Слушать — 4" in text
+    assert "## То же слово записано иначе — 2" in text
+
+
+def test_folded_places_count_against_the_limit_by_lines() -> None:
+    from audio_transcription.models import ReviewItem
+    from audio_transcription.render import REVIEW_SECTION_LIMIT, _review_markdown
+
+    repeated = [
+        ReviewItem(float(i), float(i) + 1, "к", "", 0.5, ("да / нет",), "r", 2, "substantive", "да", "нет")
+        for i in range(10)
+    ]
+    single = [
+        ReviewItem(100.0 + i, 101.0 + i, "к", "", 0.5, (f"а{i} / б{i}",), "r", 1, "substantive", f"а{i}", f"б{i}")
+        for i in range(REVIEW_SECTION_LIMIT)
+    ]
+    text = _review_markdown(repeated + single, [])
+    assert text.count("- [") == REVIEW_SECTION_LIMIT
+    assert f"## Слушать — {10 + REVIEW_SECTION_LIMIT}, здесь первые {10 + REVIEW_SECTION_LIMIT - 1}" in text
+    assert "Ещё 1 — в `segments.json` → `review_items`." in text

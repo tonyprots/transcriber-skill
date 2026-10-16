@@ -11,7 +11,7 @@ from typing import Any
 
 from .audio import SAMPLE_RATE, MediaToolError
 from .models import Correction, Diarization, Hypothesis, MediaInfo, ReviewItem, Section, Segment
-from .reconcile import MINOR_KINDS
+from .reconcile import MINOR_KINDS, normalize_text
 
 
 def format_timestamp(seconds: float, *, srt: bool = False) -> str:
@@ -112,11 +112,42 @@ def _vtt(segments: list[Segment], names: SpeakerNames | None = None) -> str:
 REVIEW_SECTION_LIMIT = 25
 
 
-def _limited(items: list[ReviewItem], heading: str) -> tuple[list[ReviewItem], str]:
-    shown = items[:REVIEW_SECTION_LIMIT]
-    if len(items) == len(shown):
-        return shown, f"## {heading} — {len(items)}"
-    return shown, f"## {heading} — {len(items)}, здесь первые {len(shown)}"
+def _pair_key(item: ReviewItem) -> tuple[str, ...] | None:
+    if item.primary_span or item.verifier_span:
+        key = (normalize_text(item.primary_span), normalize_text(item.verifier_span))
+    else:
+        key = tuple(normalize_text(token) for token in item.differing_tokens)
+    # Место без пары («низкая уверенность модели») ни с чем не сводится.
+    return key if any(key) else None
+
+
+def _folded(items: list[ReviewItem]) -> list[list[ReviewItem]]:
+    """Одинаковые пары — одной строкой со всеми метками времени.
+
+    Повтор уже показанной пары тратил лимит в 25 строк: в подсказках словаря
+    так было 45 % строк. Место строки — по старшему весу, затем по первой
+    метке. `segments.json` остаётся поштучным.
+    """
+    groups: dict[object, list[ReviewItem]] = {}
+    for item in sorted(items, key=lambda current: current.start):
+        key = _pair_key(item)
+        groups.setdefault(key if key is not None else id(item), []).append(item)
+    return sorted(
+        groups.values(),
+        key=lambda group: (-max(item.weight for item in group), group[0].start),
+    )
+
+
+def _limited(
+    groups: list[list[ReviewItem]], heading: str
+) -> tuple[list[list[ReviewItem]], str]:
+    """Первые 25 строк; заголовок считает места, а не строки."""
+    shown = groups[:REVIEW_SECTION_LIMIT]
+    total = sum(len(group) for group in groups)
+    visible = sum(len(group) for group in shown)
+    if total == visible:
+        return shown, f"## {heading} — {total}"
+    return shown, f"## {heading} — {total}, здесь первые {visible}"
 
 
 def _minute_ranges(items: list[ReviewItem]) -> str:
@@ -130,8 +161,10 @@ def _minute_ranges(items: list[ReviewItem]) -> str:
     return ", ".join(str(first) if first == last else f"{first}–{last}" for first, last in ranges)
 
 
-def _rest_line(items: list[ReviewItem], shown: int, *, minutes: bool = False) -> list[str]:
-    rest = items[shown:]
+def _rest_line(
+    groups: list[list[ReviewItem]], shown: int, *, minutes: bool = False
+) -> list[str]:
+    rest = [item for group in groups[shown:] for item in group]
     if not rest:
         return []
     line = f"Ещё {len(rest)} — в `segments.json` → `review_items`."
@@ -175,8 +208,7 @@ def _review_sections(items: list[ReviewItem]) -> list[str]:
     """
     minor = [item for item in items if item.kind in MINOR_KINDS]
     spelling = [item for item in items if item.kind == "spelling"]
-    listen = [item for item in items if item.kind in LISTEN_KINDS]
-    listen.sort(key=lambda item: (-item.weight, item.start))
+    listen = _folded([item for item in items if item.kind in LISTEN_KINDS])
     lines: list[str] = []
     if listen:
         shown, heading = _limited(listen, "Слушать")
@@ -190,15 +222,13 @@ def _review_sections(items: list[ReviewItem]) -> list[str]:
                 "",
             ]
         )
-        lines.extend(_review_line(item) for item in shown)
+        lines.extend(_review_line(group) for group in shown)
         lines.extend(_rest_line(listen, len(shown), minutes=True))
         lines.append("")
     if spelling:
         # Сначала самые весомые, показываются — порядком записи.
-        shown, heading = _limited(
-            sorted(spelling, key=lambda item: (-item.weight, item.start)),
-            "То же слово записано иначе",
-        )
+        spelling_groups = _folded(spelling)
+        shown, heading = _limited(spelling_groups, "То же слово записано иначе")
         lines.extend(
             [
                 heading,
@@ -208,10 +238,10 @@ def _review_sections(items: list[ReviewItem]) -> list[str]:
                 "",
             ]
         )
-        lines.extend(_review_line(item) for item in sorted(shown, key=lambda i: i.start))
         lines.extend(
-            _rest_line(sorted(spelling, key=lambda item: (-item.weight, item.start)), len(shown))
+            _review_line(group) for group in sorted(shown, key=lambda group: group[0].start)
         )
+        lines.extend(_rest_line(spelling_groups, len(shown)))
         lines.append("")
     if minor:
         lines.extend(
@@ -227,10 +257,19 @@ def _review_sections(items: list[ReviewItem]) -> list[str]:
     return lines
 
 
-def _review_line(item: ReviewItem) -> str:
+def _stamps(starts: list[float]) -> str:
+    return ", ".join(f"[{format_timestamp(start)}]" for start in starts)
+
+
+def _times(count: int) -> str:
+    return f" (×{count})" if count > 1 else ""
+
+
+def _review_line(group: list[ReviewItem]) -> str:
+    item = group[0]
     difference = ", ".join(item.differing_tokens) or item.reason.split(": ", 1)[-1]
     context = item.readable_text.strip()
-    line = f"- [{format_timestamp(item.start)}] {difference}"
+    line = f"- {_stamps([member.start for member in group])} {difference}{_times(len(group))}"
     return f"{line} — в контексте: {context}" if context else line
 
 
@@ -345,11 +384,16 @@ def _review_markdown(
     lines.extend(_review_sections(items))
     if suggestions:
         lines.extend(["## Возможные термины из словаря", ""])
+        same: dict[tuple[str, str], list[dict[str, Any]]] = {}
         for suggestion in suggestions:
+            key = (normalize_text(suggestion["heard"]), normalize_text(suggestion["canonical"]))
+            same.setdefault(key, []).append(suggestion)
+        for group in same.values():
+            first = group[0]
             lines.append(
-                f"- [{format_timestamp(float(suggestion['start']))}] "
-                f"«{suggestion['heard']}» → «{suggestion['canonical']}» "
-                f"(сходство {float(suggestion['similarity']):.1%})"
+                f"- {_stamps([float(member['start']) for member in group])} "
+                f"«{first['heard']}» → «{first['canonical']}» "
+                f"(сходство {float(first['similarity']):.1%}){_times(len(group))}"
             )
     waiting = list((learned or {}).get("pending", []))
     if waiting:
