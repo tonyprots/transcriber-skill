@@ -170,6 +170,34 @@ def test_pipeline_applies_glossary_and_keeps_raw_intact(
     assert isinstance(audit["corrections"], list)
 
 
+@requires_speech
+def test_unavailable_verifier_is_a_status_not_a_queue(
+    tmp_path: Path, spoken_audio: Path, monkeypatch, capsys
+) -> None:
+    """Проверяющая упала: в отчёте строка «Не сверено», «Слушать» пусто."""
+    from audio_transcription.backends import BackendUnavailable
+
+    def verifier_down(backend: str, chunks, language: str, work_dir: Path, **kwargs) -> Hypothesis:
+        if backend == "gigaam" or backend.endswith("-lid"):
+            return fake_backend(backend, chunks, language, work_dir, **kwargs)
+        raise BackendUnavailable("Изолированный Whisper завершился с ошибкой: нет памяти")
+
+    monkeypatch.setattr(cli, "run_isolated_backend", verifier_down)
+    output = tmp_path / "result"
+    cli.main(
+        [str(spoken_audio), "--output", str(output), "--mode", "max", "--language", "ru",
+         "--no-cache", "--quiet", "--offline", "--verifier-window-seconds", "0"]
+    )
+    review = (output / "review-needed.md").read_text(encoding="utf-8")
+    assert [line for line in review.splitlines() if line.startswith("Не сверено")] == [
+        next(line for line in review.splitlines() if "нет памяти" in line)
+    ]
+    assert "## Слушать" not in review
+    printed = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert printed["review_counts"]["listen"] == 0
+    assert printed["review_counts"]["unverified"] >= 1
+
+
 @pytest.mark.slow
 @requires_speech
 def test_pipeline_on_real_models(tmp_path: Path, spoken_audio: Path) -> None:
