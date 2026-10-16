@@ -1783,9 +1783,7 @@ def _transcribe(
             corrections = _shift_all(corrections, offset)
             suggestions = [_shift_mapping(item, offset) for item in suggestions]
             if diarization is not None:
-                diarization_output = replace(
-                    diarization, turns=_shift_all(diarization.turns, offset)
-                )
+                diarization_output = _shift_diarization(diarization, offset)
         if args.early_text is not None:
             # Ранний текст уже в буфере; файл теперь отдаёт итог — со словарём
             # и правками проверяющей. Иначе агент, пришедший к готовой записи,
@@ -1842,12 +1840,26 @@ def _shift_all(items: list[Any], offset: float) -> list[Any]:
     return [replace(item, start=item.start + offset, end=item.end + offset) for item in items]
 
 
+# Вложенные списки с таймкодами в метаданных: пословные метки Whisper и части
+# окна после retry-split (у частей свои `words`). Без них raw.json при
+# `--section` мешал время фрагмента со временем исходника.
+_NESTED_TIMED = ("words", "subchunks")
+
+
 def _shift_mapping(item: dict[str, Any], offset: float) -> dict[str, Any]:
-    return item | {
+    shifted = item | {
         key: item[key] + offset
         for key in ("start", "end")
         if isinstance(item.get(key), (int, float))
     }
+    for key in _NESTED_TIMED:
+        nested = item.get(key)
+        if isinstance(nested, list):
+            shifted[key] = [
+                _shift_mapping(child, offset) if isinstance(child, dict) else child
+                for child in nested
+            ]
+    return shifted
 
 
 def _shift_hypothesis(hypothesis: Hypothesis, offset: float) -> Hypothesis:
@@ -1863,6 +1875,18 @@ def _shift_hypothesis(hypothesis: Hypothesis, offset: float) -> Hypothesis:
         segments=_shift_all(hypothesis.segments, offset),
         metadata=metadata,
     )
+
+
+def _shift_diarization(diarization: Diarization, offset: float) -> Diarization:
+    """Реплики и сырые реплики модели (`raw_turns` в speakers.json) — по исходнику."""
+    metadata = dict(diarization.metadata)
+    raw_turns = metadata.get("raw_turns")
+    if isinstance(raw_turns, list):
+        metadata["raw_turns"] = [
+            _shift_mapping(turn, offset) if isinstance(turn, dict) else turn
+            for turn in raw_turns
+        ]
+    return replace(diarization, turns=_shift_all(diarization.turns, offset), metadata=metadata)
 
 
 def expand_inputs(args: argparse.Namespace) -> list[str]:
