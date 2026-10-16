@@ -16,7 +16,8 @@ def _item(heard: str, verifier: str, start: float = 1.0) -> dict:
         "end": start + 3,
         "readable_text": f"про {heard} сегодня",
         "comparison_text": f"про {verifier} сегодня",
-        "differing_tokens": [f"{heard.lower()} / {verifier.lower()}"],
+        # Регистр как у find_review_items: расхождение отдаёт исходное написание.
+        "differing_tokens": [f"{heard} / {verifier}"],
         "reason": "тест",
     }
 
@@ -132,3 +133,9 @@ def test_cli_takes_language_from_manifest_and_refuses_mixed(tmp_path: Path) -> N
     assert yaml.safe_load(output.read_text(encoding="utf-8"))["entries"][0]["canonical"] == "ChatGPT"
     russian = result("ru", "ru", "нотион", "Notion")
     assert main([str(english), str(russian)]) == 2
+
+
+def test_known_terms_are_skipped_whatever_the_case() -> None:
+    """`known` нормализован, а токены расхождения — в исходном регистре и с «ё»."""
+    assert collect_candidates([_item("бэклог", "Backlog")], known={"backlog"}) == []
+    assert collect_candidates([_item("Ёлка", "Yolka")], known={"елка"}) == []

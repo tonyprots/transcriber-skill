@@ -164,7 +164,9 @@ def collect_candidates(
                 heard, verifier = clean_token(heard), clean_token(verifier)
                 if not heard or not verifier:
                     continue
-                if heard in known or verifier in known:
+                # `known` нормализован, а токены — в исходном регистре: без
+                # нормализации «Backlog» проходил мимо записи «backlog».
+                if normalize_text(heard) in known or normalize_text(verifier) in known:
                     continue
                 if not (_LETTER.search(heard) and _LETTER.search(verifier)):
                     continue
