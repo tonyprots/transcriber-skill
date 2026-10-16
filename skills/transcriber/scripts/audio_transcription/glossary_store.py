@@ -125,6 +125,10 @@ class LearnReport:
     pruned: list[str] = field(default_factory=list)
     total_entries: int = 0
     path: str | None = None
+    # Не для отчёта: каноны, которые молчат в подсказках (`unpromotable_terms`),
+    # по словарю уже после обучения. По словарю до него запись, ставшая
+    # неповышаемой в этом прогоне, подсказывала бы в нём ещё раз.
+    quiet: set[str] = field(default_factory=set)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1045,5 +1049,6 @@ def update_from_run(
         document, candidates, blocked=blocked, source=source, today=today, language=language
     )
     report.path = str(path)
+    report.quiet = unpromotable_terms(document)
     save_document(path, document)
     return entries_of(document), report

@@ -698,3 +698,55 @@ def test_unpromotable_learned_entry_does_not_suggest(
     suggested = {item["canonical"] for item in audit["suggestions"]}
     assert "Postgres" not in suggested
     assert "PostgreSQL Pro" in suggested
+
+
+@requires_speech
+def test_entry_that_turns_unpromotable_in_this_run_does_not_suggest(
+    tmp_path: Path, spoken_audio: Path, monkeypatch
+) -> None:
+    """Запись, ставшая неповышаемой в этом же прогоне, молчит уже в нём.
+
+    «Lead ← лид»: вариант короче порога, и в этой записи обе модели сошлись на
+    «лид» — обучение ставит `seen_as_word`. Раньше молчащие записи считались по
+    словарю до обучения, и «лиды → Lead» подсказывалось ещё один прогон.
+    """
+
+    def backend(name: str, chunks, language: str, work_dir: Path, **kwargs) -> Hypothesis:
+        if name.endswith("-lid"):
+            return language_hypothesis(name, [{"ru": 0.97, "en": 0.03}] * len(chunks), 0.1)
+        text = "сегодня наш лид смотрит лиды" if name == "gigaam" else "сегодня наш лид смотрит лида"
+        chunks = list(chunks)
+        metadata = {
+            "chunks": [
+                {"sequence": chunk.sequence, "start": chunk.start, "end": chunk.end, "text": text}
+                for chunk in chunks
+            ]
+        }
+        segments = [Segment(chunk.start, chunk.end, text) for chunk in chunks]
+        return Hypothesis(f"{name}-fake", language, len(chunks), segments, metadata=metadata)
+
+    monkeypatch.setattr(cli, "run_isolated_backend", backend)
+    store = tmp_path / "glossary.yaml"
+    monkeypatch.setenv("TRANSCRIBER_GLOSSARY_STORE", str(store))
+    store.write_text(
+        "version: 1\nentries:\n"
+        "  - canonical: Lead\n    aliases: [лид]\n    auto_apply: false\n"
+        "    learned:\n      auto_apply_written: false\n      windows: 1\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "result"
+
+    cli.run(
+        cli.build_parser().parse_args(
+            [
+                str(spoken_audio), "--output", str(output), "--mode", "max",
+                "--language", "ru", "--no-cache", "--quiet",
+                "--verifier-window-seconds", "0",
+            ]
+        )
+    )
+
+    (entry,) = cli.load_document(store)["entries"]
+    assert entry["learned"]["seen_as_word"] is True
+    audit = json.loads((output / "glossary-audit.json").read_text(encoding="utf-8"))
+    assert "Lead" not in {item["canonical"] for item in audit["suggestions"]}

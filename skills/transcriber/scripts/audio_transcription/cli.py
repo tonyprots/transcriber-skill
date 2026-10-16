@@ -1439,7 +1439,8 @@ def _transcribe(
             else store_path(args.glossary_store, args.glossary_profile, route.language)
         )
         learned_now: list[GlossaryEntry] = []
-        # Выученные записи, которые не подсказывают (`unpromotable_terms`).
+        # Выученные записи, которые не подсказывают (`unpromotable_terms`);
+        # после обучения пересчитываются по пополненному словарю.
         quiet: set[str] = set()
         if learned_path is not None:
             try:
@@ -1706,6 +1707,7 @@ def _transcribe(
                 # а не только следующую.
                 glossary = merge_glossaries(curated, learned_entries)
                 learned_now = learned_entries
+                quiet = learned_report.quiet
             except (OSError, ValueError, TypeError, yaml.YAMLError) as error:
                 # Недоступный или испорченный словарь не повод терять
                 # расшифровку: она уже посчитана, и без пополнения останется
