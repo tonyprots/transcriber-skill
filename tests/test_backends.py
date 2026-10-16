@@ -145,26 +145,29 @@ def test_hub_fallback_does_not_build_model_twice(monkeypatch, tmp_path: Path) ->
     import threading
     import time
 
+    import huggingface_hub.errors  # noqa: F401 — первый импорт сам дольше срока теста
+
     from audio_transcription import catalog, weights
 
     _restore_hub_state(monkeypatch)
-    snapshot = tmp_path / "models--x" / "snapshots" / catalog.GIGAAM_RUSSIAN.revision
+    # Без onnx: его первый импорт в allow_patterns сам дольше срока теста.
+    snapshot = tmp_path / "models--x" / "snapshots" / catalog.FASTER_WHISPER_FALLBACK.revision
     snapshot.mkdir(parents=True)
     lock = threading.Lock()
     state = {"calls": 0, "active": 0, "peak": 0}
 
     def load():
-        weights.fetch(catalog.GIGAAM_RUSSIAN, download=lambda repo, **kwargs: str(snapshot))
+        weights.fetch(catalog.FASTER_WHISPER_FALLBACK, download=lambda repo, **kwargs: str(snapshot))
         with lock:
             state["calls"] += 1
             state["active"] += 1
             state["peak"] = max(state["peak"], state["active"])
-        time.sleep(0.5)
+        time.sleep(1.0)
         with lock:
             state["active"] -= 1
         return "model"
 
-    assert backends.load_with_hub_fallback(load, offline=False, label="x", stall_seconds=0.1) == "model"
+    assert backends.load_with_hub_fallback(load, offline=False, label="x", stall_seconds=0.3) == "model"
     assert (state["calls"], state["peak"]) == (1, 1)
     assert backends.os.environ.get("HF_HUB_OFFLINE") != "1"
 
