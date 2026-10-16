@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from audio_transcription.glossary import GlossaryEntry, merge_glossaries
+from audio_transcription.glossary import GlossaryEntry, apply_glossary, merge_glossaries
 from audio_transcription.glossary_store import (
     HEADER,
     load_document,
@@ -139,8 +139,37 @@ def test_curated_glossary_wins_over_the_learned_one() -> None:
     ]
     merged = merge_glossaries(curated, learned)
 
-    assert [entry.canonical for entry in merged] == ["Threads", "Obsidian"]
-    assert merged[0].aliases == ("трэц",), "запись пользователя не должна подменяться"
+    assert merged[0] == curated[0], "запись пользователя не должна подменяться"
+    # Занятый пользователем вариант из выученной записи ушёл, свой остался.
+    assert [(entry.canonical, entry.aliases) for entry in merged[1:]] == [
+        ("Threads", ("трэдс",)),
+        ("Obsidian", ("обсидиан",)),
+    ]
+
+
+def test_curated_term_without_aliases_keeps_the_learned_replacement() -> None:
+    """Notion в выверенном словаре без вариантов снимал выученную замену «нотион»."""
+    curated = [GlossaryEntry("Notion", (), auto_apply=True)]
+    learned = [GlossaryEntry("notion", ("нотион",), auto_apply=True)]
+    merged = merge_glossaries(curated, learned)
+
+    corrected, _ = apply_glossary([Segment(0, 1, "открой нотион")], merged)
+    assert corrected[0].text == "открой Notion", "написание канона — пользователя"
+
+
+def test_curated_switch_off_and_curated_misspelling_win() -> None:
+    curated = [
+        GlossaryEntry("Notion", (), auto_apply=False),
+        GlossaryEntry("Битрикс24", ("Bitrix",), auto_apply=True),
+    ]
+    learned = [
+        GlossaryEntry("Notion", ("нотион",), auto_apply=True),
+        # Канон выученной записи пользователь назвал ослышкой.
+        GlossaryEntry("Bitrix", ("битрикс",), auto_apply=True),
+    ]
+    merged = merge_glossaries(curated, learned)
+
+    assert [(entry.canonical, entry.auto_apply) for entry in merged[2:]] == [("Notion", False)]
 
 
 def test_undisputed_words_are_counted_word_by_word() -> None:

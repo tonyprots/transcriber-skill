@@ -70,26 +70,39 @@ def merge_glossaries(
 ) -> list[GlossaryEntry]:
     """Словарь пользователя поверх того, что скилл выучил сам.
 
-    Выученное не должно спорить с выверенным: если алиас или канон уже заняты
-    записью пользователя, из автоматической записи они вычёркиваются, а
-    оставшаяся без вариантов запись не попадает в работу вовсе. Иначе один
-    и тот же кусок текста претендовали бы исправить две записи, и победила
-    бы та, что оказалась длиннее.
+    Выученное не должно спорить с выверенным: алиас, который уже занят
+    записью пользователя (его канон или вариант), из автоматической записи
+    вычёркивается. Иначе один и тот же кусок текста претендовали бы
+    исправить две записи, и победила бы та, что оказалась длиннее.
+
+    Остальные варианты остаются. Раньше совпадение канона снимало выученную
+    запись целиком: стоило завести «Notion» в выверенный словарь без
+    алиасов, как замена «нотион», включённая скиллом, молча пропадала.
+    Теперь такие варианты пишутся каноном пользователя и заменяются, только
+    если автозамена разрешена в обеих записях. Выученная запись, чей канон
+    пользователь назвал ослышкой (стоит у него вариантом), не берётся вовсе:
+    она вписала бы в текст то, что он исправляет.
     """
     taken = {entry.canonical.casefold() for entry in curated}
-    taken.update(alias.casefold() for entry in curated for alias in entry.aliases)
+    curated_aliases = {alias.casefold() for entry in curated for alias in entry.aliases}
+    taken.update(curated_aliases)
+    by_canonical: dict[str, GlossaryEntry] = {}
+    for entry in curated:
+        by_canonical.setdefault(entry.canonical.casefold(), entry)
     result = list(curated)
     for entry in learned:
-        if entry.canonical.casefold() in taken:
+        key = entry.canonical.casefold()
+        if key in curated_aliases and key not in by_canonical:
             continue
         aliases = tuple(alias for alias in entry.aliases if alias.casefold() not in taken)
         if not aliases:
             continue
+        own = by_canonical.get(key)
         result.append(
             GlossaryEntry(
-                canonical=entry.canonical,
+                canonical=own.canonical if own is not None else entry.canonical,
                 aliases=aliases,
-                auto_apply=entry.auto_apply,
+                auto_apply=entry.auto_apply and (own is None or own.auto_apply),
                 case_sensitive=entry.case_sensitive,
                 context=entry.context,
             )
