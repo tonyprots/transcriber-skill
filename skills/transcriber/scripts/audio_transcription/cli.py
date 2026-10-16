@@ -52,7 +52,7 @@ from .cache import (
     save_hypothesis,
     prune as prune_cache,
 )
-from .diarization import drop_ghost_speakers, split_chunks_by_diarization
+from .diarization import drop_ghost_speakers, number_by_first_appearance, split_chunks_by_diarization
 from .fluid_models import installed_revision as installed_fluid_revision, preflight as fluidaudio_preflight
 from .glossary import (
     GlossaryEntry,
@@ -1423,6 +1423,7 @@ def _transcribe(
                         f"Диаризация: отброшено голосов с речью меньше 5 с: "
                         f"{found - len(diarization.speakers)}"
                     )
+            diarization = replace(diarization, turns=number_by_first_appearance(diarization.turns))
             # Нарезка режет каждое окно по границам реплик и пишет их на диск:
             # на 42-минутной встрече это 7–8 минут без единой строки в логе.
             report.stage(f"Нарезка окон по говорящим: {len(base_chunks)}")

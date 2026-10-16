@@ -105,6 +105,23 @@ def _speaker_order(label: str) -> tuple[int, str]:
     return (int(tail), label) if tail.isdigit() else (1 << 30, label)
 
 
+def number_by_first_appearance(turns: list[SpeakerTurn]) -> list[SpeakerTurn]:
+    """Перенумеровывает голоса по первому появлению: speaker_1 заговорил первым.
+
+    Модель нумерует голоса по-своему, и в 9% записей первым говорил не
+    «Спикер 1»: `--speaker-names 1=…` без чтения расшифровки угадывал неверно.
+    cpWER и DER от перестановки меток не зависят.
+    """
+    renamed: dict[str, str] = {}
+    for turn in sorted(turns, key=lambda item: item.start):
+        for speaker in turn.speakers:
+            renamed.setdefault(speaker, f"speaker_{len(renamed) + 1}")
+    return [
+        SpeakerTurn(turn.start, turn.end, tuple(sorted((renamed[s] for s in turn.speakers), key=_speaker_order)))
+        for turn in turns
+    ]
+
+
 def _speakers_for_interval(
     start: float,
     end: float,

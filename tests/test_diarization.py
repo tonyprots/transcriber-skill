@@ -134,3 +134,25 @@ def test_short_piece_at_window_start_joins_next(tmp_path: Path) -> None:
         tmp_path / "prepared.wav", [AudioChunk(0, tmp_path / "prepared.wav", 4.0, 9.0)], turns
     )
     assert [(chunk.start, chunk.end, chunk.speakers) for chunk in chunks] == [(4.0, 9.0, ("speaker_2",))]
+
+
+def test_speakers_are_numbered_by_first_appearance() -> None:
+    """«Спикер 1» — тот, кто заговорил первым: `--speaker-names 1=…` угадывается без чтения.
+
+    Модель нумерует голоса по-своему, и в 9% записей первым говорил не speaker_1.
+    """
+    from audio_transcription.diarization import number_by_first_appearance
+
+    turns = [
+        SpeakerTurn(0.0, 3.0, ("speaker_3",)),
+        SpeakerTurn(3.0, 5.0, ("speaker_1", "speaker_3")),
+        SpeakerTurn(5.0, 9.0, ("speaker_2",)),
+        SpeakerTurn(9.0, 12.0, ("speaker_1",)),
+    ]
+    assert number_by_first_appearance(turns) == [
+        SpeakerTurn(0.0, 3.0, ("speaker_1",)),
+        SpeakerTurn(3.0, 5.0, ("speaker_1", "speaker_2")),
+        SpeakerTurn(5.0, 9.0, ("speaker_3",)),
+        SpeakerTurn(9.0, 12.0, ("speaker_2",)),
+    ]
+    assert number_by_first_appearance([]) == []
