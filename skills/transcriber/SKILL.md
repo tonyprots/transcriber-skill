@@ -115,6 +115,7 @@ JSON-результате есть `update_available`, вышла новая в�
 ## Запустить
 
 ```bash
+mkdir -p "$(dirname OUTPUT_DIR)"
 "$ASR_PYTHON" "$SKILL_DIR/scripts/transcribe.py" INPUT \
   --mode max --output OUTPUT_DIR > OUTPUT_DIR.log 2>&1 &
 ```
@@ -125,8 +126,9 @@ JSON-результате есть `update_available`, вышла новая в�
 `timeout` фоновой команды до потолка среды (в Claude Code — `7200000`):
 лимит по умолчанию в 30 минут обрывает прогон без результата. Считай не
 только саму расшифровку: прогон ждёт своей очереди на машине
-(`~/.transcriber/run.lock`), пока идёт чужой прогон или замер. `OUTPUT_DIR` скрипт создаёт сам: не делай `mkdir` и ничего
-туда не клади, лог держи рядом. `--overwrite` без необходимости не ставь.
+(`~/.transcriber/run.lock`), пока идёт чужой прогон или замер. `OUTPUT_DIR` скрипт создаёт сам: его не создавай и ничего
+туда не клади, лог держи рядом. Родителя создаёт первая строка: без него
+оболочка не откроет лог, и скрипт не запустится. `--overwrite` без необходимости не ставь.
 
 Своя диктовка пользователя, которую он ждёт прямо сейчас, — одна запись с
 `--priority`: идущий пакет пропустит её вперёд и отдаст ей машину между
@@ -161,6 +163,7 @@ JSON-результате есть `update_available`, вышла новая в�
 `--skip-done`: прерванная пачка продолжается тем же вызовом.
 
 ```bash
+mkdir -p "$(dirname PARENT_DIR)"
 "$ASR_PYTHON" "$SKILL_DIR/scripts/transcribe.py" URL1 URL2 FILE3 \
   --mode fast --output PARENT_DIR --skip-done > PARENT_DIR.log 2>&1 &
 ```
@@ -174,7 +177,8 @@ JSON-результате есть `update_available`, вышла новая в�
 лезли в чужие записи; `--no-learn` — только для замеров, в рабочих пачках не
 ставь. Кэш гипотез (`~/.cache/transcriber`) хранит текст записи 90 дней: для
 конфиденциальной записи ставь `--no-cache`, а забыть уже расшифрованную —
-`scripts/manage_cache.py forget ФАЙЛ`. Полный список — `transcribe.py --help`.
+`scripts/manage_cache.py forget ФАЙЛ`; у записи по ссылке файла нет — вместо
+него `source.sha256` из её `manifest.json`. Полный список — `transcribe.py --help`.
 
 ### Диаризация
 

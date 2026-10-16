@@ -194,3 +194,39 @@ def test_lists_names_heard_only_by_verifier(env):
     assert "возможно, выпало из текста" in result.stdout
     assert "02:37 «OpenAI»" in result.stdout
     assert "«не»" not in result.stdout
+
+
+DIES_WITHOUT_TEXT = """
+import sys, pathlib
+args = sys.argv[1:]
+out = pathlib.Path(args[args.index("--output") + 1])
+with (out.parent / "calls.txt").open("a") as f:
+    f.write("x")
+sys.exit(1)
+"""
+
+DIES_AFTER_PRIMARY = DIES_WITHOUT_TEXT.replace("sys.exit(1)", """
+early = pathlib.Path(args[args.index("--early-text") + 1])
+early.write_text("текст до сбоя", encoding="utf-8")
+sys.exit(1)""")
+
+
+def test_full_own_run_died_after_primary_returns_text(env):
+    env["fake"].write_text(DIES_AFTER_PRIMARY, encoding="utf-8")
+    set_status(env, "short 36s")
+    result = run_result(env, 20, "--full")
+    assert result.returncode == 0, result.stderr
+    assert "не досчитан" in result.stdout
+    assert "текст до сбоя" in result.stdout
+    assert env["clip"].read_text(encoding="utf-8") == "текст до сбоя"
+    assert calls(env) == 1
+
+
+def test_own_run_without_text_reports_real_wait(env):
+    # Прогон умер сразу: ждали секунду, а не весь --timeout.
+    env["fake"].write_text(DIES_WITHOUT_TEXT, encoding="utf-8")
+    set_status(env, "short 36s")
+    result = run_result(env, 20)
+    assert result.returncode == 1
+    assert "Текста нет за" in result.stderr
+    assert "за 20 с" not in result.stderr

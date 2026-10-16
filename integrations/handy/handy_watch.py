@@ -76,8 +76,21 @@ def output_dir_for(wav: Path, root: Path) -> Path:
 
 
 def notify(title: str, message: str) -> None:
-    script = f"display notification {json.dumps(message)} with title {json.dumps(title)}"
-    subprocess.run(["osascript", "-e", script], check=False, capture_output=True)
+    # Текст — аргументами, а не внутри скрипта: json.dumps экранировал
+    # кириллицу в \uXXXX, такого escape в AppleScript нет, и уведомление
+    # молча не приходило ни разу.
+    result = subprocess.run(
+        [
+            "osascript",
+            "-e", "on run argv",
+            "-e", "display notification (item 2 of argv) with title (item 1 of argv)",
+            "-e", "end run",
+            title, message,
+        ],
+        check=False, capture_output=True,
+    )
+    if result.returncode != 0:
+        log(f"уведомление не показано: {result.stderr.decode('utf-8', 'replace').strip()}")
 
 
 def to_clipboard(text: str) -> None:
@@ -114,16 +127,48 @@ def running_marker_path(out: Path) -> Path:
     return out.with_name(f"{out.name}.running")
 
 
-def marker_alive(marker: Path) -> bool:
-    """Метка с живым pid; метка упавшего процесса не считается."""
+def process_started(pid: int) -> str | None:
+    """Время запуска процесса по `ps`, None — узнать не вышло.
+
+    Метку пишет агент launchd без локали, а читает handy_result из оболочки
+    со своей: формат даты и пояс заданы явно, иначе отпечатки не совпадут.
+    """
     try:
-        pid = int(json.loads(marker.read_text(encoding="utf-8"))["pid"])
+        result = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True, text=True, check=False,
+            env={**os.environ, "LC_ALL": "C", "TZ": "UTC"},
+        )
+    except OSError:
+        return None
+    return result.stdout.strip() or None
+
+
+def write_marker(marker: Path, pid: int, wav_name: str) -> None:
+    marker.write_text(
+        json.dumps({"pid": pid, "started": process_started(pid), "wav": wav_name}), encoding="utf-8"
+    )
+
+
+def marker_alive(marker: Path) -> bool:
+    """Метка живого прогона; метка упавшего процесса не считается.
+
+    Убитый по SIGKILL или SIGTERM (выход из сессии, перезагрузка) наблюдатель
+    метку не снимает, а его pid потом достаётся другому процессу. Чужой по
+    пользователю процесс (EPERM) — точно не наш прогон; свой проверяем по
+    времени запуска. Метка без него (до отпечатка) судится по одному pid.
+    """
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+        pid = int(data["pid"])
         os.kill(pid, 0)
-    except (FileNotFoundError, ValueError, KeyError, TypeError, ProcessLookupError):
+    except (FileNotFoundError, ValueError, KeyError, TypeError, ProcessLookupError, PermissionError):
         return False
-    except PermissionError:
+    recorded = data.get("started")
+    if not recorded:
         return True
-    return True
+    current = process_started(pid)
+    return current is None or current == recorded
 
 
 def transcribe(
@@ -141,13 +186,27 @@ def transcribe(
     return subprocess.Popen(command, stdout=sink, stderr=subprocess.STDOUT)
 
 
-def wait_for_text(process: subprocess.Popen, early: Path) -> bool:
-    """Ждём текст основной модели или конец прогона, смотря что раньше."""
+def text_version(early: Path) -> tuple[int, int] | None:
+    """Отпечаток файла текста: transcriber подменяет его целиком (новый inode)."""
+    try:
+        stat = early.stat()
+    except FileNotFoundError:
+        return None
+    return stat.st_ino, stat.st_mtime_ns
+
+
+def wait_for_text(process: subprocess.Popen, early: Path, before: tuple[int, int] | None = None) -> bool:
+    """Ждём текст основной модели или конец прогона, смотря что раньше.
+
+    Файл с отпечатком `before` остался от прошлой попытки и текстом этой не
+    считается: иначе повтор упавшей записи сразу сообщал «готово за 0 с»,
+    а о новом сбое молчал.
+    """
     while process.poll() is None:
-        if early.exists():
+        if text_version(early) not in (None, before):
             return True
         time.sleep(0.5)
-    return early.exists()
+    return text_version(early) not in (None, before)
 
 
 def process(wav: Path, args: argparse.Namespace) -> str:
@@ -163,7 +222,7 @@ def process(wav: Path, args: argparse.Namespace) -> str:
         return f"exists {out.name}"
     args.output_root.mkdir(parents=True, exist_ok=True)
     log(f"{wav.name}: {seconds:.0f} с → {out}")
-    marker.write_text(json.dumps({"pid": os.getpid(), "wav": wav.name}), encoding="utf-8")
+    write_marker(marker, os.getpid(), wav.name)
     try:
         return run_job(wav, out, seconds, args)
     finally:
@@ -174,9 +233,11 @@ def run_job(wav: Path, out: Path, seconds: float, args: argparse.Namespace) -> s
     started = time.monotonic()
     early = early_text_path(out)
     pasted = None
+    before = text_version(early)
     with tempfile.TemporaryFile() as sink:
         job = transcribe(wav, out, early, args, sink)
-        if wait_for_text(job, early):
+        fresh = wait_for_text(job, early, before)
+        if fresh:
             text_ready = time.monotonic() - started
             if args.clipboard:
                 pasted = early.read_text(encoding="utf-8").strip()
@@ -193,7 +254,7 @@ def run_job(wav: Path, out: Path, seconds: float, args: argparse.Namespace) -> s
             sink.seek(0)
             tail = sink.read().decode("utf-8", "replace").strip().splitlines()[-5:]
             log(f"{wav.name}: ошибка rc={job.returncode}: " + " | ".join(tail))
-            if not early.exists():
+            if not fresh:
                 notify("Handy → transcriber", f"Не вышло расшифровать {wav.name}, подробности в логе")
             return f"failed rc={job.returncode}"
     log(f"{wav.name}: проверка и словарь готовы за {elapsed:.0f} с")

@@ -36,6 +36,7 @@ from handy_watch import (  # noqa: E402
     output_dir_for,
     running_marker_path,
     to_clipboard,
+    write_marker,
 )
 
 PLIST = Path.home() / "Library/LaunchAgents/ru.tonyprots.handy-transcriber.plist"
@@ -43,6 +44,16 @@ REPO = Path(__file__).resolve().parents[2]
 # Наблюдатель стартует по WatchPaths и ждёт, пока wav замрёт на 2 с.
 PICKUP_GRACE_SECONDS = 20.0
 POLL_SECONDS = 1.0
+
+
+def default_python(repo: Path) -> str:
+    """Питон окружения скилла, если агент не установлен и plist его не назвал.
+
+    setup.sh кладёт .venv рядом со скиллом, разработка по README — в корень
+    репозитория; порядок тот же, что в SKILL.md и install.sh.
+    """
+    candidates = [repo / "skills/transcriber/.venv/bin/python", repo / ".venv/bin/python"]
+    return str(next((path for path in candidates if path.exists()), candidates[0]))
 
 
 def agent_config(plist: Path) -> dict[str, str]:
@@ -145,7 +156,7 @@ def start_own_run(wav: Path, out: Path, args: argparse.Namespace) -> subprocess.
         # Своя сессия: прогон досчитывает проверку после нашего выхода.
         start_new_session=True,
     )
-    marker.write_text(json.dumps({"pid": job.pid, "wav": wav.name}), encoding="utf-8")
+    write_marker(marker, job.pid, wav.name)
     return job
 
 
@@ -157,7 +168,8 @@ def run(args: argparse.Namespace) -> int:
     out = output_dir_for(wav, args.output_root)
     early = early_text_path(out)
     marker = running_marker_path(out)
-    deadline = time.monotonic() + args.timeout
+    started = time.monotonic()
+    deadline = started + args.timeout
     if marker.exists() and not marker_alive(marker):
         marker.unlink()  # след упавшего прогона
     job: subprocess.Popen | None = None
@@ -173,6 +185,10 @@ def run(args: argparse.Namespace) -> int:
             if job.poll() is not None:
                 if (full if args.full else early).exists():
                     return report(wav, out, waited_for, clipboard=True)
+                if args.full and early.exists():
+                    # Свой прогон умер после основной модели: текст этой
+                    # попытки есть, как и в ветке без своего прогона ниже.
+                    return report(wav, out, "полный набор не досчитан, только текст", clipboard=True)
                 break
         elif marker_alive(marker):
             waited_for = "дождался прогона наблюдателя"
@@ -194,7 +210,8 @@ def run(args: argparse.Namespace) -> int:
 
     log = run_log(out)
     tail = log.read_text(encoding="utf-8").strip().splitlines()[-5:] if log.exists() else []
-    print(f"Текста нет за {args.timeout:.0f} с: {out}", file=sys.stderr)
+    # Свой прогон мог умереть сразу: время ожидания — фактическое, а не --timeout.
+    print(f"Текста нет за {time.monotonic() - started:.0f} с: {out}", file=sys.stderr)
     for line in tail:
         print(f"  {line}", file=sys.stderr)
     return 1
@@ -206,7 +223,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("wav", type=Path)
     parser.add_argument("--output-root", type=Path,
                         default=Path(config.get("output-root", REPO / "out/handy")))
-    parser.add_argument("--python", default=config.get("python", str(REPO / ".venv/bin/python")))
+    parser.add_argument("--python", default=config.get("python") or default_python(REPO))
     parser.add_argument("--transcribe", default=config.get(
         "transcribe", str(REPO / "skills/transcriber/scripts/transcribe.py")))
     parser.add_argument("--state", type=Path, default=STATE_FILE)
