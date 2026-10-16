@@ -71,10 +71,11 @@ from .glossary_store import (
     profile_path,
     record_fingerprint,
     store_path,
+    unpromotable_terms,
     update_from_run,
 )
 from .fillers import strip_filler_segments
-from .mining import LEARNING_LANGUAGES, undisputed_words
+from .mining import LEARNING_LANGUAGES, not_a_term, undisputed_words
 from .models import AudioChunk, Diarization, Hypothesis, ReviewItem, Section
 from .packing import PackedWindow, build_packed_windows, unpack_hypothesis
 from .isolated import run_isolated_backend, run_isolated_diarization
@@ -1028,6 +1029,15 @@ def _validate(args: argparse.Namespace) -> None:
         raise ValueError("--priority — для одной записи, которую ждут сейчас, а не для пакета")
     if args.glossary_profile:
         profile_path(args.glossary_profile)  # плохое имя — до часа расшифровки, а не после
+    if not args.no_glossary:
+        # Имя из TRANSCRIBER_GLOSSARY_PROFILE и сам --glossary читались только
+        # после VAD и диаризации, а в пачке отказ повторялся на каждой записи.
+        store_path(args.glossary_store, args.glossary_profile, None)
+        if args.glossary:
+            try:
+                load_glossary(args.glossary)
+            except (OSError, ValueError, yaml.YAMLError) as error:
+                raise ValueError(f"--glossary {args.glossary}: {error}") from error
     if not 0 <= args.review_threshold <= 1:
         raise ValueError("--review-threshold должен быть в диапазоне [0, 1]")
     if args.verifier_window_seconds < 0:
@@ -1355,12 +1365,32 @@ def write_plain_text(path: Path, segments: list[Any]) -> None:
     temporary.replace(path)
 
 
+# Виды мест, где модели спорят о слове. Паразиты, число словом и цифрой,
+# выдумки проверяющей и место, где канон уже встал из проверяющей, подсказкам
+# термина не нужны. «Повтор или обрыв» остаётся: ослышка в повторённом
+# названии попадает туда же («Амбинти / Амбиенти» — верная подсказка
+# Ambienti, замер 2026-10-17 на 56 записях max: 9 верных и 44 ложных против
+# 9 и 89 до отбора).
+SUGGESTION_KINDS = frozenset({"substantive", "spelling", "window", "verifier_only", "disfluency"})
+
+
 def disputed_primary_words(review_items: list[ReviewItem]) -> set[str]:
-    """Слова основной модели, на которых проверяющая с ней разошлась."""
+    """Слова основной модели, на которых проверяющая с ней разошлась.
+
+    Паразиты и служебные слова в поиск не идут: «вот → What» и «хмм →
+    Addicts» были пятой частью строк подсказок и ни разу не оказались
+    термином.
+    """
     words: set[str] = set()
     for item in review_items:
+        if item.kind not in SUGGESTION_KINDS:
+            continue
         for pair in item.differing_tokens:
-            words.update(normalize_text(pair.split(" / ", 1)[0]).split())
+            words.update(
+                word
+                for word in normalize_text(pair.split(" / ", 1)[0]).split()
+                if not not_a_term(word)
+            )
     return words
 
 
@@ -1594,9 +1624,25 @@ def _transcribe(
             if args.no_glossary
             else store_path(args.glossary_store, args.glossary_profile, route.language)
         )
-        glossary = merge_glossaries(
-            curated, [] if learned_path is None else entries_of(load_document(learned_path))
-        )
+        learned_now: list[GlossaryEntry] = []
+        # Выученные записи, которые не подсказывают (`unpromotable_terms`);
+        # после обучения пересчитываются по пополненному словарю.
+        quiet: set[str] = set()
+        if learned_path is not None:
+            try:
+                learned_document = load_document(learned_path)
+                learned_now = entries_of(learned_document)
+                quiet = unpromotable_terms(learned_document)
+            except (OSError, ValueError, yaml.YAMLError) as error:
+                # Опечатка в ручной правке своего словаря роняла каждый прогон,
+                # в том числе быстрый текст Handy. Прогон идёт без выученного
+                # и без обучения: файл остаётся как есть, чинит его человек.
+                warnings.append(
+                    f"Свой словарь {learned_path} не прочитан, прогон без него "
+                    f"и без пополнения: {error}"
+                )
+                learned_path = None
+        glossary = merge_glossaries(curated, learned_now)
         # Подсказки модели берём только из выверенного словаря пользователя.
         # Свой словарь скилл пополняет после каждого прогона, и если пускать
         # его сюда, ключ кэша менялся бы вместе с ним: обещание «повторный
@@ -1846,9 +1892,17 @@ def _transcribe(
                 # термин, добравший порог на этой записи, правит уже её текст,
                 # а не только следующую.
                 glossary = merge_glossaries(curated, learned_entries)
-            except OSError as error:
-                # Недоступный словарь не повод терять расшифровку: она уже
-                # посчитана, и без пополнения останется только следующий раз.
+                learned_now = learned_entries
+                quiet = learned_report.quiet
+            except (OSError, ValueError, TypeError, yaml.YAMLError) as error:
+                # Недоступный или испорченный словарь не повод терять
+                # расшифровку: она уже посчитана, и без пополнения останется
+                # только следующий раз. Форму записей проверяет чтение, но не
+                # каждое поле: опустошённое руками `windows:` даёт TypeError уже
+                # в learn(), и в пачке он ронял всю пачку. Ошибку в коде
+                # обучения тот же перехват спрятал бы — её ловит сквозной
+                # test_pipeline_writes_full_contract: обычный прогон обязан
+                # пополнить словарь без этого предупреждения.
                 warnings.append(f"Словарь не пополнен: {error}")
             else:
                 summary = learned_report.summary()
@@ -1867,7 +1921,11 @@ def _transcribe(
             )
         suggestions = suggest_glossary_matches(
             readable_segments,
-            glossary,
+            merge_glossaries(
+                curated, [entry for entry in learned_now if entry.canonical not in quiet]
+            )
+            if quiet
+            else glossary,
             only_words=disputed_primary_words(review_items) if verifier_ran else None,
         )
         timed("glossary", mark)

@@ -1,4 +1,11 @@
-from audio_transcription.glossary import GlossaryEntry, apply_glossary, suggest_glossary_matches
+from pathlib import Path
+
+from audio_transcription.glossary import (
+    GlossaryEntry,
+    apply_glossary,
+    load_glossary,
+    suggest_glossary_matches,
+)
 from audio_transcription.models import Segment
 
 
@@ -41,3 +48,13 @@ def test_canonical_term_is_not_suggested_again() -> None:
     assert not suggest_glossary_matches(
         [Segment(0, 1, "GenAI Platform и Apps")], [entry]
     )
+
+
+def test_example_glossary_does_not_rewrite_ordinary_words() -> None:
+    """Пример словаря копируют как есть, а «процессия» стояла там в автозамене."""
+    example = Path(__file__).parents[1] / "skills/transcriber/assets/glossary.example.yaml"
+    entries = load_glossary(example)
+    phrase = [Segment(0, 1, "по улице шли процессии, впереди процессия")]
+    assert apply_glossary(phrase, entries)[0][0].text == phrase[0].text
+    # Сама запись работает: настоящая ослышка по-прежнему заменяется.
+    assert apply_glossary([Segment(0, 1, "на страцессии")], entries)[0][0].text == "на стратсессии"

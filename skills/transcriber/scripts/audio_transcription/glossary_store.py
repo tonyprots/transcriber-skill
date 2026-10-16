@@ -38,6 +38,7 @@
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import os
 import re
@@ -100,8 +101,11 @@ HEADER = """\
 # его скилл только читает и никогда не меняет.
 #
 # Правки здесь уважаются: если поменять auto_apply руками, скилл больше не
-# трогает это поле. Чтобы убрать термин навсегда, удалите запись и запустите
-# прогон с --no-learn, иначе он вернётся из следующего расхождения.
+# трогает это поле. Чтобы термин не возвращался, не удаляйте запись, а
+# перенесите её в раздел pruned (canonical и reason) или выполните
+# scripts/glossary_edit.py forget ТЕРМИН: удалённая вернётся из следующего
+# расхождения, и --no-learn этого не меняет. Написание термина безопаснее
+# записать тем же скриптом: glossary_edit.py remember "слышится → пишется".
 #
 # auto_promote: false в корне файла — скилл копит кандидатов и доказательства,
 # но автозамену не включает никогда: только вы, полем auto_apply.
@@ -121,6 +125,10 @@ class LearnReport:
     pruned: list[str] = field(default_factory=list)
     total_entries: int = 0
     path: str | None = None
+    # Не для отчёта: каноны, которые молчат в подсказках (`unpromotable_terms`),
+    # по словарю уже после обучения. По словарю до него запись, ставшая
+    # неповышаемой в этом прогоне, подсказывала бы в нём ещё раз.
+    quiet: set[str] = field(default_factory=set)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -219,12 +227,67 @@ def load_document(path: Path) -> dict[str, Any]:
     payload.setdefault("pruned", [])
     if not all(isinstance(payload[key], list) for key in ("entries", "pending", "pruned")):
         raise ValueError(f"В словаре {path} entries, pending и pruned должны быть списками")
+    _check_items(payload, path)
     return payload
+
+
+# Поля learned, которые обучение перебирает как списки.
+_LEARNED_LISTS = ("held_aliases", "pruned_aliases", "sources")
+
+
+def _check_items(payload: dict[str, Any], path: Path) -> None:
+    """Проверяет форму записей до расчёта, а не после.
+
+    Раздел pending ждёт человека, и правка руками там штатная. Пустой пункт
+    («-») или пустые `aliases:` раньше проходили чтение и роняли обучение
+    TypeError уже после расшифровки: в пачке такое исключение обрывало всю
+    пачку, а посчитанный результат не записывался.
+    """
+    for section in ("entries", "pending", "pruned"):
+        for index, item in enumerate(payload[section], start=1):
+            where = f"Словарь {path}: {section} #{index}"
+            if not isinstance(item, dict):
+                raise ValueError(f"{where} должен быть отображением, а не {item!r}")
+            aliases = item.get("aliases", [])
+            if not isinstance(aliases, list) or not all(
+                isinstance(alias, (str, int, float)) for alias in aliases
+            ):
+                raise ValueError(f"{where}: aliases должен быть списком строк")
+            if "learned" not in item:
+                continue
+            learned = item["learned"]
+            if not isinstance(learned, dict):
+                raise ValueError(f"{where}: learned должен быть отображением")
+            for key in _LEARNED_LISTS:
+                if key in learned and not isinstance(learned[key], list):
+                    raise ValueError(f"{where}: learned.{key} должен быть списком")
 
 
 def entries_of(document: dict[str, Any]) -> list[GlossaryEntry]:
     """Записи документа в том же виде, что у обычного словаря."""
     return parse_entries(document.get("entries", []))
+
+
+def unpromotable_terms(document: dict[str, Any]) -> set[str]:
+    """Каноны выученных записей, которым автозамена не светит никогда.
+
+    Вариант встречался вне спора и короче порога («M ← м-м-м», «What ←
+    вот»): включить такую запись порог не даст, а фонетическая подсказка по
+    ней сватала термин к обычному слову. На 56 записях max это 35 ложных
+    подсказок из 89 и ни одной верной. Сама запись остаётся: уборка и
+    человек решают её судьбу, здесь она только не подсказывает.
+    """
+    quiet: set[str] = set()
+    for item in document.get("entries", []):
+        learned = item.get("learned")
+        if not isinstance(learned, dict) or _edited_by_hand(item) or item.get("auto_apply"):
+            continue
+        if learned.get("seen_as_word") and all(
+            _alias_letters(str(alias)) < PROMOTE_MIN_ALIAS_LETTERS
+            for alias in item.get("aliases", [])
+        ):
+            quiet.add(str(item.get("canonical", "")))
+    return quiet
 
 
 # Сколько отпечатков записей помнить на термин. Нужны они только чтобы отличить
@@ -469,7 +532,14 @@ def learn(
             report.added.append(canonical)
         else:
             learned = entry.setdefault("learned", {})
-            dropped = {normalize_text(str(item)) for item in learned.get("pruned_aliases", [])}
+            # Отложенное не возвращается подкреплением: блок обычных слов
+            # считается по тексту с автозаменами, и вернувшийся вариант в нём
+            # уже не появился бы — «кодекс» у Codex отложился бы ровно на один
+            # прогон. Вернуть вариант в замену может только человек.
+            dropped = {
+                normalize_text(str(item))
+                for item in (*learned.get("pruned_aliases", []), *learned.get("held_aliases", []))
+            }
             for alias in aliases:
                 if normalize_text(alias) in dropped:
                     continue
@@ -661,6 +731,264 @@ def prune(
     return document, report
 
 
+# --- Правка человеком (scripts/glossary_edit.py) ----------------------------
+#
+# Агент правил машинный YAML руками, и одна опечатка роняла прогоны. Здесь та
+# же правка без ввода-вывода: что записать и почему нельзя. Канал «человек
+# назвал написание» у словаря главный — большую часть автозамен включили руками.
+
+PAIR_SEPARATORS = ("→", "->", "=>")
+FORGOTTEN_REASON = "снято человеком"
+_CYRILLIC_LETTER = re.compile(r"[а-яё]")
+_LATIN_LETTER = re.compile(r"[a-z]", re.IGNORECASE)
+
+
+def parse_pair(line: str) -> tuple[str | None, str]:
+    """«клод → Claude» → («клод», «Claude»); «Claude» → (None, «Claude»)."""
+    text = line.strip()
+    for separator in PAIR_SEPARATORS:
+        if separator in text:
+            heard, written = (part.strip() for part in text.split(separator, 1))
+            if not heard or not written or any(sep in written for sep in PAIR_SEPARATORS):
+                raise ValueError(f"«{text}»: нужна одна пара «слышится → пишется»")
+            return heard, written
+    if not text:
+        raise ValueError("пустая строка вместо термина")
+    return None, text
+
+
+def _case_forms(heard: str, written: str) -> bool:
+    """«Яндексу» и «Яндексе» — формы одного слова, а не ослышка.
+
+    Замена литеральная: такая пара сломала бы падеж везде, где сказано
+    «Яндексу». Признак — общая основа и разные короткие кириллические хвосты.
+    Удвоенная последняя буква основы — не окончание, а написание: «тинькоф →
+    Тинькофф» исправляет ослышку, падежа в ней нет.
+    """
+    left, right = heard.casefold(), written.casefold()
+    stem = len(os.path.commonprefix([left, right]))
+    tails = (left[stem:], right[stem:])
+    if "" in tails and "".join(tails) == left[stem - 1 : stem]:
+        return False
+    return stem >= 3 and all(
+        len(tail) <= 2 and all(_CYRILLIC_LETTER.fullmatch(char) for char in tail) for tail in tails
+    )
+
+
+def _owner_of(document: dict[str, Any], term: str, skip: dict[str, Any] | None) -> str | None:
+    key = normalize_text(term)
+    for entry in document.get("entries", []):
+        if entry is skip:
+            continue
+        if key in {normalize_text(str(alias)) for alias in entry.get("aliases", [])}:
+            return str(entry.get("canonical"))
+    return None
+
+
+def _entry_named(document: dict[str, Any], canonical: str) -> dict[str, Any] | None:
+    key = normalize_text(canonical)
+    return next(
+        (
+            entry
+            for entry in document.get("entries", [])
+            if normalize_text(str(entry.get("canonical", ""))) == key
+        ),
+        None,
+    )
+
+
+def remember_problem(
+    document: dict[str, Any],
+    heard: str | None,
+    written: str,
+    language: str = STORE_BASE_LANGUAGE,
+) -> str | None:
+    """Почему пару нельзя записать молча. None — можно.
+
+    Пороги те же, что у автоматики (`_alias_problem`): короткий вариант и
+    вариант, не похожий на канон по звучанию, литеральная замена переписала
+    бы и там, где сказано другое. Сверх них — ошибки, которые делает именно
+    человек: падеж вместо ослышки, только регистр, перепутанные стороны.
+    """
+    owner = _owner_of(document, written, _entry_named(document, written))
+    if owner is not None:
+        return f"«{written}» сейчас стоит вариантом у «{owner}»: замены спорили бы"
+    if heard is None:
+        return None
+    if heard.casefold() == written.casefold():
+        return "отличается только регистром: замена переправила бы и обычное слово"
+    if (
+        written == written.lower()
+        and _CYRILLIC_LETTER.search(written)
+        and not _LATIN_LETTER.search(written)
+        and _LATIN_LETTER.search(heard)
+    ):
+        return f"похоже, стороны перепутаны: порядок «слышится → пишется», а не «{heard} ← {written}»"
+    if _case_forms(heard, written):
+        return (
+            f"«{heard}» и «{written}» — формы одного слова, замена сломает падеж; "
+            "заведи каждую форму своей записью"
+        )
+    if _entry_named(document, heard) is not None:
+        return f"«{heard}» — канон другой записи: замена переписала бы сам термин"
+    return _alias_problem(heard, written, set(), language)
+
+
+def _drop_alias(aliases: list[Any], key: str) -> tuple[list[str], list[str]]:
+    kept, dropped = [], []
+    for alias in aliases:
+        (dropped if normalize_text(str(alias)) == key else kept).append(str(alias))
+    return kept, dropped
+
+
+def remember(
+    document: dict[str, Any],
+    heard: str | None,
+    written: str,
+    *,
+    language: str = STORE_BASE_LANGUAGE,
+    today: date | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    """Человек назвал написание: ручная запись с автозаменой. Ввода-вывода нет.
+
+    Возвращает новый документ и что изменилось. Стража здесь нет — его
+    решение (`remember_problem`) принимает вызывающий: `--force` существует.
+    """
+    today = today or date.today()
+    result = copy.deepcopy(document)
+    entries: list[dict[str, Any]] = result.setdefault("entries", [])
+    notes: list[str] = []
+    target = _entry_named(result, written)
+    # Вариант, занятый другой записью, и сам канон в чужих вариантах
+    # переезжают: один кусок текста правит одна запись. Выученная запись
+    # запоминает снятое, иначе следующий прогон вернул бы его обратно.
+    for term in filter(None, (heard, written)):
+        key = normalize_text(term)
+        for entry in entries:
+            if entry is target:
+                continue
+            kept, dropped = _drop_alias(entry.get("aliases", []), key)
+            if not dropped:
+                continue
+            entry["aliases"] = kept
+            learned = entry.get("learned")
+            if isinstance(learned, dict) and not _edited_by_hand(entry):
+                learned["pruned_aliases"] = sorted(
+                    {*map(str, learned.get("pruned_aliases", [])), *dropped}
+                )
+            notes.append(f"«{dropped[0]}» снят с записи «{entry.get('canonical')}»")
+        pending = []
+        for item in result.get("pending", []):
+            kept, dropped = _drop_alias(item.get("aliases", []), key)
+            if dropped:
+                notes.append(f"«{dropped[0]}» больше не ждёт написания")
+                if not kept:
+                    continue
+                item["aliases"] = kept
+            pending.append(item)
+        result["pending"] = pending
+
+    if target is None:
+        target = {
+            "canonical": written,
+            "aliases": [],
+            "context": f"назван человеком {today.isoformat()}",
+            "auto_apply": True,
+            "case_sensitive": False,
+        }
+        entries.append(target)
+        notes.append(f"новая запись «{written}»")
+    else:
+        if not _edited_by_hand(target):
+            # Выученная запись становится ручной: человек назвал канон. Её
+            # варианты он не проверял, поэтому в замену идут только те, что
+            # прошли бы порог сами; остальные откладываются.
+            learned = target.setdefault("learned", {})
+            if not target.get("auto_apply"):
+                safe, held = [], []
+                for alias in map(str, target.get("aliases", [])):
+                    ok = not learned.get("seen_as_word") and (
+                        _alias_problem(alias, written, set(), language) is None
+                    )
+                    (safe if ok else held).append(alias)
+                target["aliases"] = safe
+                if held:
+                    learned["held_aliases"] = sorted(
+                        {*map(str, learned.get("held_aliases", [])), *held}
+                    )
+                    notes.append(f"отложены варианты {', '.join(held)}")
+            learned.pop("auto_apply_written", None)
+            learned.pop("held_back", None)
+            notes.append(f"запись «{written}» теперь ручная")
+        elif not target.get("auto_apply"):
+            notes.append(f"у «{written}» включена автозамена")
+        target["canonical"] = written
+        target["auto_apply"] = True
+
+    if heard is not None:
+        key = normalize_text(heard)
+        aliases = [str(alias) for alias in target.get("aliases", [])]
+        if key not in {normalize_text(alias) for alias in aliases}:
+            aliases.append(heard)
+            notes.append(f"«{heard}» → «{written}»")
+        target["aliases"] = aliases
+        learned = target.get("learned")
+        if isinstance(learned, dict):
+            for name in ("held_aliases", "pruned_aliases"):
+                if name in learned:
+                    learned[name] = _drop_alias(learned[name], key)[0]
+
+    key = normalize_text(written)
+    pruned = result.get("pruned", [])
+    kept_pruned = [
+        item for item in pruned if normalize_text(str(item.get("canonical", ""))) != key
+    ]
+    if len(kept_pruned) != len(pruned):
+        result["pruned"] = kept_pruned
+        notes.append(f"«{written}» вернулся из pruned")
+    return result, notes
+
+
+def forget(
+    document: dict[str, Any], canonical: str, *, today: date | None = None
+) -> tuple[dict[str, Any], list[str]]:
+    """Убирает термин так, чтобы он не вернулся: запись уезжает в pruned.
+
+    Просто удалённая запись вырастала заново из следующего расхождения, а
+    канон из `pruned` обучение не заводит. Записи нет — канон всё равно
+    заносится: так закрывают термин, который ещё только набирает записи.
+    """
+    today = today or date.today()
+    result = copy.deepcopy(document)
+    key = normalize_text(canonical)
+    found = [
+        entry
+        for entry in result.get("entries", [])
+        if normalize_text(str(entry.get("canonical", ""))) == key
+    ]
+    result["entries"] = [
+        entry for entry in result.get("entries", []) if all(entry is not item for item in found)
+    ]
+    pruned = result.setdefault("pruned", [])
+    already = any(normalize_text(str(item.get("canonical", ""))) == key for item in pruned)
+    for entry in found or ([] if already else [{"canonical": canonical, "aliases": []}]):
+        pruned.append(
+            {
+                "canonical": entry.get("canonical"),
+                "aliases": list(entry.get("aliases", [])),
+                "reason": FORGOTTEN_REASON,
+                "pruned_on": today.isoformat(),
+            }
+        )
+    if found:
+        notes = [f"«{entry.get('canonical')}» перенесена в pruned" for entry in found]
+    elif already:
+        notes = [f"«{canonical}» уже в pruned"]
+    else:
+        notes = [f"записи «{canonical}» не было; канон занесён в pruned, чтобы не завёлся"]
+    return result, notes
+
+
 def save_document(path: Path, document: dict[str, Any]) -> None:
     """Пишет словарь атомарно: прогон могут прервать, файл переживёт.
 
@@ -725,5 +1053,6 @@ def update_from_run(
         document, candidates, blocked=blocked, source=source, today=today, language=language
     )
     report.path = str(path)
+    report.quiet = unpromotable_terms(document)
     save_document(path, document)
     return entries_of(document), report

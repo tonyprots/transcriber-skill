@@ -131,6 +131,13 @@ def test_pipeline_writes_full_contract(tmp_path: Path, spoken_audio: Path, monke
     srt = (output / "subtitles.srt").read_text(encoding="utf-8")
     assert "-->" in srt and "PostgreSQL" in srt
 
+    # Словарь пополнен, а не «не пополнен»: перехват в cli ловит и TypeError
+    # (поле словаря, опустошённое руками), и ошибка в самом learn() без этой
+    # проверки ушла бы в предупреждение незамеченной.
+    assert not any("Словарь не пополнен" in warning for warning in manifest["warnings"])
+    pending = cli.load_document(Path(manifest["glossary"]["store"]))["pending"]
+    assert [item["aliases"] for item in pending] == [["PostgreSQL", "постгрес"]]
+
 
 @requires_speech
 def test_pipeline_applies_glossary_and_keeps_raw_intact(
@@ -661,3 +668,158 @@ def test_link_metadata_reaches_manifest_and_not_the_text(
     own = json.loads((local / "manifest.json").read_text(encoding="utf-8"))["source"]
     assert own["recorded_at_source"] in {"container", "file_mtime"}
     assert own["chapters"] is None and own["description"] is None
+
+
+@requires_speech
+def test_failed_learning_keeps_the_finished_transcript(
+    tmp_path: Path, spoken_audio: Path, monkeypatch
+) -> None:
+    """Обучение падает после расшифровки — результат всё равно пишется.
+
+    Раньше ловился только OSError, и TypeError из испорченного pending
+    обрывал прогон, а в пачке — всю пачку.
+    """
+    monkeypatch.setattr(cli, "run_isolated_backend", fake_backend)
+
+    def broken(*args, **kwargs):
+        raise TypeError("'NoneType' object is not iterable")
+
+    monkeypatch.setattr(cli, "update_from_run", broken)
+    output = tmp_path / "result"
+
+    cli.run(
+        cli.build_parser().parse_args(
+            [
+                str(spoken_audio), "--output", str(output), "--mode", "max",
+                "--language", "ru", "--no-cache", "--quiet",
+                "--verifier-window-seconds", "0",
+            ]
+        )
+    )
+
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    assert any("Словарь не пополнен" in warning for warning in manifest["warnings"])
+    assert "PostgreSQL" in (output / "readable.md").read_text(encoding="utf-8")
+
+
+@requires_speech
+def test_broken_store_warns_and_is_left_alone(
+    tmp_path: Path, spoken_audio: Path, monkeypatch
+) -> None:
+    """Опечатка в ручной правке своего словаря роняла каждый прогон."""
+    monkeypatch.setattr(cli, "run_isolated_backend", fake_backend)
+    store = tmp_path / "glossary.yaml"
+    monkeypatch.setenv("TRANSCRIBER_GLOSSARY_STORE", str(store))
+    broken = "version: 1\nentries:\n  - canonical: PostgreSQL\n    aliases: [постгрес\n"
+    store.write_text(broken, encoding="utf-8")
+    output = tmp_path / "result"
+
+    cli.run(
+        cli.build_parser().parse_args(
+            [
+                str(spoken_audio), "--output", str(output), "--mode", "max",
+                "--language", "ru", "--no-cache", "--quiet",
+                "--verifier-window-seconds", "0",
+            ]
+        )
+    )
+
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    assert any("не прочитан" in warning for warning in manifest["warnings"])
+    assert manifest["glossary"]["learning"] is False
+    # Файл не перезаписан: правку человека вместе с опечаткой чинит человек.
+    assert store.read_text(encoding="utf-8") == broken
+
+
+@requires_speech
+def test_unpromotable_learned_entry_does_not_suggest(
+    tmp_path: Path, spoken_audio: Path, monkeypatch
+) -> None:
+    """Выученная запись, которой автозамена не светит, подсказок не даёт.
+
+    «Postgres ← пг» встречен вне спора и короче порога: подсказка
+    «PostgreSQL → Postgres» была бы того же сорта, что «вот → What».
+    Соседняя запись с полноценным вариантом подсказывает как прежде.
+    """
+    monkeypatch.setattr(cli, "run_isolated_backend", fake_backend)
+    store = tmp_path / "glossary.yaml"
+    monkeypatch.setenv("TRANSCRIBER_GLOSSARY_STORE", str(store))
+    store.write_text(
+        "version: 1\nentries:\n"
+        "  - canonical: Postgres\n    aliases: [пг]\n    auto_apply: false\n"
+        "    learned:\n      auto_apply_written: false\n      seen_as_word: true\n"
+        "  - canonical: PostgreSQL Pro\n    aliases: [постгрес про]\n    auto_apply: false\n"
+        "    learned:\n      auto_apply_written: false\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "result"
+
+    cli.run(
+        cli.build_parser().parse_args(
+            [
+                str(spoken_audio), "--output", str(output), "--mode", "max",
+                "--language", "ru", "--no-cache", "--quiet",
+                "--verifier-window-seconds", "0",
+                # Без обучения: уборка после прогона сняла бы «пг» как
+                # вариант короче трёх знаков, и проверять было бы нечего.
+                "--no-learn",
+            ]
+        )
+    )
+
+    audit = json.loads((output / "glossary-audit.json").read_text(encoding="utf-8"))
+    suggested = {item["canonical"] for item in audit["suggestions"]}
+    assert "Postgres" not in suggested
+    assert "PostgreSQL Pro" in suggested
+
+
+@requires_speech
+def test_entry_that_turns_unpromotable_in_this_run_does_not_suggest(
+    tmp_path: Path, spoken_audio: Path, monkeypatch
+) -> None:
+    """Запись, ставшая неповышаемой в этом же прогоне, молчит уже в нём.
+
+    «Lead ← лид»: вариант короче порога, и в этой записи обе модели сошлись на
+    «лид» — обучение ставит `seen_as_word`. Раньше молчащие записи считались по
+    словарю до обучения, и «лиды → Lead» подсказывалось ещё один прогон.
+    """
+
+    def backend(name: str, chunks, language: str, work_dir: Path, **kwargs) -> Hypothesis:
+        if name.endswith("-lid"):
+            return language_hypothesis(name, [{"ru": 0.97, "en": 0.03}] * len(chunks), 0.1)
+        text = "сегодня наш лид смотрит лиды" if name == "gigaam" else "сегодня наш лид смотрит лида"
+        chunks = list(chunks)
+        metadata = {
+            "chunks": [
+                {"sequence": chunk.sequence, "start": chunk.start, "end": chunk.end, "text": text}
+                for chunk in chunks
+            ]
+        }
+        segments = [Segment(chunk.start, chunk.end, text) for chunk in chunks]
+        return Hypothesis(f"{name}-fake", language, len(chunks), segments, metadata=metadata)
+
+    monkeypatch.setattr(cli, "run_isolated_backend", backend)
+    store = tmp_path / "glossary.yaml"
+    monkeypatch.setenv("TRANSCRIBER_GLOSSARY_STORE", str(store))
+    store.write_text(
+        "version: 1\nentries:\n"
+        "  - canonical: Lead\n    aliases: [лид]\n    auto_apply: false\n"
+        "    learned:\n      auto_apply_written: false\n      windows: 1\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "result"
+
+    cli.run(
+        cli.build_parser().parse_args(
+            [
+                str(spoken_audio), "--output", str(output), "--mode", "max",
+                "--language", "ru", "--no-cache", "--quiet",
+                "--verifier-window-seconds", "0",
+            ]
+        )
+    )
+
+    (entry,) = cli.load_document(store)["entries"]
+    assert entry["learned"]["seen_as_word"] is True
+    audit = json.loads((output / "glossary-audit.json").read_text(encoding="utf-8"))
+    assert "Lead" not in {item["canonical"] for item in audit["suggestions"]}

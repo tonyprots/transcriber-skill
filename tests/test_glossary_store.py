@@ -8,12 +8,14 @@ from pathlib import Path
 import pytest
 import yaml
 
-from audio_transcription.glossary import GlossaryEntry, merge_glossaries
+from audio_transcription.glossary import GlossaryEntry, apply_glossary, merge_glossaries
 from audio_transcription.glossary_store import (
+    HEADER,
     load_document,
     record_fingerprint,
     save_document,
     store_path,
+    unpromotable_terms,
     update_from_run,
 )
 from audio_transcription.mining import undisputed_words
@@ -82,10 +84,14 @@ def test_ordinary_word_never_starts_being_replaced(tmp_path: Path) -> None:
 
 
 def test_pair_that_does_not_sound_alike_is_not_promoted(tmp_path: Path) -> None:
-    """«значит» против «GPT» — совпадение в очереди, а не ослышка."""
+    """«стакан» против «GPT» — совпадение в очереди, а не ослышка.
+
+    Пара «значит / GPT» до словаря больше не доходит: паразиты и служебные
+    слова отсекает уже отбор кандидатов.
+    """
     store = tmp_path / "glossary.yaml"
     for source in ("rec1", "rec2", "rec3", "rec4"):
-        entries, _ = update_from_run(store, _run("значит", "GPT"), source=source)
+        entries, _ = update_from_run(store, _run("стакан", "GPT"), source=source)
 
     assert entries[0].auto_apply is False
     assert "звучит не как" in load_document(store)["entries"][0]["learned"]["held_back"]
@@ -134,8 +140,37 @@ def test_curated_glossary_wins_over_the_learned_one() -> None:
     ]
     merged = merge_glossaries(curated, learned)
 
-    assert [entry.canonical for entry in merged] == ["Threads", "Obsidian"]
-    assert merged[0].aliases == ("трэц",), "запись пользователя не должна подменяться"
+    assert merged[0] == curated[0], "запись пользователя не должна подменяться"
+    # Занятый пользователем вариант из выученной записи ушёл, свой остался.
+    assert [(entry.canonical, entry.aliases) for entry in merged[1:]] == [
+        ("Threads", ("трэдс",)),
+        ("Obsidian", ("обсидиан",)),
+    ]
+
+
+def test_curated_term_without_aliases_keeps_the_learned_replacement() -> None:
+    """Notion в выверенном словаре без вариантов снимал выученную замену «нотион»."""
+    curated = [GlossaryEntry("Notion", (), auto_apply=True)]
+    learned = [GlossaryEntry("notion", ("нотион",), auto_apply=True)]
+    merged = merge_glossaries(curated, learned)
+
+    corrected, _ = apply_glossary([Segment(0, 1, "открой нотион")], merged)
+    assert corrected[0].text == "открой Notion", "написание канона — пользователя"
+
+
+def test_curated_switch_off_and_curated_misspelling_win() -> None:
+    curated = [
+        GlossaryEntry("Notion", (), auto_apply=False),
+        GlossaryEntry("Битрикс24", ("Bitrix",), auto_apply=True),
+    ]
+    learned = [
+        GlossaryEntry("Notion", ("нотион",), auto_apply=True),
+        # Канон выученной записи пользователь назвал ослышкой.
+        GlossaryEntry("Bitrix", ("битрикс",), auto_apply=True),
+    ]
+    merged = merge_glossaries(curated, learned)
+
+    assert [(entry.canonical, entry.auto_apply) for entry in merged[2:]] == [("Notion", False)]
 
 
 def test_undisputed_words_are_counted_word_by_word() -> None:
@@ -179,15 +214,15 @@ def _promote_threads(store: Path) -> None:
 
 
 def test_switched_on_entry_does_not_pick_up_an_unsafe_alias(tmp_path: Path) -> None:
-    """После повышения запись копит варианты дальше; «в» в них попасть не должно."""
+    """После повышения запись копит варианты дальше; короткое «тре» в замену попасть не должно."""
     store = tmp_path / "glossary.yaml"
     _promote_threads(store)
 
-    entries, _ = update_from_run(store, _run("в", "Threads"), source="rec4")
+    entries, _ = update_from_run(store, _run("тре", "Threads"), source="rec4")
 
     assert entries[0].auto_apply is True
     assert entries[0].aliases == ("трэц",)
-    assert load_document(store)["entries"][0]["learned"]["held_aliases"] == ["в"]
+    assert load_document(store)["entries"][0]["learned"]["held_aliases"] == ["тре"]
 
 
 def test_switched_on_entry_is_switched_off_when_its_alias_turns_out_ordinary(
@@ -317,6 +352,78 @@ def test_pruned_term_is_not_learned_again(tmp_path: Path) -> None:
     assert not any(entry.canonical == "Zon" for entry in entries)
 
 
+def test_header_advice_matches_what_learn_respects(tmp_path: Path) -> None:
+    """Шапка советовала «удалить и прогнать с --no-learn» — термин возвращался.
+
+    Работает перенос в pruned, и хватает canonical с причиной, без вариантов.
+    """
+    assert "--no-learn этого не меняет" in HEADER
+    assert "pruned (canonical и reason)" in HEADER
+    store = tmp_path / "glossary.yaml"
+    update_from_run(store, _run("макросов", "Microsoft"), source="rec1")
+    document = load_document(store)
+    document["pruned"] = [{"canonical": "Microsoft", "reason": "снято человеком"}]
+    document["entries"] = []
+    save_document(store, document)
+
+    entries, report = update_from_run(store, _run("макросов", "Microsoft"), source="rec2")
+
+    assert entries == [] and report.added == []
+    assert load_document(store)["entries"] == []
+
+
+@pytest.mark.parametrize(
+    "pending",
+    ["pending:\n  -\n", "pending:\n  - aliases:\n    windows: 1\n", "pending:\n  - строка\n"],
+    ids=["empty-item", "null-aliases", "string-item"],
+)
+def test_hand_broken_pending_is_rejected_on_read(tmp_path: Path, pending: str) -> None:
+    """Раньше чтение проходило, а обучение падало TypeError уже после расшифровки."""
+    store = tmp_path / "glossary.yaml"
+    text = "version: 1\nentries: []\n" + pending
+    store.write_text(text, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="pending #1"):
+        load_document(store)
+    with pytest.raises(ValueError, match="pending #1"):
+        update_from_run(store, _run("трэц", "Threads"), source="rec1")
+    assert store.read_text(encoding="utf-8") == text
+
+
+def test_broken_learned_field_is_rejected_on_read(tmp_path: Path) -> None:
+    store = tmp_path / "glossary.yaml"
+    store.write_text(
+        "version: 1\nentries:\n  - canonical: Threads\n    aliases: [трэц]\n"
+        "    learned:\n      held_aliases:\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="learned.held_aliases"):
+        load_document(store)
+
+
+def test_unpromotable_learned_terms_are_named() -> None:
+    """Вариант короче порога и встречен вне спора — запись не включится никогда."""
+
+    def learned(canonical: str, aliases: list[str], **extra) -> dict:
+        return {
+            "canonical": canonical,
+            "aliases": aliases,
+            "auto_apply": extra.pop("auto_apply", False),
+            "learned": {"auto_apply_written": extra.pop("written", False), **extra},
+        }
+
+    document = {
+        "entries": [
+            learned("What", ["вот"], seen_as_word=True),
+            learned("Threads", ["трэц"], seen_as_word=True),  # вариант длинный — может ещё пригодиться
+            learned("SEO", ["сео"]),  # вне спора не встречался
+            learned("AI", ["ай"], seen_as_word=True, auto_apply=True, written=True),
+            {"canonical": "ROI", "aliases": ["рои"], "learned": {"seen_as_word": True}},  # ручная
+        ]
+    }
+    assert unpromotable_terms(document) == {"What"}
+
+
 def test_verifier_spelling_of_a_hand_term_reinforces_it(tmp_path: Path) -> None:
     store = tmp_path / "glossary.yaml"
     store.write_text(
@@ -431,3 +538,48 @@ def test_unknown_language_learns_nothing(tmp_path: Path) -> None:
     store = tmp_path / "glossary.de.yaml"
     entries, _ = update_from_run(store, _run("Chatsubiti", "ChatGPT"), source="rec1", language="de")
     assert entries == []
+
+
+def test_held_alias_does_not_return_with_the_next_reinforcement(tmp_path: Path) -> None:
+    """Отложенный вариант остаётся отложенным, даже когда расхождение повторилось.
+
+    Ревью 2026-10-12: «кодекс» у Codex уходил в held_aliases, а следующий
+    прогон с тем же местом дописывал его обратно в aliases — и «Уголовный
+    кодекс» становился «Уголовный Codex».
+    """
+    from audio_transcription.glossary import apply_glossary
+    from audio_transcription.glossary_store import entries_of
+
+    store = tmp_path / "glossary.yaml"
+    save_document(
+        store,
+        {
+            "version": 1,
+            "entries": [
+                {
+                    "canonical": "Codex",
+                    "aliases": ["кодэкс", "кодекс"],
+                    "auto_apply": True,
+                    "learned": {
+                        "auto_apply_written": True,
+                        "latin": True,
+                        "windows": 6,
+                        "sources": ["rec1", "rec2", "rec3"],
+                    },
+                }
+            ],
+            "pending": [],
+        },
+    )
+    update_from_run(store, _run("кодекс", "Codex"), blocked={"кодекс"}, source="rec4")
+    learned = load_document(store)["entries"][0]
+    assert learned["aliases"] == ["кодэкс"] and learned["learned"]["held_aliases"] == ["кодекс"]
+
+    entries, _ = update_from_run(store, _run("кодекс", "Codex"), source="rec5")
+
+    document = load_document(store)
+    assert "кодекс" not in document["entries"][0]["aliases"]
+    assert document["entries"][0]["learned"]["held_aliases"] == ["кодекс"]
+    segments, _ = apply_glossary([Segment(0, 1, "Уголовный кодекс РФ запрещает это")], entries_of(document))
+    assert segments[0].text == "Уголовный кодекс РФ запрещает это"
+    assert entries[0].auto_apply is True and entries[0].aliases == ("кодэкс",)

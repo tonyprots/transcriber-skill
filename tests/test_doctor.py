@@ -49,3 +49,23 @@ def test_newer_release_is_reported(monkeypatch) -> None:
         lambda check_updates=False: {"path": "/opt/homebrew/bin/yt-dlp", "version": "2026.08.19", "age_days": 5, "stale": False, "deno": "/d", "latest": "2026.09.20"},
     )
     assert any("вышел yt-dlp 2026.09.20" in text for text in doctor.collect()["warnings"])
+
+
+def test_unreadable_glossary_is_a_warning(tmp_path: Path, monkeypatch) -> None:
+    from audio_transcription import glossary_store
+
+    store = tmp_path / "glossary.yaml"
+    store.write_text("entries: [\n", encoding="utf-8")
+    profiles = tmp_path / "glossaries"
+    profiles.mkdir()
+    (profiles / "acme.en.yaml").write_text("pending:\n  -\n", encoding="utf-8")
+    (profiles / "fine.yaml").write_text("entries: []\n", encoding="utf-8")
+    monkeypatch.setenv("TRANSCRIBER_GLOSSARY_STORE", str(store))
+    monkeypatch.setattr(glossary_store, "PROFILES_DIR", profiles)
+
+    findings = doctor.check_glossaries()
+
+    assert len(findings) == 2
+    assert any(str(store) in text for text in findings)
+    assert any("acme.en.yaml" in text for text in findings)
+    assert not any("fine.yaml" in text for text in findings)

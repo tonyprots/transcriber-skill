@@ -107,3 +107,37 @@ def test_preposition_next_to_the_mishearing_survives():
     segments, _, taken = run("добавь, как в ВКрософт борется", "добавь, как Microsoft борется")
     assert [c.before for c in taken] == ["ВКрософт"]
     assert segments[0].text == "добавь, как в Microsoft борется"
+
+
+def test_canonical_goes_to_the_disputed_place_not_the_first_match():
+    # «так» — частое слово: оно стоит в сегменте и раньше спорного места.
+    # Ревью 2026-10-12: канон вставал в первое вхождение, спорное оставалось.
+    segments, items, taken = run(
+        "я так думаю, поэтому открой так и посмотри таблицу",
+        "я так думаю, поэтому открой Docs и посмотри таблицу",
+    )
+    assert segments[0].text == "я так думаю, поэтому открой Docs и посмотри таблицу"
+    assert [(c.before, c.after) for c in taken] == [("так", "Docs")]
+
+
+def test_ambiguous_place_is_left_for_a_human():
+    """Кусок повторяется, а контекст не отличает вхождения: текст не трогаем."""
+    from audio_transcription.models import ReviewItem
+
+    segments = [Segment(0.0, 10.0, "так и так")]
+    item = ReviewItem(
+        start=0.0,
+        end=10.0,
+        readable_text="так",
+        comparison_text="Docs",
+        similarity=0.5,
+        differing_tokens=("так / Docs",),
+        reason="тест",
+        kind="substantive",
+        primary_span="так",
+        verifier_span="Docs",
+    )
+    corrected, items, taken = take_verifier_canonicals(segments, [item], ENTRIES)
+    assert taken == []
+    assert corrected[0].text == "так и так"
+    assert [i.kind for i in items] == ["substantive"]

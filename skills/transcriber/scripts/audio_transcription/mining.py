@@ -17,13 +17,22 @@ import re
 from collections import OrderedDict
 from typing import Any
 
+from .fillers import _TOKEN as _FILLER_TOKEN
 from .models import ReviewItem, Segment
 from .phonetic import phonetic_similarity
-from .reconcile import normalize_text
+from .reconcile import FILLERS, FUNCTION_WORDS, MINOR_KINDS, normalize_text
 
 _LATIN = re.compile(r"[A-Za-z]")
 _CYRILLIC = re.compile(r"[А-Яа-яЁё]")
 _LETTER = re.compile(r"[A-Za-zА-Яа-яЁё]")
+
+# Виды мест, на которых словарю учиться нечему: паразиты, число словом и
+# цифрой, выдумки проверяющей. «Повтор или обрыв» (`disfluency`) сюда не
+# входит, хотя очередь и считает его мелочью: этим видом она зовёт и название,
+# сказанное дважды рядом («нотион, да, нотион / Notion, да, Notion»), — его
+# слова есть среди соседних. Настоящее заикание («мы мы / мы») отсекают и без
+# этого вида: у одной стороны пусто, а служебное слово не термин.
+NOTHING_TO_LEARN = MINOR_KINDS - {"disfluency"}
 
 # Строже порога подсказок в очереди: там ошибка стоит одной лишней строки, а
 # здесь склейка двух разных терминов испортит готовую запись словаря.
@@ -135,6 +144,32 @@ def _latin_candidate(heard: str, verifier: str) -> tuple[bool, bool]:
     return heard[:1].isupper() and verifier[:1].isupper(), False
 
 
+def not_a_term(heard: str) -> bool:
+    """Услышанное — паразит или служебное слово: термином такое место не станет.
+
+    Проверяющая на «хмм» и «вот» пишет что придётся («Addicts», «What»), и
+    без этой отсечки словарь заводил записи на звуках, которые readable.md
+    всё равно убирает.
+    """
+    key = normalize_text(heard)
+    return not key or key in FILLERS or key in FUNCTION_WORDS or bool(_FILLER_TOKEN.fullmatch(key))
+
+
+def _verifier_spelling(verifier: str, item: dict[str, Any]) -> str:
+    """Написание проверяющей в исходном регистре.
+
+    С 0.13 расхождение отдаёт токены как есть, и регистр уже в них. Искать его
+    в `comparison_text` нельзя: этот контекст собран из соседних слов
+    основной модели, и строчное «notion» рядом давало канон «notion»
+    вместо «Notion». Строчный токен бывает и в старом `segments.json`, где
+    расхождения хранились нормализованными, — тогда регистр берётся из
+    фрагмента проверяющей, а у совсем старых записей — из контекста.
+    """
+    if verifier != verifier.casefold():
+        return verifier
+    return original_case(verifier, item.get("verifier_span") or item.get("comparison_text", ""))
+
+
 def collect_candidates(
     review_items: list[dict[str, Any]],
     known: set[str],
@@ -154,6 +189,8 @@ def collect_candidates(
     latin_route = language != "ru"
     seen: "OrderedDict[tuple[str, str], dict]" = OrderedDict()
     for item in review_items:
+        if item.get("kind") in NOTHING_TO_LEARN:
+            continue
         for pair in item.get("differing_tokens", []):
             if " / " not in pair:
                 continue
@@ -162,9 +199,11 @@ def collect_candidates(
                 continue
             for heard, verifier in aligned_words(left, right):
                 heard, verifier = clean_token(heard), clean_token(verifier)
-                if not heard or not verifier:
+                if not heard or not verifier or not_a_term(heard):
                     continue
-                if heard in known or verifier in known:
+                # `known` нормализован, а токены — в исходном регистре: без
+                # нормализации «Backlog» проходил мимо записи «backlog».
+                if normalize_text(heard) in known or normalize_text(verifier) in known:
                     continue
                 if not (_LETTER.search(heard) and _LETTER.search(verifier)):
                     continue
@@ -193,11 +232,7 @@ def collect_candidates(
                         # основная модель, правильного написания нет ни у
                         # кого — тогда это не готовая запись, а место,
                         # которое должен назвать пользователь.
-                        "canonical": (
-                            original_case(verifier, item.get("comparison_text", ""))
-                            if verifier_latin
-                            else ""
-                        ),
+                        "canonical": _verifier_spelling(verifier, item) if verifier_latin else "",
                         "latin": term,
                         "count": 0,
                         "first_at": float(item.get("start", 0.0)),

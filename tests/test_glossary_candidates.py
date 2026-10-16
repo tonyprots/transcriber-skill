@@ -16,7 +16,8 @@ def _item(heard: str, verifier: str, start: float = 1.0) -> dict:
         "end": start + 3,
         "readable_text": f"про {heard} сегодня",
         "comparison_text": f"про {verifier} сегодня",
-        "differing_tokens": [f"{heard.lower()} / {verifier.lower()}"],
+        # Регистр как у find_review_items: расхождение отдаёт исходное написание.
+        "differing_tokens": [f"{heard} / {verifier}"],
         "reason": "тест",
     }
 
@@ -132,3 +133,80 @@ def test_cli_takes_language_from_manifest_and_refuses_mixed(tmp_path: Path) -> N
     assert yaml.safe_load(output.read_text(encoding="utf-8"))["entries"][0]["canonical"] == "ChatGPT"
     russian = result("ru", "ru", "нотион", "Notion")
     assert main([str(english), str(russian)]) == 2
+
+
+def test_known_terms_are_skipped_whatever_the_case() -> None:
+    """`known` нормализован, а токены расхождения — в исходном регистре и с «ё»."""
+    assert collect_candidates([_item("бэклог", "Backlog")], known={"backlog"}) == []
+    assert collect_candidates([_item("Ёлка", "Yolka")], known={"елка"}) == []
+
+
+def test_canonical_keeps_the_verifier_spelling_not_a_neighbour() -> None:
+    """Контекст проверяющей собран из слов основной: там то же слово бывает строчными."""
+    item = {
+        "start": 1.0,
+        "end": 3.0,
+        "comparison_text": "мы сравнили notion и Notion вчера",
+        "differing_tokens": ["нотион / Notion"],
+        "verifier_span": "Notion",
+    }
+    (candidate,) = collect_candidates([item], known=set())
+    assert candidate["canonical"] == "Notion"
+    # Старый segments.json: токены строчными, регистр восстанавливается по контексту.
+    old = {"start": 1.0, "end": 3.0, "comparison_text": "про Notion сегодня",
+           "differing_tokens": ["нотион / notion"]}
+    assert collect_candidates([old], known=set())[0]["canonical"] == "Notion"
+
+
+def test_fillers_and_function_words_do_not_become_terms() -> None:
+    """«Addicts ← Хмм», «What ← Вот» — такие записи словарь завёл на живых прогонах."""
+    junk = [
+        _item("Хмм", "Addicts"),
+        _item("Вот", "What"),
+        _item("э-э-э", "Monday"),
+        _item("и-и-и", "AI"),
+        _item("для", "For"),
+    ]
+    assert collect_candidates(junk, known=set()) == []
+    # Место, которое очередь сама считает мелочью, кандидатом тоже не будет.
+    minor = {**_item("нотион", "Notion"), "kind": "filler"}
+    assert collect_candidates([minor], known=set()) == []
+    assert [c["canonical"] for c in collect_candidates([_item("нотион", "Notion")], known=set())] == ["Notion"]
+
+
+def _queue(primary: str, verifier: str) -> list[dict]:
+    """Очередь одного окна так, как её собирает пайплайн."""
+    from dataclasses import asdict
+
+    from audio_transcription.models import Hypothesis, Segment
+    from audio_transcription.reconcile import find_review_items
+
+    items = find_review_items(
+        Hypothesis("primary", "ru", 0.0, [Segment(0.0, 5.0, primary)]),
+        Hypothesis("verifier", "ru", 0.0, [Segment(0.0, 5.0, verifier)]),
+    )
+    return [asdict(item) for item in items]
+
+
+def test_term_repeated_nearby_still_becomes_candidate() -> None:
+    """Термин, сказанный дважды рядом, очередь зовёт повтором, но словарю он нужен.
+
+    Каждое «нотион / Notion» здесь — вид `disfluency`: слова расхождения есть
+    среди четырёх соседних. Если отсекать этот вид целиком, название, которое
+    повторили через одно-два слова, мимо словаря уходит совсем.
+    """
+    queue = _queue("мы открыли нотион, да, нотион вчера", "мы открыли Notion, да, Notion вчера")
+    assert {item["kind"] for item in queue} == {"disfluency"}
+
+    (candidate,) = collect_candidates(queue, known=set())
+    assert (candidate["heard"], candidate["canonical"], candidate["count"]) == ("нотион", "Notion", 2)
+
+
+def test_plain_repetition_is_still_not_a_candidate() -> None:
+    """Настоящее заикание отсекается и без отказа от вида `disfluency`."""
+    for primary, verifier in (
+        ("мы мы пошли домой", "мы пошли домой"),
+        ("ну это это самое", "ну это самое"),
+        ("it's it's there", "it's there"),
+    ):
+        assert collect_candidates(_queue(primary, verifier), known=set(), min_count=1) == []

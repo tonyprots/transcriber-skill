@@ -116,3 +116,54 @@ def test_waiting_stays_quiet_when_stage_is_quick() -> None:
         pass
     assert stream.getvalue() == ""
 
+
+
+def _no_heavy_work(monkeypatch) -> list[str]:
+    """Заглушки очереди машины и VAD: до них проверка дойти не должна."""
+    called: list[str] = []
+
+    def machine_slot(*args, **kwargs):
+        called.append("machine_slot")
+        raise AssertionError("проверка должна была упасть раньше очереди")
+
+    def split_speech_windows(*args, **kwargs):
+        called.append("split_speech_windows")
+        raise AssertionError("проверка должна была упасть раньше VAD")
+
+    monkeypatch.setattr(cli, "machine_slot", machine_slot)
+    monkeypatch.setattr(cli, "split_speech_windows", split_speech_windows)
+    return called
+
+
+@pytest.mark.parametrize("content", [None, "entries: [\n", "entries:\n  - aliases: [x]\n"],
+                         ids=["missing", "broken-yaml", "no-canonical"])
+def test_bad_curated_glossary_fails_before_the_queue(
+    tmp_path: Path, monkeypatch, content: str | None
+) -> None:
+    glossary = tmp_path / "glossary.yaml"
+    if content is not None:
+        glossary.write_text(content, encoding="utf-8")
+    source = tmp_path / "запись.wav"
+    source.write_bytes(b"")
+    called = _no_heavy_work(monkeypatch)
+
+    with pytest.raises(ValueError, match="--glossary"):
+        cli.run(parse([str(source), "--output", str(tmp_path / "out"), "--glossary", str(glossary)]))
+    with pytest.raises(ValueError, match="--glossary"):
+        cli.run_batch(parse([str(source), str(source), "--output", str(tmp_path / "batch"),
+                             "--glossary", str(glossary)]))
+    assert called == []
+
+
+def test_bad_profile_from_environment_fails_before_the_queue(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("TRANSCRIBER_GLOSSARY_STORE", raising=False)
+    monkeypatch.setenv("TRANSCRIBER_GLOSSARY_PROFILE", "Work")
+    source = tmp_path / "запись.wav"
+    source.write_bytes(b"")
+    called = _no_heavy_work(monkeypatch)
+
+    with pytest.raises(ValueError, match="Имя профиля"):
+        cli.run(parse([str(source), "--output", str(tmp_path / "out")]))
+    assert called == []
+    # Без словаря имя профиля не нужно: проверка его не требует.
+    cli._validate(parse([str(source), "--no-glossary"]))
