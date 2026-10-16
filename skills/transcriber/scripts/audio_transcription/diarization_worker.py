@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .backends import BackendMissing, _PinnedLoad, load_with_hub_fallback
-from .catalog import bundled_binary_problem, fluidaudio_binary_path
+from .catalog import bundled_binary_problem
 from .diarization import partition_turns
 from . import fluid_models
 from .fluid_models import (
@@ -45,17 +45,18 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _fluid_binary(config: dict[str, Any]) -> Path:
-    path = fluidaudio_binary_path(config.get("binary"))
-    if path is None and not config.get("binary"):
-        try:
-            path = ensure_fluid_binary(offline=bool(config.get("offline", False)))
-        except ModelsUnavailable as error:
-            raise BackendMissing(str(error)) from error
-    if path is None:
-        raise FileNotFoundError(
-            "Не найден fluidaudiocli. Укажите --fluidaudio-bin или установите "
-            "бинарник в bin/macos-arm64/fluidaudiocli внутри скилла"
-        )
+    """Бинарник выбрал родитель (`catalog.choose_fluidaudio_binary`): не
+    поставочный приходит путём и берётся как есть, поставочный — None, его
+    здесь докачиваем и сверяем с опубликованной суммой."""
+    if config.get("binary"):
+        path = Path(str(config["binary"]))
+        if not (path.is_file() and os.access(path, os.X_OK)):
+            raise FileNotFoundError(f"fluidaudiocli не найден или не исполняемый: {path}")
+        return path
+    try:
+        path = ensure_fluid_binary(offline=bool(config.get("offline", False)))
+    except ModelsUnavailable as error:
+        raise BackendMissing(str(error)) from error
     problem = bundled_binary_problem(path)
     if problem:
         raise RuntimeError(problem)
@@ -260,6 +261,10 @@ def _run_fluidaudio(
                 sum(quality_scores) / len(quality_scores) if quality_scores else None
             ),
             "weights": fluid_models.weights_metadata(),
+            "binary": {
+                "source": config.get("binary_source", "bundled"),
+                "sha256": config.get("binary_fingerprint"),
+            },
             "network_sandbox": network_sandbox,
             "raw_turns": [turn.to_dict() for turn in raw_turns],
         },

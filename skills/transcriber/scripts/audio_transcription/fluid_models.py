@@ -26,7 +26,7 @@ import subprocess
 import urllib.request
 from pathlib import Path
 
-from .catalog import FLUIDAUDIO
+from .catalog import FLUIDAUDIO, choose_fluidaudio_binary
 
 # Ровно то, что читает офлайновый режим бинарника: репозиторий держит ещё
 # mlpackage-исходники, int8-, PLDA- и pyannote-варианты, и широкий фильтр качал
@@ -142,6 +142,24 @@ def _foreign(target: Path) -> list[str]:
         return []
     known = {*FILES, *(f"{name}.mlmodelc" for name in MODELS), ".cache", ".DS_Store"}
     return sorted(path.name for path in target.iterdir() if path.name not in known)
+
+
+def preflight(explicit: str | Path | None = None, *, offline: bool = False) -> str | None:
+    """Почему диаризация FluidAudio не запустится, или None.
+
+    Проверяется до подготовки звука: раньше бинарник искали в воркере — после
+    SHA-256 источника, VAD и выбора языка, — и неверный путь или офлайн без
+    моделей всплывали через минуты. Онлайн недостающее докачает воркер.
+    """
+    chosen = choose_fluidaudio_binary(explicit, offline=offline)
+    if chosen.problem:
+        return chosen.problem
+    if offline and not ready():
+        return (
+            f"Нет CoreML-моделей FluidAudio (35 МБ) в {default_target()}, а прогон офлайн. "
+            "Запустите без --offline или поставьте заранее: prefetch_models.py --diarize"
+        )
+    return None
 
 
 def ensure(target: Path | None = None, *, offline: bool = False) -> str:

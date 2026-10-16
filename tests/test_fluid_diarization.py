@@ -490,3 +490,86 @@ def test_stuck_fluidaudio_is_killed_after_deadline(monkeypatch, tmp_path: Path) 
     assert isinstance(outcome.get("error"), RuntimeError)
     assert "не уложился" in str(outcome["error"])
     assert not _alive(pid)
+
+
+def _diarize_args(tmp_path: Path, *extra: str):
+    from audio_transcription import cli
+
+    return cli.build_parser().parse_args([str(tmp_path / "in.wav"), "--diarize", *extra])
+
+
+@pytest.fixture
+def apple_silicon(monkeypatch):
+    from audio_transcription import cli
+
+    monkeypatch.setattr(cli.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(cli.platform, "machine", lambda: "arm64")
+    return cli
+
+
+def test_wrong_fluidaudio_bin_fails_before_audio(apple_silicon, monkeypatch, tmp_path: Path) -> None:
+    # Раньше бинарник искали в воркере — после подготовки звука, SHA-256, VAD
+    # и выбора языка, — а неверный путь молча подменяли поставочным.
+    cli = apple_silicon
+    monkeypatch.setattr(cli, "prepare_audio", lambda *_a, **_k: pytest.fail("звук готовить рано"))
+    args = _diarize_args(tmp_path, "--fluidaudio-bin", str(tmp_path / "my-build"))
+    with pytest.raises(ValueError, match="my-build"):
+        cli.run(args)
+
+
+def test_offline_diarize_without_models_fails_before_audio(apple_silicon, monkeypatch, tmp_path: Path) -> None:
+    cli = apple_silicon
+    own = tmp_path / "fluidaudiocli"
+    own.write_text("#!/bin/sh\n", encoding="utf-8")
+    own.chmod(0o755)
+    monkeypatch.setattr(fluid_models, "default_target", lambda: tmp_path / "models")
+    args = _diarize_args(tmp_path, "--offline", "--fluidaudio-bin", str(own))
+    with pytest.raises(ValueError, match="prefetch_models.py --diarize"):
+        cli._validate(args)
+    _complete(tmp_path / "models")
+    cli._validate(args)
+
+
+def test_sortformer_does_not_need_fluidaudio(apple_silicon, tmp_path: Path) -> None:
+    args = _diarize_args(tmp_path, "--diarization-backend", "sortformer", "--fluidaudio-bin", str(tmp_path / "nope"))
+    apple_silicon._validate(args)
+
+
+def test_diarization_cache_key_tracks_binary(tmp_path: Path) -> None:
+    from audio_transcription import cli
+    from audio_transcription.cache import cache_key
+
+    args = _diarize_args(tmp_path)
+
+    def key(fingerprint: str | None) -> str:
+        return cache_key(
+            "diarization", cli.diarization_cache_payload(args, "fluidaudio", 0.7, "sha", fingerprint)
+        )
+
+    assert key("aaaaaaaaaaaa") != key("bbbbbbbbbbbb")
+    assert key("aaaaaaaaaaaa") == key("aaaaaaaaaaaa")
+
+
+def test_worker_takes_chosen_binary_as_is(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        diarization_worker, "ensure_fluid_binary", lambda **_kwargs: pytest.fail("свой путь не докачивают")
+    )
+    with pytest.raises(FileNotFoundError, match="my-build"):
+        diarization_worker._fluid_binary({"binary": str(tmp_path / "my-build")})
+    bundled = tmp_path / "bundled"
+    bundled.write_text("#!/bin/sh\n", encoding="utf-8")
+    bundled.chmod(0o755)
+    monkeypatch.setattr(diarization_worker, "ensure_fluid_binary", lambda **_kwargs: bundled)
+    monkeypatch.setattr(diarization_worker, "bundled_binary_problem", lambda _path: None)
+    assert diarization_worker._fluid_binary({"binary": None}) == bundled
+
+
+def test_fluidaudio_metadata_names_binary(monkeypatch, tmp_path: Path) -> None:
+    _fake_fluid(monkeypatch, tmp_path)
+    result = diarization_worker._run_fluidaudio(
+        tmp_path / "audio.wav",
+        {"binary_source": "explicit", "binary_fingerprint": "abcdef012345"},
+        tmp_path / "progress.json",
+        tmp_path / "result.json",
+    )
+    assert result.metadata["binary"] == {"source": "explicit", "sha256": "abcdef012345"}
