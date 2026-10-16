@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import io
 import json
 from pathlib import Path
@@ -150,3 +151,35 @@ def test_complete_download_matches_its_length(monkeypatch, tmp_path: Path) -> No
     assert path == tmp_path / "audio.mp3" and path.read_bytes() == b"ID3-audio!"
     assert sorted(item.name for item in tmp_path.iterdir()) == ["audio.mp3"]
 
+
+@pytest.mark.parametrize(
+    "failure",
+    [TimeoutError("timed out"), http.client.IncompleteRead(b"", 10), ConnectionResetError("reset")],
+    ids=["timeout", "incomplete", "reset"],
+)
+def test_api_failures_become_fetch_errors(monkeypatch, failure) -> None:
+    """Таймаут и обрыв urllib в URLError не заворачивает: до правки они
+    роняли `fetch_media.py` трейсбеком и пакет терял итоговый JSON."""
+
+    def fake_open(url: str):
+        raise failure
+
+    monkeypatch.setattr(yandex_music, "_open", fake_open)
+    with pytest.raises(FetchError, match="не ответила"):
+        yandex_music.probe("https://music.yandex.ru/album/1/track/2")
+
+
+def test_api_timeout_in_a_batch_keeps_the_batch(monkeypatch, capsys) -> None:
+    import fetch_media
+
+    monkeypatch.setattr(fetch_media, "_sleep", lambda _: None)
+
+    def fake_open(url: str):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(yandex_music, "_open", fake_open)
+    urls = ["https://music.yandex.ru/album/1/track/2", "https://music.yandex.ru/album/1/track/3"]
+    assert fetch_media.main(urls) == 2
+    results = json.loads(capsys.readouterr().out)["results"]
+    assert [item["input"] for item in results] == urls
+    assert all("не ответила" in item["error"] for item in results)

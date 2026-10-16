@@ -23,7 +23,6 @@ import json
 import os
 import re
 import shutil
-import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ElementTree
 from pathlib import Path
@@ -164,10 +163,12 @@ def _json(url: str) -> dict[str, Any]:
 
 
 def _get(url: str) -> bytes:
+    # Таймаут и обрыв (`TimeoutError`, `IncompleteRead`) urllib в URLError не
+    # заворачивает: без них отказ API ронял `fetch_media.py` трейсбеком.
     try:
         with _open(url) as response:
             return response.read()
-    except urllib.error.URLError as error:
+    except (OSError, http.client.HTTPException) as error:
         raise FetchError(f"Яндекс Музыка не ответила: {error}" + _MANUAL) from error
 
 
