@@ -230,6 +230,44 @@ def check_skill_update(check_updates: bool) -> dict:
     return {"installed": __version__, "checked": check_updates, "available": update_check.available()}
 
 
+def check_glossaries() -> list[str]:
+    """Словари, которые не разбираются: прогон с ними идёт без выученного.
+
+    Свой словарь при ошибке чтения больше не роняет прогон, а тихо уходит из
+    работы (предупреждение есть только в manifest.json). Здесь это видно
+    заранее, до пачки записей без замен.
+    """
+    try:
+        import yaml
+
+        from audio_transcription.glossary_store import (
+            PROFILES_DIR,
+            entries_of,
+            load_document,
+            store_path,
+        )
+        from audio_transcription.mining import LEARNING_LANGUAGES
+    except ImportError:
+        return []  # без PyYAML отчёт и так назовёт пакет обязательной проблемой
+    findings: list[str] = []
+    paths: set[Path] = set()
+    for language in LEARNING_LANGUAGES:
+        try:
+            paths.add(store_path(None, None, language))
+        except ValueError as error:
+            findings.append(f"словарь: {error}")
+    if PROFILES_DIR.is_dir():
+        paths.update(PROFILES_DIR.glob("*.yaml"))
+    for path in sorted(paths):
+        try:
+            entries_of(load_document(path))
+        except (OSError, ValueError, yaml.YAMLError) as error:
+            findings.append(
+                f"словарь {path} не читается, прогоны идут без него и не пополняют его: {error}"
+            )
+    return findings
+
+
 def collect(check_updates: bool = False) -> dict:
     apple = platform.system() == "Darwin" and platform.machine() == "arm64"
     skill_dir = Path(__file__).resolve().parents[1]
@@ -309,6 +347,7 @@ def collect(check_updates: bool = False) -> dict:
             "новая версия не значит «лучше на вашей речи»: перед заменой сверьте WER "
             "по references/quality.md, иначе цифры в отчётах перестанут описывать результат"
         )
+    warnings.extend(check_glossaries())
     report["warnings"] = warnings
     return report
 
