@@ -542,8 +542,8 @@ def fetch_audio(url: str, dest_dir: Path) -> Path:
             if _STREAM_FORBIDDEN not in str(error) or not _is_youtube(url):
                 raise
             # Огрызок первой попытки результатом не считается.
-            for leftover in staging.iterdir():
-                leftover.unlink()
+            shutil.rmtree(staging, ignore_errors=True)
+            staging.mkdir()
             try:
                 _run_yt_dlp(
                     ["--extractor-args", _YOUTUBE_FALLBACK_CLIENTS, *arguments],
