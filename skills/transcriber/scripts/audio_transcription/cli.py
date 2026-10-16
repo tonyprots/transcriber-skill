@@ -967,6 +967,23 @@ def _sections(args: argparse.Namespace) -> list[Section | None]:
     return list(args.section or []) or [None]
 
 
+def _check_early_text(args: argparse.Namespace, output: Path) -> None:
+    """Ранний текст не может лежать в каталоге результата.
+
+    Его файл создавал каталог раньше `write_bundle`, и тот в самом конце
+    прогона отказывал «Каталог уже существует», а с `--overwrite` увозил
+    ранний текст в архив.
+    """
+    if args.early_text is None:
+        return
+    early = args.early_text.expanduser().resolve()
+    if early == output or output in early.parents:
+        raise ValueError(
+            "--early-text не может лежать внутри каталога результата: укажите файл "
+            "рядом с ним, например OUTPUT_DIR.txt"
+        )
+
+
 def _resolve_input(raw: str) -> tuple[RemoteMedia | None, Path | None]:
     """Ссылку опрашиваем до скачивания: занятый каталог результата или
     неверный язык должны падать раньше, чем уедут мегабайты."""
@@ -1002,6 +1019,7 @@ def run(args: argparse.Namespace) -> Path:
         output = Path(f"{_output_stem(remote, None, section)}.transcript").resolve()
     else:
         output = source.with_name(f"{_output_stem(None, source, section)}.transcript")  # type: ignore[union-attr]
+    _check_early_text(args, output)
     report = ProgressReporter(enabled=not args.quiet)
     if args.skip_done and _is_done(output):
         report.stage(f"Уже расшифровано, пропускаю: {output}")
@@ -1060,6 +1078,7 @@ def run_batch(args: argparse.Namespace) -> list[dict[str, Any]]:
             # Занятый каталог — отказ одной записи, а не всей пачки: раньше
             # один такой каталог ронял пакет до первого скачанного байта.
             try:
+                _check_early_text(args, candidate)
                 jobs.append((section, ensure_output_available(candidate, overwrite=args.overwrite)))
             except FAILURES as error:
                 report.stage(f"Пропускаю {candidate.name}: {error}")
