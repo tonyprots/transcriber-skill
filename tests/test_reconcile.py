@@ -182,3 +182,149 @@ def test_boundary_transfer_may_empty_a_window() -> None:
     )
     # Ни «М-м / Классный», ни «Классный» отдельно, ни пустого окна с «М-м».
     assert items == []
+
+
+def test_short_reply_between_neighbours_is_not_a_review_item() -> None:
+    """«Угу» встык между фразами: Whisper его не пишет, и окно остаётся пустым.
+
+    Раньше раскладка упакованного окна отдавала ему крайние слова соседей, и
+    в «Слушать» вставал пункт «Угу. / привет. Классный».
+    """
+    from pathlib import Path
+
+    from audio_transcription.models import AudioChunk
+    from audio_transcription.packing import PackedWindow, unpack_hypothesis
+
+    sources = tuple(
+        AudioChunk(index, Path(f"chunk-{index}.wav"), start, end)
+        for index, (start, end) in enumerate(((0.0, 5.0), (5.2, 6.0), (6.1, 10.0)))
+    )
+    words = [
+        {"text": "Я", "start": 3.6, "end": 3.8},
+        {"text": "сказал", "start": 3.9, "end": 4.5},
+        {"text": "привет.", "start": 4.6, "end": 5.1},
+        {"text": "Классный", "start": 6.0, "end": 6.6},
+        {"text": "день.", "start": 6.7, "end": 7.2},
+    ]
+    packed = Hypothesis(
+        "whisper", "ru", 1.0, [],
+        {"chunks": [{"sequence": 0, "start": 0.0, "end": 10.0,
+                     "text": " ".join(word["text"] for word in words), "words": words}]},
+    )
+    verifier = unpack_hypothesis(
+        packed,
+        [PackedWindow(chunk=AudioChunk(0, Path("packed.wav"), 0.0, 10.0), sources=sources)],
+    )
+    primary = Hypothesis(
+        "primary", "ru", 0.0,
+        [
+            Segment(0.0, 5.0, "Я сказал привет."),
+            Segment(5.2, 6.0, "Угу."),
+            Segment(6.1, 10.0, "Классный день."),
+        ],
+        {},
+    )
+    assert find_review_items(primary, verifier) == []
+
+
+def test_boundary_word_returns_to_an_empty_window() -> None:
+    """Whisper сдвинул слово к соседу, и окно, где его слышала основная, пусто.
+
+    Раньше раскладка копировала слово соседа в пустое окно, и спор гасился
+    случайно. Теперь копий нет, и слово переносит сам перенос через стык.
+    """
+    primary = [
+        Segment(0.0, 2.0, "Мне нравится одна передача, то есть"),
+        Segment(2.1, 2.6, "Режим."),
+    ]
+    verifier = [Segment(0.0, 2.0, "мне нравится одна передача то есть режим")]
+    items = find_review_items(
+        Hypothesis("primary", "ru", 0.0, primary, {}),
+        Hypothesis("verifier", "ru", 0.0, verifier, {}),
+    )
+    assert items == []
+
+
+def kinds(left: str, right: str) -> list[str]:
+    from audio_transcription.reconcile import disagreements
+
+    return [item.kind for item in disagreements(left, right)]
+
+
+def test_fillers_that_readable_drops_are_fillers_in_the_queue_too() -> None:
+    """«Хмм», «Ммм», «эмм» убирает readable, а очередь звала их «слова нет».
+
+    Список паразитов очереди и правило `fillers` расходились: первый знал
+    только «э», «эм», «ээ», «мм», и «хмм / ∅» вставало в «Слушать».
+    """
+    for left, right in (
+        ("Хмм, давай так и сделаем", "давай так и сделаем"),
+        ("Ммм, давай так и сделаем", "давай так и сделаем"),
+        ("Ну, эмм, давай так и сделаем", "давай так и сделаем"),
+        ("so hmmm we did it", "so we did it"),
+        ("uhh we did it", "we did it"),
+    ):
+        assert kinds(left, right) == ["filler"], (left, right)
+
+
+def test_units_and_letters_are_dropped_only_next_to_a_number() -> None:
+    """«рублей / долларов» и «А / Б» — не «то же число записано иначе».
+
+    Единица и отдельная буква выбрасывались из сравнения всегда, и такие места
+    сворачивались в мелочь с подписью про числа.
+    """
+    for left, right in (
+        ("цена 100 долларов", "цена 100 рублей"),
+        ("выросло на 5 процентов", "выросло на 5 рублей"),
+        ("вариант А", "вариант Б"),
+        ("plan A", "plan B"),
+        ("пошли в магазин", "пошли к магазину"),
+        ("я сказал", "сказал"),
+        ("S-O-U-R-C-E", "X Y Z"),
+    ):
+        assert "equivalent" not in kinds(left, right), (left, right)
+
+
+def test_same_number_and_spelled_letters_stay_equivalent() -> None:
+    for left, right in (
+        ("95%", "ninety five percent"),
+        ("на 5%", "на 5 процентов"),
+        ("n 95", "95"),
+        ("S-O-U-R-C-E", "S O U R C E"),
+        ("и-и-и", "и"),
+        ("Да-а, точно", "Да, точно"),
+    ):
+        assert kinds(left, right) == ["equivalent"], (left, right)
+    # Протянутый звук через дефис — паразит, а не «то же число».
+    assert kinds("Он, э-э, пришёл", "Он пришёл") == ["filler"]
+
+
+def test_different_numbers_are_not_a_spelling_difference() -> None:
+    """«3,5% / 35%» и «миллиона / миллиарда» — не «слушать нечего».
+
+    Посимвольно такие пары похожи, и они уходили в «То же слово записано
+    иначе», где отчёт прямо говорит, что слушать нечего.
+    """
+    for left, right in (
+        ("выросли на 3,5% за год", "выросли на 35% за год"),
+        ("это 3 миллиона", "это 3 миллиарда"),
+        ("около 2,5 процента", "около 25 процентов"),
+        ("в 2021 году", "в 2012 году"),
+    ):
+        assert kinds(left, right) == ["substantive"], (left, right)
+
+
+def test_same_number_in_a_term_is_still_a_spelling_difference() -> None:
+    for left, right in (
+        ("мы пишем в Airtable", "мы пишем в Air Table"),
+        ("модель GPT-4 вышла", "модель GPT4 вышла"),
+        ("сегмент B2B растёт", "сегмент B2 B растёт"),
+    ):
+        assert kinds(left, right) == ["spelling"], (left, right)
+
+
+def test_whole_hour_is_the_same_time() -> None:
+    """«8:00» и «8» — одно и то же время: нули минут не произносят."""
+    assert kinds("встречаемся в 8:00", "встречаемся в 8") == ["equivalent"]
+    for left, right in (("встречаемся в 8:30", "встречаемся в 8"), ("в 8:00", "в 9")):
+        assert "equivalent" not in kinds(left, right), (left, right)

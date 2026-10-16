@@ -660,8 +660,17 @@ def canonicalized(hypothesis: Hypothesis, glossary: list[GlossaryEntry]) -> Hypo
 
 
 def verifier_failure_items(
-    chunks: list[AudioChunk], primary: Hypothesis
+    chunks: list[AudioChunk], primary: Hypothesis, error: str = ""
 ) -> list[ReviewItem]:
+    """Окна, которые проверяющая не сверила, — статус прогона, а не места.
+
+    Раньше это были пункты `substantive` с весом 1, и на диктовке Handy
+    2026-10-10 все 39 мест «Слушать» оказались строкой «verifier недоступен».
+    Вид `unverified` отчёт сводит в одну строку; полный текст ошибки — в
+    `warnings`.
+    """
+    lines = error.strip().splitlines()
+    cause = lines[0].strip()[:200] if lines else "причина не названа"
     chunk_text = {
         int(item["sequence"]): str(item.get("text", ""))
         for item in primary.metadata.get("chunks", [])
@@ -674,7 +683,8 @@ def verifier_failure_items(
             comparison_text="",
             similarity=0.0,
             differing_tokens=(),
-            reason="Независимый verifier недоступен",
+            reason=f"Проверяющая недоступна: {cause}",
+            kind="unverified",
         )
         for chunk in chunks
     ]
@@ -700,6 +710,9 @@ def primary_retry_items(primary: Hypothesis) -> list[ReviewItem]:
                 similarity=0.0,
                 differing_tokens=(),
                 reason=reason,
+                # Своим разделом и без лимита: среди расхождений провал
+                # основной стоял на 27–172-м месте, ниже 25-й строки «Слушать».
+                kind="primary_gap",
             )
         )
     return items
@@ -1245,6 +1258,7 @@ def summarize(output: Path) -> dict[str, Any]:
         "section": source.get("section"),
         "duration_seconds": source.get("duration_seconds"),
         "review_count": manifest.get("review_count"),
+        "review_counts": manifest.get("review_counts"),
         "speaker_count": manifest.get("speaker_count"),
         "warnings": manifest.get("warnings") or [],
     }
@@ -1735,7 +1749,7 @@ def _transcribe(
                     )
                 except BackendUnavailable as error:
                     warnings.append(str(error))
-                    review_items.extend(verifier_failure_items(chunks, readable))
+                    review_items.extend(verifier_failure_items(chunks, readable, str(error)))
             mark = timed("verifier", mark)
 
         report.stage(f"Сборка результата: {output}")

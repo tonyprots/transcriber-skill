@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 
-from .fillers import strip_fillers
+from .fillers import is_filler_token, strip_fillers
 from .models import Hypothesis, ReviewItem, Segment
 
 
@@ -13,6 +13,9 @@ _PUNCTUATION = re.compile(r"[^\w\s-]+", re.UNICODE)
 # Слова-паразиты. Их расхождение — не работа для человека: одна модель
 # услышала «uh», другая промолчала, а читаемая версия их всё равно убирает.
 # На часовом интервью это 378 расхождений из 1068 (замер 2026-09-20).
+# Звуки вроде «хмм», «ммм», «эмм», «uhh» узнаёт `fillers.is_filler_token` —
+# то же правило, по которому их убирает readable; здесь — слова и обороты,
+# которые readable оставляет, но спорить о которых не о чем.
 FILLERS = frozenset(
     {
         "uh", "um", "uhh", "umm", "ah", "er", "erm", "hmm", "mhm", "mm", "huh",
@@ -63,14 +66,26 @@ _NUMBER_SCALE = {
     "миллионов": 10**6, "миллиард": 10**9,
 }
 
+# Число, а не омофон: «to» и «for» в `_NUMBER_SCALE` ради «P to P», но рядом
+# с ними числа нет.
+_NUMBER_WORDS = frozenset(_NUMBER_SCALE) - {"to", "too", "for"}
+
 # Единицы измерения при числе: цифровая запись теряет «%» и «$» ещё при
-# нормализации, словесная оставляет «percent» и «dollars». Спорить тут не о чем.
-_MEASURE_WORDS = frozenset(
-    {
-        "percent", "percents", "percentage", "dollars", "dollar",
-        "процент", "процента", "процентов", "рублей", "долларов",
-    }
-)
+# нормализации, словесная оставляет «percent» и «dollars». Спорить тут не о
+# чем — если рядом число и единица названа одна: «рублей» против «долларов»
+# уже разные деньги.
+_MEASURE_WORDS = {
+    "percent": "%", "percents": "%", "percentage": "%",
+    "процент": "%", "процента": "%", "процентов": "%",
+    "dollars": "$", "dollar": "$", "долларов": "$", "рублей": "₽",
+}
+
+# Порядок числа в любом падеже: «миллиона», «миллиардов», «тысячи».
+_SCALE_STEMS = {
+    "тысяч": "k", "thousand": "k", "миллион": "m", "million": "m",
+    "миллиард": "b", "billion": "b", "триллион": "t", "trillion": "t",
+}
+_SCALE_STEM = re.compile("^(" + "|".join(_SCALE_STEMS) + ")")
 
 # Сколько слов контекста показывать по краям расхождения. Четыре — столько,
 # чтобы понять фразу, и не столько, чтобы снова читать всё окно.
@@ -181,6 +196,10 @@ def rebalance_boundaries(
     «лишнее» в соседнем. Здесь на каждом стыке пробуется перенести одно-два
     крайних слова проверяющей через границу; перенос принимается, только если
     совпадений с основной на паре окон становится строго больше.
+
+    Окно без слов проверяющей тоже принимает перенос: раскладка больше не
+    копирует в него крайние слова соседей, и слово, которое Whisper сдвинул
+    к соседу, возвращается сюда.
     """
     result = list(pairs)
     for index in range(len(result) - 1):
@@ -188,12 +207,13 @@ def rebalance_boundaries(
             result[index],
             result[index + 1],
         )
-        if left_verifier is None or right_verifier is None:
+        donor = left_verifier or right_verifier
+        if donor is None:
             continue
         if right_primary.start - left_primary.end > _BOUNDARY_GAP_SECONDS:
             continue
-        left_words = left_verifier.text.split()
-        right_words = right_verifier.text.split()
+        left_words = left_verifier.text.split() if left_verifier else []
+        right_words = right_verifier.text.split() if right_verifier else []
 
         def score(left: list[str], right: list[str]) -> int:
             return _matched_words(left_primary.text, " ".join(left)) + _matched_words(
@@ -217,15 +237,23 @@ def rebalance_boundaries(
         if left is not left_words:
             # Окно может остаться без слов проверяющей: всё, что Whisper в нём
             # «услышал», оказалось словом соседа («М-м.» против «Классный»).
-            result[index] = (
-                left_primary,
-                replace(left_verifier, text=" ".join(left)) if left else None,
-            )
+            result[index] = (left_primary, _moved(left_verifier, donor, left_primary, left))
             result[index + 1] = (
                 right_primary,
-                replace(right_verifier, text=" ".join(right)) if right else None,
+                _moved(right_verifier, donor, right_primary, right),
             )
     return result
+
+
+def _moved(
+    verifier: Segment | None, donor: Segment, primary: Segment, words: list[str]
+) -> Segment | None:
+    if not words:
+        return None
+    if verifier is None:
+        # Пустое окно получает слова соседа: границы — свои, уверенность — его.
+        return replace(donor, start=primary.start, end=primary.end, text=" ".join(words))
+    return replace(verifier, text=" ".join(words))
 
 
 @dataclass(frozen=True)
@@ -309,24 +337,74 @@ def _spell_numbers(words: list[str]) -> list[str]:
     return result
 
 
-def _equivalent(left: str, right: str) -> bool:
-    """Одно и то же сказанное, записанное по-разному, — не расхождение."""
+def _is_number(word: str) -> bool:
+    return word in _NUMBER_WORDS or any(char.isdigit() for char in word)
 
-    def canonical(text: str) -> str:
-        # Дефис — способ записи, а не звук: «S-O-U-R-C-E-R-Y» и «S O U R C E R Y»
-        # произнесены одинаково. Отдельная буква — мусор трансдьюсера («n 95»).
-        words = [
-            word
-            for word in text.replace("-", " ").split()
-            if word not in _MEASURE_WORDS and (len(word) > 1 or word.isdigit())
-        ]
+
+def _spoken_words(text: str) -> list[str]:
+    """Слова, как они произнесены: дефис — способ записи, а не звук.
+
+    «S-O-U-R-C-E» — слово по буквам, то же, что «S O U R C E»; «и-и-и» и
+    «да-а» — протянутый звук, то же, что «и» и «да»; «60-70» — два числа.
+    """
+    words: list[str] = []
+    for word in text.split():
+        parts = [part for part in word.split("-") if part]
+        if len(parts) > 1 and all(len(part) == 1 and part.isalpha() for part in parts):
+            words.append(parts[0] if len(set(parts)) == 1 else "".join(parts))
+        elif len(parts) > 1 and set(parts[1:]) == {parts[0][-1]}:
+            words.append(parts[0])
+        else:
+            words.extend(parts)
+    return words
+
+
+def _equivalent(left: str, right: str, *, near_number: bool = False) -> bool:
+    """Одно и то же сказанное, записанное по-разному, — не расхождение.
+
+    `near_number` — в расхождении или вплотную к нему есть число. Только тогда
+    отбрасываются единица измерения и отдельная буква — мусор трансдьюсера
+    («n 95»). Без числа «А / Б», «я / ∅» и «в / к» — разные слова, а не «то же
+    число записано иначе».
+    """
+    left_words, right_words = _spoken_words(left), _spoken_words(right)
+    units = [
+        {_MEASURE_WORDS[word] for word in words if word in _MEASURE_WORDS}
+        for words in (left_words, right_words)
+    ]
+    if all(units) and units[0] != units[1]:
+        return False
+
+    def canonical(words: list[str]) -> str:
+        if near_number:
+            words = [
+                word
+                for word in words
+                if word not in _MEASURE_WORDS and (len(word) > 1 or word.isdigit())
+            ]
         joined = " ".join(_spell_numbers(words))
         # «800 000» — это разделитель тысяч (группа ровно из трёх цифр), а
         # «60 70» — диапазон: склеивать можно только первое.
         joined = re.sub(r"(?<=\d)\s+(?=\d{3}\b)", "", joined)
+        # «8:00» — ровно восемь: нули минут не произносят.
+        joined = re.sub(r"(?<=\d)\s+00\b", "", joined)
         return re.sub(r"\b([a-zа-я])\s+(?=[a-zа-я]\b)", r"\1", joined)
 
-    return canonical(left) == canonical(right)
+    return canonical(left_words) == canonical(right_words)
+
+
+def _number_signature(text: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Числа фрагмента: группы цифр и порядки («миллиона» → m).
+
+    Посимвольно «3,5%» и «35%», «миллиона» и «миллиарда» почти одинаковы, но
+    это разные числа: такое место — слушать, а не «то же слово записано иначе».
+    """
+    scales = []
+    for word in text.split():
+        match = _SCALE_STEM.match(word)
+        if match:
+            scales.append(_SCALE_STEMS[match.group(1)])
+    return tuple(re.findall(r"\d+", text)), tuple(scales)
 
 
 def _content_words(text: str) -> set[str]:
@@ -343,7 +421,9 @@ def without_fillers(text: str) -> str:
     result = text
     for phrase in sorted((f for f in FILLERS if " " in f), key=len, reverse=True):
         result = re.sub(rf"\b{re.escape(phrase)}\b", " ", result)
-    words = [word for word in result.split() if word not in FILLERS]
+    words = [
+        word for word in result.split() if word not in FILLERS and not is_filler_token(word)
+    ]
     return " ".join(words)
 
 
@@ -378,7 +458,16 @@ def disagreements(left: str, right: str) -> list[Disagreement]:
         novel_right = [word for word in right_content.split() if word not in context]
         if _verifier_artifact(left_key, right_key):
             kind = "verifier_artifact"
-        elif _equivalent(left_key, right_key):
+        elif _equivalent(
+            left_key,
+            right_key,
+            near_number=any(
+                _is_number(word)
+                for key in left_keys[max(0, l_start - 1) : l_end + 1]
+                + right_keys[max(0, r_start - 1) : r_end + 1]
+                for word in key.split()
+            ),
+        ):
             kind = "equivalent"
         elif left_content == right_content:
             # Остатки совпали — разошлись только паразиты, даже если сам
@@ -389,8 +478,11 @@ def disagreements(left: str, right: str) -> list[Disagreement]:
             # there» рядом со словом «there» — это заикание, а не спорное
             # место. Новой информации здесь нет ни с одной стороны.
             kind = "disfluency"
-        elif left_content and right_content and (
-            SequenceMatcher(None, left_content, right_content).ratio() >= _SPELLING_SIMILARITY
+        elif (
+            left_content
+            and right_content
+            and _number_signature(left_content) == _number_signature(right_content)
+            and SequenceMatcher(None, left_content, right_content).ratio() >= _SPELLING_SIMILARITY
         ):
             kind = "spelling"
         else:
@@ -538,7 +630,7 @@ def _reason(label: str, item: Disagreement, window_score: float, threshold: floa
     if item.kind == "disfluency":
         return f"{label}: повтор или обрыв речи"
     if item.kind == "equivalent":
-        return f"{label}: то же число записано иначе"
+        return f"{label}: то же сказанное записано иначе"
     if item.kind == "verifier_artifact":
         return f"{label}: типовая выдумка проверяющей"
     if not item.right:

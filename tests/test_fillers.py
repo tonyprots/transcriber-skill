@@ -52,3 +52,31 @@ def test_segment_with_only_spacing_fix_is_rewritten() -> None:
     segments, removed = strip_filler_segments([Segment(0, 1, "пункт— про")])
     assert removed == 0
     assert segments[0].text == "пункт — про"
+
+
+def test_filler_inside_sentence_keeps_the_sentence_end() -> None:
+    """Точка после филлера посреди фразы — конец предыдущего предложения.
+
+    Раньше она уходила вместе с филлером, и два предложения сливались:
+    «предпринимателя, хмм. Тратить» → «предпринимателя, Тратить» (корпус Handy).
+    """
+    assert strip_fillers("Мы пошли, э. Потом вернулись.") == ("Мы пошли. Потом вернулись.", 1)
+    assert strip_fillers("Ну и всё, э.") == ("Ну и всё.", 1)
+    assert strip_fillers("Так, э-э-э. С чего начать?") == ("Так. С чего начать?", 1)
+    assert strip_fillers("Ты пошёл, э?") == ("Ты пошёл?", 1)
+    # Многоточие уходит или остаётся целиком, а не по одной точке.
+    assert strip_fillers("важно Хмм... Блин, вот") == ("важно... Блин, вот", 1)
+    assert strip_fillers("Хмм... Блин, вот") == ("Блин, вот", 1)
+
+
+def test_closing_quote_does_not_start_a_sentence() -> None:
+    assert strip_fillers("Он сказал «да» э, потом ушёл") == ("Он сказал «да» потом ушёл", 1)
+    assert strip_fillers("Он сказал «Да!» э, потом ушёл") == ("Он сказал «Да!» Потом ушёл", 1)
+
+
+def test_millimetres_after_a_number_are_not_a_filler() -> None:
+    assert strip_fillers("Толщина 5 мм. Дальше идём.") == ("Толщина 5 мм. Дальше идём.", 0)
+    assert strip_fillers("Диаметр 10 мм, длина 3 м.") == ("Диаметр 10 мм, длина 3 м.", 0)
+    assert strip_fillers("Зазор 2мм, ммм, хватит") == ("Зазор 2мм, хватит", 1)
+    assert strip_fillers("Ммм, давай") == ("Давай", 1)
+    assert strip_fillers("Ну мм, давай") == ("Ну давай", 1)

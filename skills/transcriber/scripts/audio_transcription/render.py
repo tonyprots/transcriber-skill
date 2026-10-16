@@ -4,13 +4,14 @@ import json
 import os
 import shutil
 import tempfile
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from .audio import SAMPLE_RATE, MediaToolError
 from .models import Correction, Diarization, Hypothesis, MediaInfo, ReviewItem, Section, Segment
-from .reconcile import MINOR_KINDS
+from .reconcile import MINOR_KINDS, normalize_text
 
 
 def format_timestamp(seconds: float, *, srt: bool = False) -> str:
@@ -62,8 +63,12 @@ def _speaker_name(identifier: str, names: SpeakerNames | None = None) -> str:
 def _speaker_prefix(segment: Segment, names: SpeakerNames | None = None) -> str:
     if not segment.speakers:
         return ""
-    label = " + ".join(_speaker_name(item, names) for item in segment.speakers)
-    return f"{label}: " if len(segment.speakers) == 1 else f"Перекрытие ({label}): "
+    # Одно имя у двух меток — один человек: так склеивают голос, который
+    # диаризация раздвоила (`rename_speakers.py 1=Антон,3=Антон`). Без этого
+    # выходило «Перекрытие (Антон + Антон)».
+    people = list(dict.fromkeys(_speaker_name(item, names) for item in segment.speakers))
+    label = " + ".join(people)
+    return f"{label}: " if len(people) == 1 else f"Перекрытие ({label}): "
 
 
 def _markdown(segments: list[Segment], title: str, names: SpeakerNames | None = None) -> str:
@@ -111,17 +116,91 @@ def _vtt(segments: list[Segment], names: SpeakerNames | None = None) -> str:
 REVIEW_SECTION_LIMIT = 25
 
 
-def _limited(items: list[ReviewItem], heading: str) -> tuple[list[ReviewItem], str]:
-    shown = items[:REVIEW_SECTION_LIMIT]
-    if len(items) == len(shown):
-        return shown, f"## {heading} — {len(items)}"
-    return shown, f"## {heading} — {len(items)}, здесь первые {len(shown)}"
+def _pair_key(item: ReviewItem) -> tuple[str, ...] | None:
+    if item.primary_span or item.verifier_span:
+        key = (normalize_text(item.primary_span), normalize_text(item.verifier_span))
+    else:
+        key = tuple(normalize_text(token) for token in item.differing_tokens)
+    # Место без пары («низкая уверенность модели») ни с чем не сводится.
+    return key if any(key) else None
 
 
-def _rest_line(total: int, shown: int) -> list[str]:
-    if total <= shown:
+def _folded(items: list[ReviewItem]) -> list[list[ReviewItem]]:
+    """Одинаковые пары — одной строкой со всеми метками времени.
+
+    Повтор уже показанной пары тратил лимит в 25 строк: в подсказках словаря
+    так было 45 % строк. Место строки — по старшему весу, затем по первой
+    метке. `segments.json` остаётся поштучным.
+    """
+    groups: dict[object, list[ReviewItem]] = {}
+    for item in sorted(items, key=lambda current: current.start):
+        key = _pair_key(item)
+        groups.setdefault(key if key is not None else id(item), []).append(item)
+    return sorted(
+        groups.values(),
+        key=lambda group: (-max(item.weight for item in group), group[0].start),
+    )
+
+
+def _limited(
+    groups: list[list[ReviewItem]], heading: str
+) -> tuple[list[list[ReviewItem]], str]:
+    """Первые 25 строк; заголовок считает места, а не строки."""
+    shown = groups[:REVIEW_SECTION_LIMIT]
+    total = sum(len(group) for group in groups)
+    visible = sum(len(group) for group in shown)
+    if total == visible:
+        return shown, f"## {heading} — {total}"
+    return shown, f"## {heading} — {total}, здесь первые {visible}"
+
+
+def _minute_ranges(items: list[ReviewItem]) -> str:
+    minutes = sorted({int(item.start // 60) for item in items})
+    ranges: list[list[int]] = []
+    for minute in minutes:
+        if ranges and minute == ranges[-1][1] + 1:
+            ranges[-1][1] = minute
+        else:
+            ranges.append([minute, minute])
+    return ", ".join(str(first) if first == last else f"{first}–{last}" for first, last in ranges)
+
+
+def _rest_line(
+    groups: list[list[ReviewItem]], shown: int, *, minutes: bool = False
+) -> list[str]:
+    rest = [item for group in groups[shown:] for item in group]
+    if not rest:
         return []
-    return ["", f"Ещё {total - shown} — в `segments.json` → `review_items`."]
+    line = f"Ещё {len(rest)} — в `segments.json` → `review_items`."
+    if minutes:
+        # Хвост очереди без минут не прочесть вовсе: человек переслушивает
+        # минутами, и «ещё 70» не говорит, куда мотать.
+        line += f" Они на минутах: {_minute_ranges(rest)}."
+    return ["", line]
+
+
+# Виды мест, которые отчёт показывает отдельно от разделов расхождений.
+LISTEN_KINDS = frozenset({"substantive", "window"})
+STATUS_KINDS = frozenset({"unverified", "primary_gap"})
+
+
+def review_counts(items: list[ReviewItem]) -> dict[str, int]:
+    """Сколько мест в каждом разделе `review-needed.md`.
+
+    Один `review_count` смешивал всё: на встрече mts-link он был 317 при
+    95 местах «Слушать», а на диктовке без проверяющей — 39 окон «verifier
+    недоступен». Агенту нужно число мест, которые стоит слушать, — `listen`.
+    """
+    kinds = Counter(item.kind for item in items)
+    return {
+        "listen": sum(kinds[kind] for kind in LISTEN_KINDS),
+        "spelling": kinds["spelling"],
+        "dropped": kinds["verifier_only"],
+        "minor": sum(kinds[kind] for kind in MINOR_KINDS),
+        "taken": kinds["verifier_canonical"],
+        "unverified": kinds["unverified"],
+        "primary_gap": kinds["primary_gap"],
+    }
 
 
 def _review_sections(items: list[ReviewItem]) -> list[str]:
@@ -133,8 +212,7 @@ def _review_sections(items: list[ReviewItem]) -> list[str]:
     """
     minor = [item for item in items if item.kind in MINOR_KINDS]
     spelling = [item for item in items if item.kind == "spelling"]
-    listen = [item for item in items if item.kind in {"substantive", "window"}]
-    listen.sort(key=lambda item: (-item.weight, item.start))
+    listen = _folded([item for item in items if item.kind in LISTEN_KINDS])
     lines: list[str] = []
     if listen:
         shown, heading = _limited(listen, "Слушать")
@@ -148,15 +226,13 @@ def _review_sections(items: list[ReviewItem]) -> list[str]:
                 "",
             ]
         )
-        lines.extend(_review_line(item) for item in shown)
-        lines.extend(_rest_line(len(listen), len(shown)))
+        lines.extend(_review_line(group) for group in shown)
+        lines.extend(_rest_line(listen, len(shown), minutes=True))
         lines.append("")
     if spelling:
         # Сначала самые весомые, показываются — порядком записи.
-        shown, heading = _limited(
-            sorted(spelling, key=lambda item: (-item.weight, item.start)),
-            "То же слово записано иначе",
-        )
+        spelling_groups = _folded(spelling)
+        shown, heading = _limited(spelling_groups, "То же слово записано иначе")
         lines.extend(
             [
                 heading,
@@ -166,8 +242,10 @@ def _review_sections(items: list[ReviewItem]) -> list[str]:
                 "",
             ]
         )
-        lines.extend(_review_line(item) for item in sorted(shown, key=lambda i: i.start))
-        lines.extend(_rest_line(len(spelling), len(shown)))
+        lines.extend(
+            _review_line(group) for group in sorted(shown, key=lambda group: group[0].start)
+        )
+        lines.extend(_rest_line(spelling_groups, len(shown)))
         lines.append("")
     if minor:
         lines.extend(
@@ -183,10 +261,19 @@ def _review_sections(items: list[ReviewItem]) -> list[str]:
     return lines
 
 
-def _review_line(item: ReviewItem) -> str:
+def _stamps(starts: list[float]) -> str:
+    return ", ".join(f"[{format_timestamp(start)}]" for start in starts)
+
+
+def _times(count: int) -> str:
+    return f" (×{count})" if count > 1 else ""
+
+
+def _review_line(group: list[ReviewItem]) -> str:
+    item = group[0]
     difference = ", ".join(item.differing_tokens) or item.reason.split(": ", 1)[-1]
     context = item.readable_text.strip()
-    line = f"- [{format_timestamp(item.start)}] {difference}"
+    line = f"- {_stamps([member.start for member in group])} {difference}{_times(len(group))}"
     return f"{line} — в контексте: {context}" if context else line
 
 
@@ -197,6 +284,18 @@ def _review_markdown(
     corrections: list[Correction] | None = None,
 ) -> str:
     lines = ["# Требует проверки", ""]
+    unverified = [item for item in items if item.kind == "unverified"]
+    if unverified:
+        # Одной строкой и первой: без проверяющей очередь пуста не потому,
+        # что модели согласны, а потому, что сверять было не с чем.
+        cause = unverified[0].reason.split(": ", 1)[-1]
+        lines.extend(
+            [
+                f"Не сверено: проверяющая остановлена ({cause}); окон без сверки — "
+                f"{len(unverified)}, текст только от основной модели.",
+                "",
+            ]
+        )
     taken = [item for item in corrections or [] if item.rule == "verifier_canonical"]
     # Включившаяся замена — первое, что человек должен увидеть: дальше она
     # будет молча применяться к каждой расшифровке, и «молча» здесь опаснее
@@ -233,6 +332,28 @@ def _review_markdown(
             f"- [{format_timestamp(item.start)}] «{item.before}» → {item.after}" for item in taken
         )
         lines.append("")
+    gaps = sorted((item for item in items if item.kind == "primary_gap"), key=lambda item: item.start)
+    if gaps:
+        # Без лимита: таких окон единицы, и каждое — дыра в тексте, а не спор.
+        lines.extend(
+            [
+                f"## Окна без текста основной модели — {len(gaps)}",
+                "",
+                "Основная модель не распознала окно или распознала его часть, даже "
+                "разрезав пополам. Текста здесь может не хватать — это место переслушать.",
+                "",
+            ]
+        )
+        lines.extend(
+            f"- [{format_timestamp(item.start)}–{format_timestamp(item.end)}] "
+            + (
+                f"распознано частично: {item.readable_text.strip()}"
+                if item.readable_text.strip()
+                else "не распознано"
+            )
+            for item in gaps
+        )
+        lines.append("")
     dropped = sorted(
         (item for item in items if item.kind == "verifier_only"), key=lambda item: item.start
     )
@@ -255,19 +376,28 @@ def _review_markdown(
             for item in dropped
         )
         lines.append("")
-    items = [item for item in items if item.kind not in {"verifier_canonical", "verifier_only"}]
+    items = [
+        item
+        for item in items
+        if item.kind not in {"verifier_canonical", "verifier_only"} | STATUS_KINDS
+    ]
     if not items and not suggestions:
-        if promoted or taken or dropped:
+        if promoted or taken or dropped or gaps or unverified:
             return "\n".join(lines).rstrip() + "\n"
         return "# Требует проверки\n\nРасхождений между гипотезами не найдено.\n"
     lines.extend(_review_sections(items))
     if suggestions:
         lines.extend(["## Возможные термины из словаря", ""])
+        same: dict[tuple[str, str], list[dict[str, Any]]] = {}
         for suggestion in suggestions:
+            key = (normalize_text(suggestion["heard"]), normalize_text(suggestion["canonical"]))
+            same.setdefault(key, []).append(suggestion)
+        for group in same.values():
+            first = group[0]
             lines.append(
-                f"- [{format_timestamp(float(suggestion['start']))}] "
-                f"«{suggestion['heard']}» → «{suggestion['canonical']}» "
-                f"(сходство {float(suggestion['similarity']):.1%})"
+                f"- {_stamps([float(member['start']) for member in group])} "
+                f"«{first['heard']}» → «{first['canonical']}» "
+                f"(сходство {float(first['similarity']):.1%}){_times(len(group))}"
             )
     waiting = list((learned or {}).get("pending", []))
     if waiting:
@@ -464,7 +594,10 @@ def write_bundle(
             # взялась автозамена в чужой по теме записи.
             "glossary": glossary_sources,
             "language_route": route,
+            # Всё, кроме взятого у проверяющей: и мелочь, и окна без сверки.
+            # Оставлено для совместимости; по разделам — `review_counts`.
             "review_count": sum(item.kind != "verifier_canonical" for item in review_items),
+            "review_counts": review_counts(review_items),
             "automatic_correction_count": len(corrections),
             "fillers_removed": fillers_removed,
             "warnings": warnings or [],

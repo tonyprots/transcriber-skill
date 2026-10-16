@@ -16,7 +16,14 @@ _TOKEN = re.compile(
     r"(?<![\w-])(?:э(?:-э)*|а(?:-а)+|и(?:-и)+|м(?:-м)+|м{2,}|х+м+|ам|эм+|uh+|um+|erm|hmm+)(?![\w-])",
     re.IGNORECASE,
 )
-_SENTENCE_END = '.!?…»"'
+_SENTENCE_END = ".!?…"
+# Закрывающая кавычка сама предложение не кончает: «да» э, потом — середина
+# фразы, а «Да!» э, потом — уже новое предложение.
+_CLOSING_QUOTES = '»"”'
+_OWN_SENTENCE = re.compile(r"[.!?…]+\s*")
+# «5 мм» — миллиметры, а не мычание: после числа «мм» остаётся в тексте.
+_NUMBER_BEFORE = re.compile(r"\d\s?$")
+_TAIL = re.compile(r"[,;:]?\s*")
 
 # GigaAM E2E приклеивает тире и кавычки к слову: «пункт— про», «тракет—2»,
 # «блока«Путешествия»» — 55 мест в 18 диктовках Handy (2026-10-04). Между
@@ -45,24 +52,48 @@ def fix_punctuation_spacing(text: str) -> str:
     return out
 
 
+def is_filler_token(word: str) -> bool:
+    """Слово целиком — филлер, который readable убирает («хмм», «э-э», «um»).
+
+    Тот же признак, что у `strip_fillers`, только без контекста: им очередь
+    проверки решает, что спор о слове — спор о паразите.
+    """
+    return _TOKEN.fullmatch(word) is not None
+
+
+def _ends_sentence(text: str) -> bool:
+    core = text.rstrip(_CLOSING_QUOTES)
+    return bool(core) and core[-1] in _SENTENCE_END
+
+
 def strip_fillers(text: str) -> tuple[str, int]:
     """Возвращает текст без филлеров и число убранных."""
     out = text
     removed = 0
+    position = 0
     while True:
-        match = _TOKEN.search(out)
+        match = _TOKEN.search(out, position)
         if match is None:
             break
-        removed += 1
         start, end = match.span()
-        own_sentence = re.match(r"[.!?…]\s*", out[end:])
-        tail = own_sentence or re.match(r"[,;:]?\s*", out[end:])
+        if match.group().casefold() == "мм" and _NUMBER_BEFORE.search(out, 0, start):
+            position = end
+            continue
+        removed += 1
         before = out[:start].rstrip()
-        after = out[end + tail.end():]
-        at_sentence_start = not before or before[-1] in _SENTENCE_END
-        if at_sentence_start and after and after[0].islower():
-            after = after[0].upper() + after[1:]
+        sentence_end = _OWN_SENTENCE.match(out, end)
+        at_sentence_start = not before or _ends_sentence(before)
+        if sentence_end and not at_sentence_start:
+            # «Мы пошли, э. Потом» — точка кончает предложение до филлера, и
+            # уходит только сам филлер с висячей запятой перед ним.
+            before = before.rstrip(",;:—– ") + sentence_end.group().strip()
+            after = out[sentence_end.end():]
+        else:
+            after = out[(sentence_end or _TAIL.match(out, end)).end():]
+            if at_sentence_start and after and after[0].islower():
+                after = after[0].upper() + after[1:]
         out = f"{before} {after}" if before and after else before + after
+        position = len(before)
     return out.strip(), removed
 
 

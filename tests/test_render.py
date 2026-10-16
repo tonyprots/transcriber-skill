@@ -173,3 +173,153 @@ def test_recording_metadata_changes_only_the_manifest(tmp_path: Path) -> None:
     assert manifest["source"]["recorded_at_source"] == "upload_date"
     assert manifest["source"]["chapters"] == [{"start": 0.0, "title": "Вступление"}]
     assert json.loads((plain / "manifest.json").read_text())["source"]["chapters"] is None
+
+
+def _bundle(tmp_path: Path, review_items, segments=None) -> Path:
+    source = tmp_path / "source.wav"
+    source.write_bytes(b"fixture")
+    segments = segments or [Segment(0, 1, "Текст")]
+    return write_bundle(
+        tmp_path / "result",
+        media=MediaInfo(source, 60.0, "pcm_s16le", 16000, 1),
+        hypotheses=[Hypothesis("model", "ru", 0.1, segments)],
+        lexical_segments=segments,
+        readable_segments=segments,
+        review_items=review_items,
+        corrections=[],
+        suggestions=[],
+        mode="max",
+        offline=True,
+    )
+
+
+def test_unavailable_verifier_is_one_status_line_not_a_queue(tmp_path: Path) -> None:
+    """На диктовке Handy 2026-10-10 все 39 мест «Слушать» были «verifier недоступен».
+
+    Окно без сверки — статус прогона, а не место, которое надо слушать.
+    """
+    from audio_transcription.cli import verifier_failure_items
+    from audio_transcription.models import AudioChunk
+
+    chunks = [AudioChunk(index, Path(f"{index}.wav"), index * 2.0, index * 2.0 + 2.0) for index in range(39)]
+    primary = Hypothesis(
+        "gigaam", "ru", 0.1, [],
+        {"chunks": [{"sequence": chunk.sequence, "text": f"фраза {chunk.sequence}"} for chunk in chunks]},
+    )
+    items = verifier_failure_items(chunks, primary, "Изолированный Whisper завершился с ошибкой: OOM\nдлинный хвост")
+    assert {item.kind for item in items} == {"unverified"}
+
+    output = _bundle(tmp_path, items)
+    review = (output / "review-needed.md").read_text(encoding="utf-8")
+    status = [line for line in review.splitlines() if line.startswith("Не сверено")]
+    assert len(status) == 1
+    assert "OOM" in status[0] and "39" in status[0] and "длинный хвост" not in review
+    assert "## Слушать" not in review
+    assert "не найдено" not in review
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["review_counts"]["unverified"] == 39
+    assert manifest["review_counts"]["listen"] == 0
+    # review_count не меняет смысла: в него входит всё, кроме взятого у проверяющей.
+    assert manifest["review_count"] == 39
+
+
+def test_primary_gap_has_its_own_section_above_a_long_queue(tmp_path: Path) -> None:
+    """Провал основной модели стоял на 27–172-м месте «Слушать», ниже 25-й строки."""
+    from audio_transcription.cli import primary_retry_items
+    from audio_transcription.models import ReviewItem
+
+    heavy = [
+        ReviewItem(float(i), float(i) + 1, f"контекст {i}", "", 0.2, (f"а{i} б{i} / в{i} г{i}",), "r", 5)
+        for i in range(30)
+    ]
+    primary = Hypothesis(
+        "gigaam", "ru", 0.1, [],
+        {"chunks": [
+            {"sequence": 0, "start": 100.0, "end": 104.0, "text": "начало фразы", "status": "partial"},
+            {"sequence": 1, "start": 110.0, "end": 112.0, "text": "", "status": "failed"},
+        ]},
+    )
+    gaps = primary_retry_items(primary)
+    assert [item.kind for item in gaps] == ["primary_gap", "primary_gap"]
+
+    output = _bundle(tmp_path, heavy + gaps)
+    review = (output / "review-needed.md").read_text(encoding="utf-8")
+    assert "## Окна без текста основной модели — 2" in review
+    gap_section = review.split("## Окна без текста основной модели")[1].split("## Слушать")[0]
+    assert "[00:01:40.000–00:01:44.000]" in gap_section and "начало фразы" in gap_section
+    assert "[00:01:50.000–00:01:52.000] не распознано" in gap_section
+    assert "## Слушать — 30, здесь первые 25" in review
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["review_counts"] == {
+        "listen": 30, "spelling": 0, "dropped": 0, "minor": 0,
+        "taken": 0, "unverified": 0, "primary_gap": 2,
+    }
+    assert manifest["review_count"] == 32
+
+
+def test_rest_of_a_long_queue_is_named_by_minutes(tmp_path: Path) -> None:
+    from audio_transcription.models import ReviewItem
+
+    items = [
+        ReviewItem(float(i), float(i) + 1, f"контекст {i}", "", 0.2, (f"а{i} б{i} / в{i}",), "r", 3)
+        for i in range(25)
+    ] + [
+        ReviewItem(start, start + 1, "хвост", "", 0.5, (f"х{start:g} / ц",), "r", 1)
+        for start in (130.0, 245.0, 3700.0, 3720.0)
+    ]
+    review = (_bundle(tmp_path, items) / "review-needed.md").read_text(encoding="utf-8")
+    assert "Ещё 4 — в `segments.json` → `review_items`. Они на минутах: 2, 4, 61–62." in review
+
+
+def test_same_pair_is_one_line_with_every_timestamp() -> None:
+    """Повтор уже показанной пары тратил лимит в 25 строк: в подсказках — 45 % строк."""
+    from audio_transcription.models import ReviewItem
+    from audio_transcription.render import _review_markdown
+
+    def item(start: float, left: str, right: str, weight: int = 1, kind: str = "substantive"):
+        return ReviewItem(
+            start, start + 1, f"контекст {start:g}", "", 0.5, (f"{left} / {right}",), "r",
+            weight, kind, left, right,
+        )
+
+    items = [
+        item(10.0, "Сбор", "Сбер"),
+        item(70.0, "сбор", "Сбер,"),
+        item(130.0, "Сбор.", "сбер"),
+        item(40.0, "один", "два", weight=3),
+        item(50.0, "Постгрес", "Postgres", kind="spelling"),
+        item(90.0, "постгрес", "Postgres", kind="spelling"),
+    ]
+    suggestions = [
+        {"start": 5.0, "heard": "постгрес", "canonical": "PostgreSQL", "similarity": 0.9},
+        {"start": 95.0, "heard": "Постгрес", "canonical": "PostgreSQL", "similarity": 0.9},
+    ]
+    text = _review_markdown(items, suggestions)
+    lines = [line for line in text.splitlines() if line.startswith("- [")]
+    assert lines == [
+        "- [00:00:40.000] один / два — в контексте: контекст 40",
+        "- [00:00:10.000], [00:01:10.000], [00:02:10.000] Сбор / Сбер (×3) — в контексте: контекст 10",
+        "- [00:00:50.000], [00:01:30.000] Постгрес / Postgres (×2) — в контексте: контекст 50",
+        "- [00:00:05.000], [00:01:35.000] «постгрес» → «PostgreSQL» (сходство 90.0%) (×2)",
+    ]
+    # Заголовок считает места, а не строки.
+    assert "## Слушать — 4" in text
+    assert "## То же слово записано иначе — 2" in text
+
+
+def test_folded_places_count_against_the_limit_by_lines() -> None:
+    from audio_transcription.models import ReviewItem
+    from audio_transcription.render import REVIEW_SECTION_LIMIT, _review_markdown
+
+    repeated = [
+        ReviewItem(float(i), float(i) + 1, "к", "", 0.5, ("да / нет",), "r", 2, "substantive", "да", "нет")
+        for i in range(10)
+    ]
+    single = [
+        ReviewItem(100.0 + i, 101.0 + i, "к", "", 0.5, (f"а{i} / б{i}",), "r", 1, "substantive", f"а{i}", f"б{i}")
+        for i in range(REVIEW_SECTION_LIMIT)
+    ]
+    text = _review_markdown(repeated + single, [])
+    assert text.count("- [") == REVIEW_SECTION_LIMIT
+    assert f"## Слушать — {10 + REVIEW_SECTION_LIMIT}, здесь первые {10 + REVIEW_SECTION_LIMIT - 1}" in text
+    assert "Ещё 1 — в `segments.json` → `review_items`." in text
