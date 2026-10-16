@@ -259,7 +259,7 @@ def _review_markdown(
     if not items and not suggestions:
         if promoted or taken or dropped:
             return "\n".join(lines).rstrip() + "\n"
-        return "# Требует проверки\n\nРасхождений выше заданного порога не найдено.\n"
+        return "# Требует проверки\n\nРасхождений между гипотезами не найдено.\n"
     lines.extend(_review_sections(items))
     if suggestions:
         lines.extend(["## Возможные термины из словаря", ""])
