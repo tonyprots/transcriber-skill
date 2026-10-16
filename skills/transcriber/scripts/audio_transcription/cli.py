@@ -52,6 +52,7 @@ from .cache import (
     prune as prune_cache,
 )
 from .diarization import drop_ghost_speakers, split_chunks_by_diarization
+from .fluid_models import installed_revision as installed_fluid_revision
 from .glossary import (
     GlossaryEntry,
     apply_glossary,
@@ -529,6 +530,18 @@ def weights_as_keyed(metadata: dict[str, Any], signature: dict[str, str | None])
     """
     weights = metadata.get("weights")
     return not weights or weights.get("revision") in signature.values()
+
+
+def diarization_weights(kind: str, model: str) -> tuple[str, str | None]:
+    """Имя и ревизия весов диаризации: для ключа кэша и проверки перед записью.
+
+    Модели FluidAudio ставятся не в кэш Hub, а в каталог бинарника, и там может
+    лежать набор, который он скачал себе сам: в ключ идёт то, что лежит, а не
+    то, что закреплено. Пока набора нет, воркер поставит закреплённый.
+    """
+    if kind == "fluidaudio":
+        return "FluidAudio Community-1 offline", installed_fluid_revision() or FLUIDAUDIO.revision
+    return model, revision_for_model(model)
 
 
 def loaded_revisions(
@@ -1313,10 +1326,8 @@ def _transcribe(
         diarization: Diarization | None = None
         if args.diarize:
             assert diarization_kind is not None
-            diarization_model = (
-                "FluidAudio Community-1 offline"
-                if diarization_kind == "fluidaudio"
-                else args.diarization_model
+            diarization_model, diarization_revision = diarization_weights(
+                diarization_kind, args.diarization_model
             )
             diarization_key = cache_key(
                 "diarization",
@@ -1325,11 +1336,7 @@ def _transcribe(
                     "source_sha256": source_identity,
                     "backend": diarization_kind,
                     "model": diarization_model,
-                    "revision": (
-                        FLUIDAUDIO.revision
-                        if diarization_kind == "fluidaudio"
-                        else revision_for_model(args.diarization_model)
-                    ),
+                    "revision": diarization_revision,
                     "threshold": diarization_threshold,
                     "chunk_seconds": args.diarization_chunk_seconds,
                     "expected_speakers": args.expected_speakers,
@@ -1362,8 +1369,7 @@ def _transcribe(
                     on_progress=report.windows("Диаризация"),
                 )
                 if not args.no_cache and weights_as_keyed(
-                    diarization.metadata,
-                    {args.diarization_model: revision_for_model(args.diarization_model)},
+                    diarization.metadata, {diarization_model: diarization_revision}
                 ):
                     save_diarization(args.cache_dir, diarization_key, diarization, source_identity)
             if args.expected_speakers is None:

@@ -40,6 +40,16 @@ FluidAudio — бинарник macOS arm64, собранный CI репози�
 суммой (происхождение и проверка — `third-party/fluidaudio/NOTICE.md`). С
 `--offline` их нужно поставить заранее: `prefetch_models.py --diarize`.
 
+Модели лежат в `~/Library/Application Support/FluidAudio/Models/speaker-diarization/`
+— только этот каталог читает `fluidaudiocli process --mode offline`. Сеть
+бинарнику закрыта всегда: адрес реестра моделей подменён на закрытый локальный
+порт, а сам он запускается под `sandbox-exec` без сети, если песочница доступна
+(из чужой песочницы — нет, тогда остаётся только закрытый реестр). Ревизия
+лежащего набора попадает в манифест и в ключ кэша диаризации; набор не с
+закреплённого коммита манифест помечает предупреждением. Соседний каталог
+`speaker-diarization-coreml`, куда скилл по 0.24.1 ставил модели, бинарник не
+читал и скилл больше не трогает: его можно переместить в архив.
+
 ```bash
 "$ASR_PYTHON" "$SKILL_DIR/scripts/transcribe.py" INPUT \
   --mode max --diarize --expected-speakers 2 --output OUTPUT_DIR

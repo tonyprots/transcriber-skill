@@ -13,7 +13,14 @@ from typing import Any
 from .backends import BackendMissing, _PinnedLoad, load_with_hub_fallback
 from .catalog import bundled_binary_problem, fluidaudio_binary_path
 from .diarization import partition_turns
-from .fluid_models import ModelsUnavailable, ensure as ensure_fluid_models, ensure_binary as ensure_fluid_binary
+from . import fluid_models
+from .fluid_models import (
+    ModelsUnavailable,
+    ensure as ensure_fluid_models,
+    ensure_binary as ensure_fluid_binary,
+    no_network_command,
+    offline_environment,
+)
 from .models import Diarization, SpeakerTurn
 from .exiting import exit_after_flush
 
@@ -116,6 +123,39 @@ def _run_sortformer(
     )
 
 
+def _run_binary(
+    command: list[str],
+    environment: dict[str, str],
+    progress_path: Path,
+) -> tuple[int, str, str]:
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=environment,
+    )
+    heartbeat = 0
+    try:
+        while process.poll() is None:
+            heartbeat += 1
+            _write_json(
+                progress_path,
+                {"stage": "inference", "completed": heartbeat, "total": None},
+            )
+            time.sleep(1.0)
+        stdout, stderr = process.communicate()
+    except BaseException:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        raise
+    return process.returncode, stdout, stderr
+
+
 def _run_fluidaudio(
     audio_path: Path,
     config: dict[str, Any],
@@ -127,8 +167,9 @@ def _run_fluidaudio(
     threshold = float(config.get("threshold", 0.7))
     started = time.monotonic()
     _write_json(progress_path, {"stage": "loading", "completed": 0})
-    # Модели ставим сами и с закреплённой ревизии: иначе бинарник скачал бы
-    # последний коммит репозитория, а мерили мы конкретный.
+    # Модели ставим сами и с закреплённой ревизии в каталог, который читает
+    # бинарник: иначе он скачал бы последний коммит репозитория, а мерили мы
+    # конкретный.
     try:
         ensure_fluid_models(offline=bool(config.get("offline", False)))
     except ModelsUnavailable as error:
@@ -149,32 +190,20 @@ def _run_fluidaudio(
     # (experiments/diarization-natural, 2026-10-07).
     if config.get("num_speakers"):
         command += ["--num-speakers", str(int(config["num_speakers"]))]
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    heartbeat = 0
-    try:
-        while process.poll() is None:
-            heartbeat += 1
-            _write_json(
-                progress_path,
-                {"stage": "inference", "completed": heartbeat, "total": None},
-            )
-            time.sleep(1.0)
-        stdout, stderr = process.communicate()
-    except BaseException:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-        raise
-    if process.returncode != 0:
-        detail = stderr.strip() or stdout.strip() or f"код {process.returncode}"
+    # Сеть бинарнику не нужна: модели уже на месте. Закрываем её дважды —
+    # адрес реестра и песочница, — иначе при любом расхождении набора он
+    # молча скачал бы `main`, и `--offline` сеть не запрещал бы.
+    environment = offline_environment()
+    sandboxed = no_network_command(command)
+    network_sandbox = sandboxed != command
+    returncode, stdout, stderr = _run_binary(sandboxed, environment, progress_path)
+    if returncode != 0 and network_sandbox:
+        # Песочница могла помешать сама (политика машины, новая macOS):
+        # один повтор без неё, реестр по-прежнему закрыт.
+        network_sandbox = False
+        returncode, stdout, stderr = _run_binary(command, environment, progress_path)
+    if returncode != 0:
+        detail = stderr.strip() or stdout.strip() or f"код {returncode}"
         raise RuntimeError(f"FluidAudio завершился с ошибкой: {detail}")
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     raw_turns = [
@@ -207,6 +236,8 @@ def _run_fluidaudio(
             "average_quality_score": (
                 sum(quality_scores) / len(quality_scores) if quality_scores else None
             ),
+            "weights": fluid_models.weights_metadata(),
+            "network_sandbox": network_sandbox,
             "raw_turns": [turn.to_dict() for turn in raw_turns],
         },
     )

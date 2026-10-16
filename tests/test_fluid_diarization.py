@@ -39,14 +39,23 @@ def test_ghost_filter_never_removes_every_speaker() -> None:
     assert drop_ghost_speakers(turns, max_seconds=5.0, max_share=1.0) == turns
 
 
-def _fake_fluid(monkeypatch, tmp_path: Path) -> list[list[str]]:
-    commands: list[list[str]] = []
+class _Calls(list):
+    """Команды поддельного fluidaudiocli; окружение каждой — в `environments`."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.environments: list[dict[str, str]] = []
+
+
+def _fake_fluid(monkeypatch, tmp_path: Path, returncodes: tuple[int, ...] = ()) -> _Calls:
+    commands = _Calls()
+    codes = list(returncodes)
 
     class FakeProcess:
-        returncode = 0
-
-        def __init__(self, command, **_kwargs) -> None:
+        def __init__(self, command, **kwargs) -> None:
             commands.append(list(command))
+            commands.environments.append(dict(kwargs.get("env") or {}))
+            self.returncode = codes.pop(0) if codes else 0
             output = Path(command[command.index("--output") + 1])
             output.write_text(
                 json.dumps(
@@ -62,7 +71,7 @@ def _fake_fluid(monkeypatch, tmp_path: Path) -> list[list[str]]:
             )
 
         def poll(self) -> int:
-            return 0
+            return self.returncode
 
         def communicate(self):
             return "", ""
@@ -70,6 +79,9 @@ def _fake_fluid(monkeypatch, tmp_path: Path) -> list[list[str]]:
     monkeypatch.setattr(diarization_worker, "_fluid_binary", lambda _config: tmp_path / "fluidaudiocli")
     monkeypatch.setattr(diarization_worker, "ensure_fluid_models", lambda **_kwargs: "ready")
     monkeypatch.setattr(diarization_worker.subprocess, "Popen", FakeProcess)
+    # Ни песочницы, ни настоящего каталога моделей в тестах.
+    monkeypatch.setattr(diarization_worker, "no_network_command", lambda command: list(command))
+    monkeypatch.setattr(fluid_models, "default_target", lambda: tmp_path / "models")
     return commands
 
 
@@ -87,6 +99,110 @@ def test_expected_speakers_reach_fluidaudio(monkeypatch, tmp_path: Path, num_spe
     assert tail == expected_tail
     assert result.metadata["num_speakers"] == num_speakers
     assert [turn.speakers for turn in result.turns] == [("speaker_1",), ("speaker_2",)]
+
+
+def test_fluidaudio_never_reaches_model_registry(monkeypatch, tmp_path: Path) -> None:
+    # Без набора в своём каталоге бинарник сам качает `main` репозитория:
+    # адрес реестра — закрытый порт, команда — под песочницей без сети.
+    commands = _fake_fluid(monkeypatch, tmp_path)
+    monkeypatch.setattr(diarization_worker, "no_network_command", lambda command: ["sandbox", *command])
+    result = diarization_worker._run_fluidaudio(
+        tmp_path / "audio.wav", {}, tmp_path / "progress.json", tmp_path / "result.json"
+    )
+    assert commands[0][:2] == ["sandbox", str(tmp_path / "fluidaudiocli")]
+    for name in ("MODEL_REGISTRY_URL", "REGISTRY_URL"):
+        assert commands.environments[0][name] == fluid_models.CLOSED_REGISTRY
+    assert result.metadata["network_sandbox"] is True
+
+
+def test_fluidaudio_retries_without_sandbox_once(monkeypatch, tmp_path: Path) -> None:
+    # Песочница сама может помешать (политика машины, новая macOS): повтор
+    # без неё, реестр по-прежнему закрыт.
+    commands = _fake_fluid(monkeypatch, tmp_path, returncodes=(1, 0))
+    monkeypatch.setattr(diarization_worker, "no_network_command", lambda command: ["sandbox", *command])
+    result = diarization_worker._run_fluidaudio(
+        tmp_path / "audio.wav", {}, tmp_path / "progress.json", tmp_path / "result.json"
+    )
+    assert [command[0] for command in commands] == ["sandbox", str(tmp_path / "fluidaudiocli")]
+    assert commands.environments[1]["MODEL_REGISTRY_URL"] == fluid_models.CLOSED_REGISTRY
+    assert result.metadata["network_sandbox"] is False
+
+
+def test_fluidaudio_failure_without_sandbox_is_not_retried(monkeypatch, tmp_path: Path) -> None:
+    commands = _fake_fluid(monkeypatch, tmp_path, returncodes=(1, 0))
+    with pytest.raises(RuntimeError, match="FluidAudio"):
+        diarization_worker._run_fluidaudio(
+            tmp_path / "audio.wav", {}, tmp_path / "progress.json", tmp_path / "result.json"
+        )
+    assert len(commands) == 1
+
+
+def _hub_metadata(target: Path, commit: str, names=fluid_models.FILES) -> None:
+    folder = target / ".cache" / "huggingface" / "download"
+    folder.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        (folder / f"{name}.metadata").write_text(f"{commit}\netag\n1760000000.0\n", encoding="utf-8")
+
+
+def test_fluidaudio_reports_installed_revision(monkeypatch, tmp_path: Path) -> None:
+    _fake_fluid(monkeypatch, tmp_path)
+    _hub_metadata(tmp_path / "models", fluid_models.FLUIDAUDIO.revision)
+    result = diarization_worker._run_fluidaudio(
+        tmp_path / "audio.wav", {}, tmp_path / "progress.json", tmp_path / "result.json"
+    )
+    assert result.metadata["weights"] == {"revision": fluid_models.FLUIDAUDIO.revision, "pinned": True}
+
+
+def test_installed_revision_sources(tmp_path: Path) -> None:
+    ours = tmp_path / "ours"
+    _hub_metadata(ours, "a" * 40)
+    assert fluid_models.installed_revision(ours) == "a" * 40
+    assert fluid_models.weights_metadata(ours) == {"revision": "a" * 40, "pinned": False}
+    # Набор, который бинарник скачал себе сам по 0.24.1.
+    own = tmp_path / "own"
+    own.mkdir()
+    (own / "provenance.json").write_text(json.dumps({"artifact_snapshot": "b" * 40}), encoding="utf-8")
+    assert fluid_models.installed_revision(own) == "b" * 40
+    mixed = tmp_path / "mixed"
+    _hub_metadata(mixed, "a" * 40, names=fluid_models.FILES[:1])
+    _hub_metadata(mixed, "c" * 40, names=fluid_models.FILES[1:])
+    assert fluid_models.installed_revision(mixed) is None
+    assert fluid_models.weights_metadata(mixed) == {"revision": "unknown", "pinned": False}
+    assert fluid_models.installed_revision(tmp_path / "missing") is None
+
+
+def test_models_live_where_binary_reads_them(monkeypatch, tmp_path: Path) -> None:
+    # `fluidaudiocli process --mode offline` читает только этот каталог;
+    # в соседний `speaker-diarization-coreml` он не смотрит.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert fluid_models.default_target() == (
+        tmp_path / "Library" / "Application Support" / "FluidAudio" / "Models" / "speaker-diarization"
+    )
+
+
+def test_ready_needs_offline_set_with_weights(tmp_path: Path) -> None:
+    _complete(tmp_path)
+    assert fluid_models.ready(tmp_path)
+    (tmp_path / "Embedding.mlmodelc" / "weights" / "weight.bin").unlink()
+    assert not fluid_models.ready(tmp_path)
+    assert all("pyannote" not in path and "wespeaker" not in path for path in fluid_models.REQUIRED)
+
+
+def test_no_network_command_probes_sandbox(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    class Probe:
+        def __init__(self, returncode: int) -> None:
+            self.returncode = returncode
+
+    monkeypatch.setattr(fluid_models.os, "access", lambda *_args: True)
+    monkeypatch.setattr(fluid_models.subprocess, "run", lambda command, **_kw: calls.append(command) or Probe(0))
+    wrapped = fluid_models.no_network_command(["fluidaudiocli", "process"])
+    assert wrapped == [fluid_models.SANDBOX_EXEC, "-p", fluid_models.NO_NETWORK_PROFILE, "fluidaudiocli", "process"]
+    assert calls[0][-1] == "/usr/bin/true"
+    # Вложенная песочница (агент в своей) отказывает: запуск без префикса.
+    monkeypatch.setattr(fluid_models.subprocess, "run", lambda command, **_kw: Probe(71))
+    assert fluid_models.no_network_command(["fluidaudiocli"]) == ["fluidaudiocli"]
 
 
 def test_missing_models_offline_is_backend_missing(monkeypatch, tmp_path: Path) -> None:
@@ -138,6 +254,9 @@ def test_download_uses_pinned_revision(monkeypatch, tmp_path: Path) -> None:
     assert fluid_models.ensure(tmp_path / "models") == "downloaded"
     assert calls[0]["revision"] == fluid_models.FLUIDAUDIO.revision
     assert calls[0]["repo_id"] == fluid_models.FLUIDAUDIO.repo
+    assert sorted(calls[0]["allow_patterns"]) == sorted(
+        [*fluid_models.FILES, *(f"{name}.mlmodelc/**" for name in ("Segmentation", "Embedding", "FBank", "PldaRho"))]
+    )
 
 
 class _Response:
@@ -186,3 +305,23 @@ def test_tampered_binary_is_rejected(tmp_path: Path) -> None:
 def test_binary_offline_fails_clearly(tmp_path: Path) -> None:
     with pytest.raises(fluid_models.ModelsUnavailable, match="офлайн"):
         fluid_models.ensure_binary(_skill(tmp_path, b"x"), offline=True, opener=pytest.fail)
+
+
+def test_diarization_cache_key_follows_installed_models(monkeypatch) -> None:
+    from audio_transcription import cli
+
+    monkeypatch.setattr(cli, "installed_fluid_revision", lambda: None)
+    name, revision = cli.diarization_weights("fluidaudio", cli.SORTFORMER.model)
+    assert (name, revision) == ("FluidAudio Community-1 offline", fluid_models.FLUIDAUDIO.revision)
+    pinned = {"weights": {"revision": fluid_models.FLUIDAUDIO.revision, "pinned": True}}
+    assert cli.weights_as_keyed(pinned, {name: revision})
+    # Набор, который бинарник скачал себе сам с другого коммита, — свой ключ.
+    monkeypatch.setattr(cli, "installed_fluid_revision", lambda: "b" * 40)
+    name, revision = cli.diarization_weights("fluidaudio", cli.SORTFORMER.model)
+    assert revision == "b" * 40
+    assert cli.weights_as_keyed({"weights": {"revision": "b" * 40, "pinned": False}}, {name: revision})
+    assert not cli.weights_as_keyed({"weights": {"revision": "unknown", "pinned": False}}, {name: revision})
+    assert cli.diarization_weights("sortformer", cli.SORTFORMER.model) == (
+        cli.SORTFORMER.model,
+        cli.revision_for_model(cli.SORTFORMER.model),
+    )

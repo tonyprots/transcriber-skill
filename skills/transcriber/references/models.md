@@ -71,7 +71,7 @@ GigaAM Multilingual Large и Qwen3-ASR исключены из рабочего 
 
 ## Диаризация
 
-По умолчанию при любом числе голосов на macOS arm64 работает FluidAudio Offline Community-1 с VBx-clustering, threshold 0,7. `--expected-speakers N` передаётся ему как `--num-speakers N`; без него скилл снимает призрачные голоса (меньше 5 с и меньше 3% речи). CoreML-модели хранятся в `~/Library/Application Support/FluidAudio/Models/` и ставятся сами при первом `--diarize` с закреплённой ревизии.
+По умолчанию при любом числе голосов на macOS arm64 работает FluidAudio Offline Community-1 с VBx-clustering, threshold 0,7. `--expected-speakers N` передаётся ему как `--num-speakers N`; без него скилл снимает призрачные голоса (меньше 5 с и меньше 3% речи). CoreML-модели хранятся в `~/Library/Application Support/FluidAudio/Models/speaker-diarization/` — там их читает бинарник — и ставятся сами при первом `--diarize` с закреплённой ревизии; сеть самому бинарнику закрыта (`references/diarization.md`).
 
 Замер 2026-10-07 на живых записях (`experiments/diarization-natural/REPORT.md`, не опубликовано), DER с допуском ±0,25 с:
 
