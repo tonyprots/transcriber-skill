@@ -66,9 +66,18 @@ def test_pack_speech_spans_hard_cut_does_not_repeat_the_seam() -> None:
     assert packed == [(12_800, 336_000), (336_000, 403_200)]
 
 
+def test_pack_speech_spans_group_exactly_at_the_limit_stays_whole() -> None:
+    # Группа длиной ровно в лимит — ещё одно окно; на 1 отсчёт длиннее — два.
+    exact = audio.pack_speech_spans([(0, 160_000), (165_120, 320_000)], 500_000, sample_rate=16_000, max_seconds=20)
+    assert exact == [(0, 323_200)]
+    longer = audio.pack_speech_spans([(0, 160_000), (165_120, 320_001)], 500_000, sample_rate=16_000, max_seconds=20)
+    assert longer == [(0, 162_560), (162_560, 323_201)]
+
+
 def test_pack_speech_spans_never_overlap_and_keep_the_groups() -> None:
     import random
 
+    rate, pad, limit = 16_000, 3_200, 320_000
     rng = random.Random(20261017)
     for _ in range(2_000):
         total = rng.randint(16_000, 2_000_000)
@@ -82,15 +91,31 @@ def test_pack_speech_spans_never_overlap_and_keep_the_groups() -> None:
             cursor = end
         if not spans:
             continue
-        packed = audio.pack_speech_spans(spans, total, sample_rate=16_000)
-        bare = audio.pack_speech_spans(spans, total, sample_rate=16_000, pad_seconds=0.0)
-        assert len(packed) == len(bare)
-        for (start, end), (bare_start, bare_end) in zip(packed, bare):
-            # Речь окна целиком внутри, запас не больше 0,2 с, края в записи.
-            assert 0 <= start <= bare_start and bare_end <= end <= total
-            assert bare_start - start <= 3_200 and end - bare_end <= 3_200
+        # Группы считаются здесь заново: склейка, пока группа не длиннее лимита.
+        groups = [list(spans[0])]
+        for start, end in spans[1:]:
+            if end - groups[-1][0] <= limit:
+                groups[-1][1] = end
+            else:
+                groups.append([start, end])
+        packed = audio.pack_speech_spans(spans, total, sample_rate=rate)
+        assert len(packed) == len(groups)
+        for index, ((start, end), (group_start, group_end)) in enumerate(zip(packed, groups)):
+            # Слева: полный запас, если пауза до предыдущей группы не короче
+            # двух запасов, иначе стык ровно посередине паузы.
+            if index == 0:
+                assert start == max(0, group_start - pad)
+            else:
+                gap = group_start - groups[index - 1][1]
+                assert start == (group_start - pad if gap >= 2 * pad else groups[index - 1][1] + gap // 2)
+            if index == len(groups) - 1:
+                assert end == min(total, group_end + pad)
+            else:
+                gap = groups[index + 1][0] - group_end
+                assert end == (group_end + pad if gap >= 2 * pad else group_end + gap // 2)
         for (_, end), (start, _) in zip(packed, packed[1:]):
             assert end <= start
+
 
 def test_add_quiet_onsets_moves_start_back_but_not_into_neighbour() -> None:
     # Тихая фраза начинается через 0,6 с после первого окна, основной проход
