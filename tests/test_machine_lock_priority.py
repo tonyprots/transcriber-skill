@@ -11,6 +11,10 @@ unittest` гоняет файл и без conftest.
 """
 from __future__ import annotations
 
+import argparse
+import contextlib
+import errno
+import io
 import json
 import os
 import subprocess
@@ -19,6 +23,7 @@ import tempfile
 import threading
 import time
 import unittest
+import wave
 from pathlib import Path
 from unittest import mock
 
@@ -347,6 +352,126 @@ class WatchdogTest(_Folder):
         self.assertFalse((self.dir / "pause").exists())
 
 
+def _denied(real_open, path, mode, *args, **kwargs):
+    raise PermissionError(errno.EACCES, "Permission denied", str(path))
+
+
+def _disk_full(real_open, path, mode, *args, **kwargs):
+    """Как на полном диске: файл создан, а запись в него падает."""
+    handle = real_open(path, mode, *args, **kwargs)
+
+    class Full:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc) -> None:
+            handle.close()
+
+        def write(self, _data):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        def close(self) -> None:
+            handle.close()
+
+    return Full()
+
+
+class PauseMarkFailureTest(_Folder):
+    """Метку паузы записать не вышло: машину не отдаём, watchdog работает.
+
+    Ревью `--priority`: при сбое записи родитель крутился вхолостую с
+    обнулённым на каждом шаге отсчётом watchdog, а полный диск оставлял
+    пустой `pause`, на котором воркер стоял, хотя машину никто не отдавал.
+    """
+
+    def wait_with_broken_pause(self, write) -> tuple[bool, list[str], str]:
+        from audio_transcription import isolated
+
+        clock = [0.0]
+        given: list[str] = []
+
+        class Process:
+            returncode = None
+            polls = 0
+
+            def poll(self):
+                # Предохранитель: холостой цикл кончается «успехом», который
+                # тест и ловит, а не висит вечно.
+                self.polls += 1
+                if self.returncode is None and self.polls > 1000:
+                    self.returncode = 0
+                return self.returncode
+
+            def terminate(self) -> None:
+                self.returncode = -15
+
+            def kill(self) -> None:
+                self.returncode = -9
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        real_open = Path.open
+
+        def broken_open(path, mode="r", *args, **kwargs):
+            if "w" not in mode:
+                return real_open(path, mode, *args, **kwargs)
+            return write(real_open, path, mode, *args, **kwargs)
+
+        def give_way() -> float:
+            given.append("give_way")
+            return 0.0
+
+        errors = io.StringIO()
+        # Голосовое ждёт всё время, прогресса нет: воркер и правда завис.
+        with mock.patch.object(isolated.time, "monotonic", lambda: clock[0]), \
+                mock.patch.object(isolated.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)), \
+                mock.patch.object(isolated.machine_lock, "priority_waiting", lambda: True), \
+                mock.patch.object(isolated.machine_lock, "give_way", give_way), \
+                mock.patch.object(Path, "open", broken_open), \
+                contextlib.redirect_stderr(errors):
+            done = isolated.wait_for_progress(Process(), self.dir / "progress.json",
+                                              stall_timeout_seconds=1.0, poll_seconds=0.1)
+        return done, given, errors.getvalue()
+
+    def check(self, write) -> None:
+        done, given, errors = self.wait_with_broken_pause(write)
+        self.assertFalse(done, "watchdog выключен, пока голосовое ждёт, а метки нет")
+        self.assertEqual(given, [], "воркер не встал — машину отдавать нельзя")
+        self.assertEqual(errors.count("Внимание"), 1, errors)
+        self.assertEqual(sorted(path.name for path in self.dir.iterdir()), [],
+                         "ни метки паузы, ни временного файла")
+
+    def test_unwritable_pause_keeps_the_machine_and_the_watchdog(self) -> None:
+        self.check(_denied)
+
+    def test_full_disk_leaves_no_empty_pause(self) -> None:
+        self.check(_disk_full)
+
+
+# Подставной mlx_audio.vad для diarization_worker: Sortformer без весов и MLX.
+# Каждый чанк отмечается в журнале рядом со звуком в момент, когда воркер его
+# попросил.
+SORTFORMER_STUB = """
+from pathlib import Path
+from types import SimpleNamespace
+
+
+class Model:
+    def generate_stream(self, audio_path, **_options):
+        journal = Path(audio_path).with_name("chunks.log")
+        for index in range(1, 4):
+            with journal.open("a", encoding="utf-8") as handle:
+                handle.write(f"chunk-{index}\\n")
+            turn = SimpleNamespace(start=float(index - 1), end=float(index), speaker=index % 2)
+            yield SimpleNamespace(segments=[turn])
+
+
+def load(_name):
+    return Model()
+"""
+
+
 class WorkerPauseTest(_Folder):
     HOLD = (
         "import sys; from pathlib import Path; "
@@ -355,7 +480,7 @@ class WorkerPauseTest(_Folder):
         "hold_while_paused(Path(sys.argv[1]), poll_seconds=0.01); print('resumed')"
     )
 
-    def run_hold(self, owner: int) -> subprocess.Popen:
+    def run_hold(self, owner: int | str) -> subprocess.Popen:
         progress = self.dir / "progress.json"
         (self.dir / "pause").write_text(str(owner), encoding="utf-8")
         process = subprocess.Popen(
@@ -397,6 +522,62 @@ class WorkerPauseTest(_Folder):
         self.assertEqual(worker.returncode, 2)
         self.assertIn("Неизвестный ASR-бэкенд", errors)
 
+    def test_sortformer_worker_stops_after_its_chunk(self) -> None:
+        # Настоящий diarization_worker.py с подставным mlx_audio: модель
+        # отдаёт чанки по одному и отмечает в журнале каждый. После первого
+        # воркер обязан встать на точке паузы, а не просить следующий.
+        stub = self.dir / "stub" / "mlx_audio"
+        stub.mkdir(parents=True)
+        (stub / "__init__.py").write_text("", encoding="utf-8")
+        (stub / "vad.py").write_text(SORTFORMER_STUB, encoding="utf-8")
+        job = self.dir / "job"
+        job.mkdir()
+        audio = job / "prepared.wav"
+        with wave.open(str(audio), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(16000)
+            handle.writeframes(b"\0\0" * 16000)
+        (job / "request.json").write_text(json.dumps({
+            "backend": "sortformer", "audio_path": str(audio),
+            "config": {"model_name": "stub/sortformer", "offline": True},
+        }), encoding="utf-8")
+        (job / "pause").write_text(str(os.getpid()), encoding="utf-8")
+        environment = _environment()
+        environment["PYTHONPATH"] = os.pathsep.join([str(stub.parent), environment["PYTHONPATH"]])
+        worker = subprocess.Popen(
+            [sys.executable, "-m", "audio_transcription.diarization_worker",
+             str(job / "request.json"), str(job / "result.json"), str(job / "progress.json")],
+            env=environment, stderr=subprocess.PIPE, text=True,
+        )
+        self.processes.append(worker)
+        chunks = job / "chunks.log"
+
+        def at_first_chunk() -> bool:
+            try:
+                return json.loads((job / "progress.json").read_text(encoding="utf-8")).get("completed") == 1
+            except (OSError, ValueError):
+                return False
+
+        _wait_for(at_first_chunk, what="воркер отметил первый чанк")
+        time.sleep(0.3)
+        self.assertIsNone(worker.poll(), "на точке паузы воркер стоит")
+        self.assertEqual(chunks.read_text(encoding="utf-8").split(), ["chunk-1"],
+                         "следующий чанк воркер просит только после паузы")
+        (job / "pause").unlink()
+        _, errors = worker.communicate(timeout=60)
+        self.assertEqual(worker.returncode, 0, errors)
+        self.assertEqual(chunks.read_text(encoding="utf-8").split(), ["chunk-1", "chunk-2", "chunk-3"])
+        self.assertEqual(len(json.loads((job / "result.json").read_text(encoding="utf-8"))["turns"]), 3)
+
+    def test_empty_pause_is_not_a_pause(self) -> None:
+        # Такую метку оставлял сбой записи на полном диске: родитель машину не
+        # отдавал, а воркер стоял на ней до конца ожидания.
+        worker = self.run_hold("")
+        output, _ = worker.communicate(timeout=30)
+        self.assertEqual(worker.returncode, 0)
+        self.assertIn("resumed", output)
+
     def test_orphaned_worker_exits_instead_of_waiting_forever(self) -> None:
         # В метке чужой pid — так видит её воркер, чей родитель умер.
         worker = self.run_hold(1)
@@ -422,6 +603,21 @@ class PriorityFlagTest(unittest.TestCase):
         args = handy_watch.parse_args(["--python", "py", "--transcribe", "t.py", "--output-root", "out"])
         with mock.patch.object(handy_watch.subprocess, "Popen") as popen:
             handy_watch.transcribe(Path("handy-1.wav"), Path("out/x"), Path("out/x.txt"), args, None)
+        self.assertIn("--priority", popen.call_args.args[0])
+
+    def test_agent_own_run_runs_with_priority(self) -> None:
+        # Наблюдатель запись не взял, и handy_result.py считает её сам: агент
+        # ждёт этот текст сейчас, как ждут текст диктовки.
+        import handy_result
+
+        args = argparse.Namespace(python="py", transcribe="t.py", mode="max", language="ru")
+        with tempfile.TemporaryDirectory() as folder:
+            out = Path(folder) / "2026-10-17-1200-handy-1"
+            with mock.patch.object(handy_result.subprocess, "Popen") as popen, \
+                    mock.patch.object(handy_result, "write_marker"), \
+                    mock.patch.object(handy_result, "run_log", lambda _out: Path(folder) / "run.log"):
+                handy_result.start_own_run(Path("handy-1.wav"), out, args)
+            popen.call_args.kwargs["stdout"].close()
         self.assertIn("--priority", popen.call_args.args[0])
 
 
