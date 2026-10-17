@@ -685,7 +685,7 @@ def test_probe_keeps_chapters_and_a_short_description(yt_dlp) -> None:
         {"start": 95.0, "title": "Архитектура"},
     )
     assert media.description.startswith("Слайды: https://example.com\n")
-    assert len(media.description) <= fetching.DESCRIPTION_LIMIT + 1
+    assert len(media.description) <= fetching.DESCRIPTION_LIMIT
     assert media.description.endswith("…")
     assert "chapters" not in media.summary(), "опрос остаётся компактным"
 

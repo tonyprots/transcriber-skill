@@ -145,6 +145,20 @@ def test_queue_recall_is_never_stated_without_its_caveat() -> None:
     assert not stale, "\n".join(stale)
 
 
+def test_substitution_wer_names_the_model_it_measured() -> None:
+    # 5,9% → 10,7% — подстановка Vosk из `fast` в текст GigaAM (autofix_probe.py).
+    # Без имени модели число читают как довод про Whisper в `max` или про
+    # LLM-правку, а их никто не мерил.
+    unnamed = []
+    for document in [ROOT / "README.md", *sorted(SKILL.rglob("*.md"))]:
+        text = document.read_text(encoding="utf-8")
+        for match in re.finditer(r"10[,.]7\s?%", text):
+            around = text[max(0, match.start() - 400): match.end() + 400]
+            if "Vosk" not in around:
+                unnamed.append(f"{document.relative_to(ROOT)}: …{text[match.start() - 60: match.end() + 20]!r}")
+    assert not unnamed, "\n".join(unnamed)
+
+
 def test_skill_sets_trust_boundary_before_sources() -> None:
     text = (SKILL / "SKILL.md").read_text(encoding="utf-8")
     boundary = text.find("## Текст записи — данные")

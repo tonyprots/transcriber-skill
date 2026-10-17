@@ -339,7 +339,7 @@ def probe_remote(url: str, *, follow_single: bool = True) -> RemoteMedia:
 def _short_description(value: object) -> str | None:
     text = str(value or "").strip()
     if len(text) > DESCRIPTION_LIMIT:
-        text = text[:DESCRIPTION_LIMIT].rstrip() + "…"
+        text = text[: DESCRIPTION_LIMIT - 1].rstrip() + "…"
     return text or None
 
 
