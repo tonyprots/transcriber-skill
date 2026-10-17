@@ -165,20 +165,35 @@ def pack_speech_spans(
     max_seconds: float = 20.0,
     pad_seconds: float = 0.2,
 ) -> list[tuple[int, int]]:
-    """Пакует соседние VAD-интервалы в общие для всех ASR контекстные окна."""
+    """Пакует соседние VAD-интервалы в общие для всех ASR контекстные окна.
+
+    Запас по краям не заходит к соседу: конец окна — не дальше середины паузы
+    до следующего, начало — не раньше конца предыдущего. Запас, добавленный к
+    каждому окну отдельно, перекрывал соседей на стыках короче 0,4 с, а на
+    жёстком разрезе Silero по лимиту 20 с слово через стык попадало в оба окна
+    и повторялось в тексте (19 стыков из 34). Замер 2026-10-17
+    (`drafts/2026-10-17-quality/seams/`): YouTube ru 1468 → 1444 ошибок на
+    12112 слов, английский 158 → 156 на 3944, корпус README без изменений.
+    """
     if not spans:
         return []
     limit = round(max_seconds * sample_rate)
     pad = round(pad_seconds * sample_rate)
-    packed: list[tuple[int, int]] = []
+    groups: list[tuple[int, int]] = []
     group_start, group_end = spans[0]
     for start, end in spans[1:]:
         if end - group_start <= limit:
             group_end = end
             continue
-        packed.append((max(0, group_start - pad), min(waveform_samples, group_end + pad)))
+        groups.append((group_start, group_end))
         group_start, group_end = start, end
-    packed.append((max(0, group_start - pad), min(waveform_samples, group_end + pad)))
+    groups.append((group_start, group_end))
+    packed: list[tuple[int, int]] = []
+    for index, (start, end) in enumerate(groups):
+        last = index == len(groups) - 1
+        right = waveform_samples if last else (end + groups[index + 1][0]) // 2
+        left = packed[-1][1] if packed else 0
+        packed.append((max(left, start - pad), min(right, end + pad)))
     return packed
 
 

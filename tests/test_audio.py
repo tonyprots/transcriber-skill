@@ -47,6 +47,51 @@ def test_pack_speech_spans_keeps_context_and_respects_limit() -> None:
     assert packed == [(0, 83_200), (396_800, 433_200)]
 
 
+
+def test_pack_speech_spans_meet_in_the_middle_of_a_short_pause() -> None:
+    # Пауза 0,32 с короче двух запасов: окна сходятся на её середине, а не
+    # заходят друг в друга на 0,08 с.
+    packed = audio.pack_speech_spans(
+        [(0, 160_000), (165_120, 200_000)], 500_000, sample_rate=16_000, max_seconds=10, pad_seconds=0.2
+    )
+    assert packed == [(0, 162_560), (162_560, 203_200)]
+
+
+def test_pack_speech_spans_hard_cut_does_not_repeat_the_seam() -> None:
+    # Silero режет сплошную речь по лимиту без паузы: запас по ту сторону
+    # разреза давал слово стыка обоим окнам.
+    packed = audio.pack_speech_spans(
+        [(16_000, 336_000), (336_000, 400_000)], 500_000, sample_rate=16_000, max_seconds=20, pad_seconds=0.2
+    )
+    assert packed == [(12_800, 336_000), (336_000, 403_200)]
+
+
+def test_pack_speech_spans_never_overlap_and_keep_the_groups() -> None:
+    import random
+
+    rng = random.Random(20261017)
+    for _ in range(2_000):
+        total = rng.randint(16_000, 2_000_000)
+        cursor, spans = 0, []
+        while True:
+            start = cursor + rng.choice((0, rng.randint(0, 8_000), rng.randint(0, 64_000)))
+            end = start + rng.randint(1, 400_000)
+            if end > total:
+                break
+            spans.append((start, end))
+            cursor = end
+        if not spans:
+            continue
+        packed = audio.pack_speech_spans(spans, total, sample_rate=16_000)
+        bare = audio.pack_speech_spans(spans, total, sample_rate=16_000, pad_seconds=0.0)
+        assert len(packed) == len(bare)
+        for (start, end), (bare_start, bare_end) in zip(packed, bare):
+            # Речь окна целиком внутри, запас не больше 0,2 с, края в записи.
+            assert 0 <= start <= bare_start and bare_end <= end <= total
+            assert bare_start - start <= 3_200 and end - bare_end <= 3_200
+        for (_, end), (start, _) in zip(packed, packed[1:]):
+            assert end <= start
+
 def test_add_quiet_onsets_moves_start_back_but_not_into_neighbour() -> None:
     # Тихая фраза начинается через 0,6 с после первого окна, основной проход
     # услышал её на 1,9 с позже — начало сдвигается к ней.
