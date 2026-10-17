@@ -11,8 +11,8 @@ sys.path.insert(0, str(HANDY))
 
 import handy_watch  # noqa: E402
 
-EARLY = "Из российских — это Bitrik4, VK Work Space"
-FINAL = "Из российских — это Битрикс24, VK WorkSpace"
+EARLY = "Список покупок — это Bitrik4, Air Table"
+FINAL = "Список покупок — это Битрикс24, Airtable"
 
 
 @pytest.fixture

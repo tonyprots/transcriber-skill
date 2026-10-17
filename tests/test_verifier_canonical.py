@@ -1,7 +1,7 @@
 """Канон словаря у проверяющей закрывает спорное место — но только узко.
 
-Примеры — из настоящих диктовок 2026-09/10: верные замены и ложные, которые
-правило обязано пропустить.
+Ослышки — из настоящих диктовок 2026-09/10, фразы вокруг них выдуманы: верные
+замены и ложные, которые правило обязано пропустить.
 """
 
 from audio_transcription.glossary import GlossaryEntry, take_verifier_canonicals
@@ -32,10 +32,10 @@ def run(primary: str, verifier: str, entries=ENTRIES):
 
 def test_misheard_term_takes_verifier_canonical():
     segments, items, taken = run(
-        "Так, коротко. Макросов собрал чат подписку.",
-        "Так, коротко. Microsoft собрал чат подписку.",
+        "Ладно, кратко. Макросов выпустил новый редактор.",
+        "Ладно, кратко. Microsoft выпустил новый редактор.",
     )
-    assert segments[0].text == "Так, коротко. Microsoft собрал чат подписку."
+    assert segments[0].text == "Ладно, кратко. Microsoft выпустил новый редактор."
     assert [(c.before, c.after, c.rule) for c in taken] == [
         ("Макросов", "Microsoft", "verifier_canonical")
     ]
@@ -44,26 +44,26 @@ def test_misheard_term_takes_verifier_canonical():
 
 def test_each_occurrence_is_fixed_once_and_punctuation_kept():
     segments, _, taken = run(
-        "Открыть MC к нашим сервисам, и для MC плагинов.",
-        "Открыть MCP к нашим сервисам, и для MCP плагинов.",
+        "Подключить MC к заметкам, и для MC тестов.",
+        "Подключить MCP к заметкам, и для MCP тестов.",
     )
-    assert segments[0].text == "Открыть MCP к нашим сервисам, и для MCP плагинов."
+    assert segments[0].text == "Подключить MCP к заметкам, и для MCP тестов."
     assert len(taken) == 2
 
 
 def test_wider_verifier_span_still_replaces_only_the_word():
     segments, _, _ = run(
-        "сентябрьское обновление Capile звучит плохо",
-        "сентябрьское обновление Copilot в офис звучит плохо",
+        "вчерашняя версия Capile работает медленно",
+        "вчерашняя версия Copilot в браузере работает медленно",
     )
-    assert segments[0].text == "сентябрьское обновление Copilot звучит плохо"
+    assert segments[0].text == "вчерашняя версия Copilot работает медленно"
 
 
 def test_wide_primary_span_is_left_alone():
     # Права основная: OpenAI Dots — продукт, Whisper услышал «Docs».
     segments, items, taken = run(
-        "Манус больше относится к истории к Dots, вот этим всем.",
-        "Манус больше относится к Docs и вот этим всем.",
+        "Отчёт больше относится к истории к Dots, вот этим всем.",
+        "Отчёт больше относится к Docs и вот этим всем.",
     )
     assert taken == []
     assert "Dots" in segments[0].text
@@ -71,12 +71,12 @@ def test_wide_primary_span_is_left_alone():
 
 
 def test_dissimilar_sound_is_left_alone():
-    _, _, taken = run("Конкуренция Bita 4 СберАстра.", "Конкуренция Bita 4 Сбер Астра.")
+    _, _, taken = run("Купили Nova 4 СберАстра.", "Купили Nova 4 Сбер Астра.")
     assert taken == []
 
 
 def test_untrusted_entry_is_not_taken():
-    _, _, taken = run("к Apsidian как бэкенд", "к Obsidian как бэкенд")
+    _, _, taken = run("заметки в Apsidian лежат", "заметки в Obsidian лежат")
     assert taken == []
 
 
@@ -89,8 +89,8 @@ def test_primary_word_that_is_another_term_is_kept():
 
 def test_report_lists_taken_terms_and_hides_them_from_queue():
     _, items, taken = run(
-        "Так, коротко. Макросов собрал чат подписку.",
-        "Так, коротко. Microsoft собрал чат подписку.",
+        "Ладно, кратко. Макросов выпустил новый редактор.",
+        "Ладно, кратко. Microsoft выпустил новый редактор.",
     )
     text = _review_markdown(items, [], None, taken)
     assert "## Взято у проверяющей — 1" in text
@@ -104,19 +104,19 @@ def test_plain_corrections_do_not_appear_in_taken_section():
 
 
 def test_preposition_next_to_the_mishearing_survives():
-    segments, _, taken = run("добавь, как в ВКрософт борется", "добавь, как Microsoft борется")
+    segments, _, taken = run("напиши, как в ВКрософт работает", "напиши, как Microsoft работает")
     assert [c.before for c in taken] == ["ВКрософт"]
-    assert segments[0].text == "добавь, как в Microsoft борется"
+    assert segments[0].text == "напиши, как в Microsoft работает"
 
 
 def test_canonical_goes_to_the_disputed_place_not_the_first_match():
     # «так» — частое слово: оно стоит в сегменте и раньше спорного места.
     # Ревью 2026-10-12: канон вставал в первое вхождение, спорное оставалось.
     segments, items, taken = run(
-        "я так думаю, поэтому открой так и посмотри таблицу",
-        "я так думаю, поэтому открой Docs и посмотри таблицу",
+        "я так считаю, поэтому открой так и проверь таблицу",
+        "я так считаю, поэтому открой Docs и проверь таблицу",
     )
-    assert segments[0].text == "я так думаю, поэтому открой Docs и посмотри таблицу"
+    assert segments[0].text == "я так считаю, поэтому открой Docs и проверь таблицу"
     assert [(c.before, c.after) for c in taken] == [("так", "Docs")]
 
 

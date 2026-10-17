@@ -1,7 +1,7 @@
 """Название, которое основная модель уронила, а проверяющая услышала.
 
 Текст не меняется (на эталоне вставки вредят), место поднимается в отдельный
-раздел отчёта. Примеры — из диктовок Handy 2026-10-02.
+раздел отчёта. Типы ошибок — из диктовок Handy 2026-10-02, фразы выдуманы.
 """
 
 from audio_transcription.glossary import GlossaryEntry, mark_verifier_only_terms
@@ -26,16 +26,16 @@ def kinds(found):
 
 def test_dropped_latin_name_is_marked():
     found = items(
-        "И в том числе из-за этого понижает лимиты для платных пользователей.",
-        "И в том числе из-за этого OpenAI понижает лимиты для платных пользователей.",
+        "И поэтому на прошлой неделе снова поменял цены для новых клиентов.",
+        "И поэтому на прошлой неделе OpenAI снова поменял цены для новых клиентов.",
     )
     assert ("verifier_only", "OpenAI") in kinds(found)
 
 
 def test_dropped_glossary_term_is_marked_without_latin():
     found = items(
-        "Вот заголовок, что это значит для нас.",
-        "Вот заголовок, что это значит для нас в Яндекс 360.",
+        "Вот расписание, оно лежит в календаре.",
+        "Вот расписание, оно лежит в календаре в Яндекс 360.",
         latin=False,
     )
     assert any(kind == "verifier_only" for kind, _ in kinds(found))
@@ -65,13 +65,13 @@ def test_replaced_word_is_not_marked():
 
 def test_report_puts_dropped_names_on_top_and_keeps_text():
     found = items(
-        "И в том числе из-за этого понижает лимиты.",
-        "И в том числе из-за этого OpenAI понижает лимиты.",
+        "И поэтому на прошлой неделе снова поменял цены.",
+        "И поэтому на прошлой неделе OpenAI снова поменял цены.",
     )
     text = _review_markdown(found, [])
     assert "## Возможно, выпало из текста — 1" in text
     assert "## Слушать" not in text
-    assert "«OpenAI» — в контексте: … том числе из-за этого ∅ понижает лимиты." in text
+    assert "«OpenAI» — в контексте: … поэтому на прошлой неделе ∅ снова поменял цены." in text
 
 
 def test_long_sections_are_cut_with_pointer():

@@ -3,20 +3,20 @@ from audio_transcription.models import Segment
 
 
 def test_filler_at_sentence_start_is_removed_and_next_word_capitalized() -> None:
-    assert strip_fillers("Э-э-э, я вообще зачем это делал?") == ("Я вообще зачем это делал?", 1)
-    assert strip_fillers("А-а, у него все процессы стоят.") == ("У него все процессы стоят.", 1)
-    assert strip_fillers("Хмм, твоя жизнь довольно разнообразная.") == ("Твоя жизнь довольно разнообразная.", 1)
+    assert strip_fillers("Э-э-э, мы вообще куда идём?") == ("Мы вообще куда идём?", 1)
+    assert strip_fillers("А-а, у них все окна открыты.") == ("У них все окна открыты.", 1)
+    assert strip_fillers("Хмм, эта дорога довольно длинная.") == ("Эта дорога довольно длинная.", 1)
 
 
 def test_filler_as_own_sentence_and_at_end() -> None:
-    assert strip_fillers("Все процессы стоят. Хмм. Да.") == ("Все процессы стоят. Да.", 1)
+    assert strip_fillers("Все окна открыты. Хмм. Да.") == ("Все окна открыты. Да.", 1)
     assert strip_fillers("Нужно завести аккаунт. Э-э-э") == ("Нужно завести аккаунт.", 1)
-    assert strip_fillers("подчинялись и-и-и ну и перешла в маркетинг") == ("подчинялись ну и перешла в маркетинг", 1)
+    assert strip_fillers("собрались и-и-и ну и пошли в парк") == ("собрались ну и пошли в парк", 1)
 
 
 def test_real_words_and_single_conjunctions_survive() -> None:
-    text = "а эмоции её такие, что вы предательница, и амбиции, и мама, uh-huh, um"
-    assert strip_fillers(text) == ("а эмоции её такие, что вы предательница, и амбиции, и мама, uh-huh,", 1)
+    text = "а погода там такая, что вы удивитесь, и солнце, и море, uh-huh, um"
+    assert strip_fillers(text) == ("а погода там такая, что вы удивитесь, и солнце, и море, uh-huh,", 1)
     assert strip_fillers("Ну, это стандартно для любой работы.") == ("Ну, это стандартно для любой работы.", 0)
 
 
@@ -34,8 +34,8 @@ def test_segment_of_only_fillers_is_dropped_and_others_kept() -> None:
 
 
 def test_glued_dash_and_quotes_get_spaces() -> None:
-    assert fix_punctuation_spacing("Текущий тракет—2 млрд, где BT— это") == (
-        "Текущий тракет — 2 млрд, где BT — это"
+    assert fix_punctuation_spacing("Текущий план—3 шага, где первый— это") == (
+        "Текущий план — 3 шага, где первый — это"
     )
     assert fix_punctuation_spacing("верстка блока«Путешествия»слово") == (
         "верстка блока «Путешествия» слово"
@@ -58,7 +58,7 @@ def test_filler_inside_sentence_keeps_the_sentence_end() -> None:
     """Точка после филлера посреди фразы — конец предыдущего предложения.
 
     Раньше она уходила вместе с филлером, и два предложения сливались:
-    «предпринимателя, хмм. Тратить» → «предпринимателя, Тратить» (корпус Handy).
+    «до вокзала, хмм. Потом» → «до вокзала, Потом» (так было в диктовках Handy).
     """
     assert strip_fillers("Мы пошли, э. Потом вернулись.") == ("Мы пошли. Потом вернулись.", 1)
     assert strip_fillers("Ну и всё, э.") == ("Ну и всё.", 1)
